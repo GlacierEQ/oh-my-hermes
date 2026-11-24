@@ -142,14 +142,19 @@ _SCHEDULE_TERMS = {
     "recurring": ("cron", "schedule", "scheduled", "recurring", "repeat", "heartbeat", "정기", "예약", "반복", "스케줄", "定期", "计划", "定时"),
 }
 _DELIVERY_SURFACES = {
+    "bot-chat": ("bot-chat", "bot chat"),
     "discord": ("discord", "디스코드", "ディスコード"),
     "slack": ("slack", "슬랙", "スラック"),
     "telegram": ("telegram", "텔레그램", "テレグラム"),
     "email": ("email", "mail", "이메일", "メール", "邮箱"),
-    "hermes-chat": ("chat", "thread", "same thread", "hermes", "대화", "스레드", "チャット", "聊天"),
+    "hermes-chat": ("chat", "thread", "same thread", "대화", "스레드", "チャット", "聊天"),
 }
 _DELIVERY_TERMS = ("send", "post", "publish", "deliver", "notify", "share", "report to", "보내", "전송", "공유", "알림", "通知", "发送")
 _SILENCE_TERMS = (
+    "only_report_changes",
+    "report only changes",
+    "notify only on changes",
+    "only on change",
     "silent",
     "silently",
     "no reply",
@@ -172,6 +177,21 @@ _SILENCE_TERMS = (
     "静か",
     "没有变化",
     "保持安静",
+)
+_REPORT_EACH_RUN_TERMS = (
+    "report every run",
+    "report each run",
+    "notify every run",
+    "notify each run",
+    "always report",
+    "always notify",
+    "even if nothing changed",
+    "even when unchanged",
+    "report_each_run",
+    "never be silent",
+    "do not stay silent",
+    "don't stay silent",
+    "no silence",
 )
 _NO_AGENT_TERMS = (
     "watchdog",
@@ -559,8 +579,16 @@ def _schedule_intent(text: str, *, schedule: str = "") -> dict[str, object]:
 
 
 def _delivery_intent(text: str, *, delivery: str = "") -> dict[str, object]:
-    source = f"{text} {delivery}".casefold()
+    # An explicitly selected delivery destination owns the target. Incidental
+    # mentions of other platforms in the task must not add extra recipients.
+    source = (delivery.strip() or text).casefold()
     surfaces = [surface for surface, terms in _DELIVERY_SURFACES.items() if any(term.casefold() in source for term in terms)]
+    # "bot-chat" is a Hermes machine-local agent-turn delivery, not the
+    # "origin" thread. The substring "chat" must never route it to both.
+    if "bot-chat" in surfaces:
+        surfaces = [surface for surface in surfaces if surface != "hermes-chat"]
+    if delivery.strip() and re.fullmatch(r"bot-chat:[A-Za-z0-9_.-]+", delivery.strip(), re.IGNORECASE):
+        surfaces = [delivery.strip()]
     if not surfaces and any(term.casefold() in source for term in _DELIVERY_TERMS):
         surfaces = ["hermes-chat"]
     if not surfaces:
@@ -574,13 +602,21 @@ def _delivery_intent(text: str, *, delivery: str = "") -> dict[str, object]:
 
 
 def _silence_policy(text: str, *, silence: str = "") -> dict[str, object]:
-    source = f"{text} {silence}".casefold()
-    silent = bool(silence.strip()) or any(term.casefold() in source for term in _SILENCE_TERMS)
+    # Explicit instructions win over incidental words in the request. A
+    # nonempty policy is not automatically a request to suppress delivery.
+    source = (silence.strip() or text).casefold()
+    report_each_run = any(term.casefold() in source for term in _REPORT_EACH_RUN_TERMS)
+    # Negative phrases can contain the word "silent" or "if nothing changed"
+    # without asking for suppression. Keep true contradictions open to review.
+    silent_source = source
+    for phrase in ("never be silent", "do not stay silent", "don't stay silent", "no silence", "even if nothing changed"):
+        silent_source = silent_source.replace(phrase, "")
+    silent = any(term.casefold() in silent_source for term in _SILENCE_TERMS)
     return {
         "status": "prepared",
-        "mode": "only_report_changes" if silent else "report_each_run",
+        "mode": "only_report_changes" if silent and not report_each_run else "report_each_run",
         "explicit_policy": silence.strip(),
-        "requires_confirmation": not silent,
+        "requires_confirmation": silent == report_each_run,
     }
 
 

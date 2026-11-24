@@ -187,6 +187,7 @@ class PreparedNativeBlueprintRecordTests(unittest.TestCase):
             ("every day at 9am inspect status", "discord:#engineering", "discord:#engineering"),
             ("every day at 9am inspect status", "slack:C0123ABCD45, bot-chat:research", "bot-chat:research,slack:C0123ABCD45"),
             ("every day at 9am inspect status", "matrix", "matrix"),
+            ("every day at 9am inspect status", "send to matrix", "send to matrix"),
         ):
             with self.subTest(delivery=delivery, request=request):
                 blueprint = build_scheduled_ops_blueprint(
@@ -236,6 +237,14 @@ class PreparedNativeBlueprintRecordTests(unittest.TestCase):
         record["silence_policy"]["explicit_policy"] = "report every run"
         errors = validate_hermes_ops_blueprint(record)
         self.assertTrue(any("recreate the immutable prepared blueprint" in error for error in errors))
+        with TemporaryDirectory() as tmp:
+            paths = _paths_from_tmp(tmp)
+            paths.hermes_ops_blueprints_dir.mkdir(parents=True, exist_ok=True)
+            path = paths.hermes_ops_blueprints_dir / f"{record['blueprint_id']}.json"
+            path.write_text(json.dumps(record), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "recreate the immutable prepared blueprint"):
+                show_hermes_ops_blueprint(paths, record["blueprint_id"])
+            self.assertTrue(path.is_file(), "the original prepared record must remain recoverable")
 
     def test_negative_silence_phrases_do_not_enable_suppression(self) -> None:
         for instruction in ("never be silent", "report every run even if nothing changed"):

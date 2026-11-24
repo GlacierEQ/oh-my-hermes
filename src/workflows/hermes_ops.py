@@ -609,7 +609,13 @@ def _silence_policy(text: str, *, silence: str = "") -> dict[str, object]:
     # Negative phrases can contain the word "silent" or "if nothing changed"
     # without asking for suppression. Keep true contradictions open to review.
     silent_source = source
-    for phrase in ("never be silent", "do not stay silent", "don't stay silent", "no silence", "even if nothing changed"):
+    for phrase in (
+        "never be silent",
+        "do not stay silent",
+        "don't stay silent",
+        "no silence",
+        "even if nothing changed",
+    ):
         silent_source = silent_source.replace(phrase, "")
     silent = any(term.casefold() in silent_source for term in _SILENCE_TERMS)
     return {

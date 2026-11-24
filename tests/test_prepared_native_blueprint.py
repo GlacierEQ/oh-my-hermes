@@ -110,6 +110,75 @@ class PreparedNativeBlueprintRecordTests(unittest.TestCase):
         self.assertTrue(blueprint["silence_policy"]["requires_confirmation"])
         self.assertEqual(native["needs_confirmation"], ["prompt"])
 
+    def test_explicit_every_run_policy_does_not_suppress_delivery(self) -> None:
+        blueprint = build_scheduled_ops_blueprint(
+            CHANGE_ONLY_REQUEST,
+            schedule="every day at 9am",
+            delivery="slack",
+            silence="report every run",
+            created_at="2026-06-16T00:00:00Z",
+        )
+        native = blueprint["native_blueprint"]
+
+        self.assertEqual(blueprint["silence_policy"]["mode"], "report_each_run")
+        self.assertFalse(blueprint["silence_policy"]["requires_confirmation"])
+        self.assertEqual(native["block"]["deliver"], "slack")
+        self.assertNotIn("[SILENT]", native["block"]["prompt"])
+        self.assertNotIn("continuity", native["cronjob_manage_create"])
+        self.assertNotIn("prompt", native["needs_confirmation"])
+        self.assertEqual(validate_hermes_ops_blueprint(blueprint), [])
+
+    def test_explicit_delivery_overrides_incidental_request_destination(self) -> None:
+        blueprint = build_scheduled_ops_blueprint(
+            "every day at 9am check Slack status and alert only if status changes",
+            schedule="every day at 9am",
+            delivery="bot-chat",
+            created_at="2026-06-16T00:00:00Z",
+        )
+        native = blueprint["native_blueprint"]
+        self.assertEqual(blueprint["delivery_intent"]["surfaces"], ["bot-chat"])
+        self.assertEqual(native["block"]["deliver"], "bot-chat")
+        self.assertEqual(native["cronjob_manage_create"]["deliver"], "bot-chat")
+        self.assertTrue(native["cronjob_manage_create"]["continuity"])
+        self.assertIn("[SILENT]", native["block"]["prompt"])
+        self.assertEqual(validate_hermes_ops_blueprint(blueprint), [])
+
+    def test_bot_chat_profile_remains_an_exact_target(self) -> None:
+        blueprint = build_scheduled_ops_blueprint(
+            "every day at 9am check for changes and report every run",
+            schedule="every day at 9am",
+            delivery="bot-chat:research",
+            created_at="2026-06-16T00:00:00Z",
+        )
+        native = blueprint["native_blueprint"]
+        self.assertEqual(native["block"]["deliver"], "bot-chat:research")
+        self.assertNotIn("[SILENT]", native["block"]["prompt"])
+        self.assertNotIn("continuity", native["cronjob_manage_create"])
+        self.assertFalse(blueprint["silence_policy"]["requires_confirmation"])
+
+    def test_negative_silence_phrases_do_not_enable_suppression(self) -> None:
+        for instruction in ("never be silent", "report every run even if nothing changed"):
+            with self.subTest(instruction=instruction):
+                blueprint = build_scheduled_ops_blueprint(
+                    "every day at 9am check the inbox",
+                    schedule="every day at 9am",
+                    silence=instruction,
+                    created_at="2026-06-16T00:00:00Z",
+                )
+                self.assertFalse(blueprint["silence_policy"]["requires_confirmation"])
+                self.assertNotIn("[SILENT]", blueprint["native_blueprint"]["block"]["prompt"])
+
+    def test_conflicting_silence_instructions_stay_unsettled(self) -> None:
+        blueprint = build_scheduled_ops_blueprint(
+            "every day at 9am check the inbox",
+            schedule="every day at 9am",
+            silence="only if changed, but report every run",
+            created_at="2026-06-16T00:00:00Z",
+        )
+        self.assertTrue(blueprint["silence_policy"]["requires_confirmation"])
+        self.assertIn("prompt", blueprint["native_blueprint"]["needs_confirmation"])
+        self.assertNotIn("[SILENT]", blueprint["native_blueprint"]["block"]["prompt"])
+
     def test_the_skills_own_good_example_reports_only_on_change(self) -> None:
         prompt = _definition().good_example.prompt
         self.assertIn("only if status changes", prompt)

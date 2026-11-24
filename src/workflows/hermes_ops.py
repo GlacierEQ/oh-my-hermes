@@ -450,6 +450,15 @@ def show_hermes_ops_blueprint(paths: OmhPaths, blueprint_id: str) -> dict[str, A
         raise FileNotFoundError(blueprint_id)
     record = read_json_object(_blueprint_path(paths, blueprint_id))
     if record:
+        # Retain the immutable file for inspection/recreation, but never
+        # return a previously saved cron create call with inverted silence.
+        stale_policy_errors = [
+            error
+            for error in validate_hermes_ops_blueprint(record)
+            if error.startswith("stored silence policy conflicts with current Hermes cron behavior")
+        ]
+        if stale_policy_errors:
+            raise ValueError("; ".join(stale_policy_errors))
         return record
     raise FileNotFoundError(blueprint_id)
 
@@ -623,11 +632,14 @@ def _delivery_intent(text: str, *, delivery: str = "") -> dict[str, object]:
         folded,
     ) and not re.search(r"\b(?:send|deliver|notify|report|post|reply)\b.{0,60}?\bto\s+bot[- ]chat", folded):
         surfaces = [surface for surface in surfaces if not surface.startswith("bot-chat")]
-    if not surfaces and any(term.casefold() in source for term in _DELIVERY_TERMS):
-        surfaces = ["hermes-chat"]
     if not surfaces:
         # An explicit unknown destination must not silently turn into origin.
-        surfaces = [delivery.strip()] if delivery.strip() else ["current-hermes-thread"]
+        if delivery.strip():
+            surfaces = [delivery.strip()]
+        elif any(term.casefold() in folded for term in _DELIVERY_TERMS):
+            surfaces = ["hermes-chat"]
+        else:
+            surfaces = ["current-hermes-thread"]
     return {
         "status": "prepared",
         "surfaces": surfaces,

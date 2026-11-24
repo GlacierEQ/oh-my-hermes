@@ -124,6 +124,8 @@ class PreparedNativeBlueprintRecordTests(unittest.TestCase):
         self.assertFalse(blueprint["silence_policy"]["requires_confirmation"])
         self.assertEqual(native["block"]["deliver"], "slack")
         self.assertNotIn("[SILENT]", native["block"]["prompt"])
+        self.assertIn("Report the result on every run, including when nothing changed.", native["block"]["prompt"])
+        self.assertEqual(native["cronjob_manage_create"]["prompt"], native["block"]["prompt"])
         self.assertNotIn("continuity", native["cronjob_manage_create"])
         self.assertNotIn("prompt", native["needs_confirmation"])
         self.assertEqual(validate_hermes_ops_blueprint(blueprint), [])
@@ -155,6 +157,85 @@ class PreparedNativeBlueprintRecordTests(unittest.TestCase):
         self.assertNotIn("[SILENT]", native["block"]["prompt"])
         self.assertNotIn("continuity", native["cronjob_manage_create"])
         self.assertFalse(blueprint["silence_policy"]["requires_confirmation"])
+
+    def test_native_prompt_preserves_explicit_every_run_override(self) -> None:
+        blueprint = build_scheduled_ops_blueprint(
+            "every day at 9am send a Slack digest only if something changed",
+            silence="report every run",
+            created_at="2026-06-16T00:00:00Z",
+        )
+        native = blueprint["native_blueprint"]
+        self.assertIn("only if something changed", native["block"]["prompt"])
+        self.assertTrue(native["block"]["prompt"].endswith("overrides earlier change-only wording."))
+        self.assertNotIn("prompt", native["needs_confirmation"])
+
+    def test_independent_bot_chat_and_current_thread_destinations_survive(self) -> None:
+        blueprint = build_scheduled_ops_blueprint(
+            "every day at 9am check a service",
+            delivery="bot-chat and same thread",
+            silence="only report changes",
+            created_at="2026-06-16T00:00:00Z",
+        )
+        self.assertEqual(blueprint["native_blueprint"]["block"]["deliver"], "bot-chat,origin")
+        self.assertEqual(blueprint["silence_policy"]["mode"], "only_report_changes")
+        self.assertFalse(blueprint["silence_policy"]["requires_confirmation"])
+
+    def test_concrete_delivery_targets_are_not_downgraded(self) -> None:
+        for request, delivery, expected in (
+            ("every day at 9am deliver to bot-chat:research", "", "bot-chat:research"),
+            ("every day at 9am inspect status", "slack:C0123ABCD45", "slack:C0123ABCD45"),
+            ("every day at 9am inspect status", "discord:#engineering", "discord:#engineering"),
+            ("every day at 9am inspect status", "slack:C0123ABCD45, bot-chat:research", "bot-chat:research,slack:C0123ABCD45"),
+            ("every day at 9am inspect status", "matrix", "matrix"),
+        ):
+            with self.subTest(delivery=delivery, request=request):
+                blueprint = build_scheduled_ops_blueprint(
+                    request, delivery=delivery, created_at="2026-06-16T00:00:00Z"
+                )
+                native = blueprint["native_blueprint"]
+                self.assertEqual(native["block"]["deliver"], expected)
+                self.assertEqual(native["cronjob_manage_create"]["deliver"], expected)
+                self.assertIn("deliver", native["needs_confirmation"])
+
+    def test_monitored_bot_chat_does_not_steal_current_chat_delivery(self) -> None:
+        blueprint = build_scheduled_ops_blueprint(
+            "every day at 9am inspect bot-chat queue and send results to my current chat",
+            created_at="2026-06-16T00:00:00Z",
+        )
+        self.assertEqual(blueprint["native_blueprint"]["block"]["deliver"], "origin")
+
+    def test_negated_every_run_policy_is_not_inverted(self) -> None:
+        for instruction in (
+            "do not report every run; only report changes",
+            "don't report every run; only report changes",
+            "never be silent unless there are no changes",
+        ):
+            with self.subTest(instruction=instruction):
+                blueprint = build_scheduled_ops_blueprint(
+                    "every day at 9am check status",
+                    silence=instruction,
+                    created_at="2026-06-16T00:00:00Z",
+                )
+                self.assertEqual(blueprint["silence_policy"]["mode"], "only_report_changes")
+                self.assertFalse(blueprint["silence_policy"]["requires_confirmation"])
+                self.assertIn("[SILENT]", blueprint["native_blueprint"]["block"]["prompt"])
+        unresolved = build_scheduled_ops_blueprint(
+            "every day at 9am check status",
+            silence="don't report every run",
+            created_at="2026-06-16T00:00:00Z",
+        )
+        self.assertTrue(unresolved["silence_policy"]["requires_confirmation"])
+        self.assertIn("prompt", unresolved["native_blueprint"]["needs_confirmation"])
+
+    def test_stale_immutable_blueprint_requires_recreation_before_activation(self) -> None:
+        record = build_scheduled_ops_blueprint(
+            "every day at 9am check the inbox",
+            silence="only if changed",
+            created_at="2026-06-16T00:00:00Z",
+        )
+        record["silence_policy"]["explicit_policy"] = "report every run"
+        errors = validate_hermes_ops_blueprint(record)
+        self.assertTrue(any("recreate the immutable prepared blueprint" in error for error in errors))
 
     def test_negative_silence_phrases_do_not_enable_suppression(self) -> None:
         for instruction in ("never be silent", "report every run even if nothing changed"):

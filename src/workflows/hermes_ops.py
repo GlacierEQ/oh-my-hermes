@@ -153,8 +153,11 @@ _DELIVERY_TERMS = ("send", "post", "publish", "deliver", "notify", "share", "rep
 _SILENCE_TERMS = (
     "only_report_changes",
     "report only changes",
+    "only report changes",
     "notify only on changes",
     "only on change",
+    "unless there are no changes",
+    "unless nothing changed",
     "silent",
     "silently",
     "no reply",
@@ -332,6 +335,22 @@ def validate_hermes_ops_blueprint(record: dict[str, Any]) -> list[str]:
         errors.append(f"schema_version must be {PREPARED_NATIVE_BLUEPRINT_SCHEMA_VERSION} (or legacy {LEGACY_BLUEPRINT_SCHEMA_VERSION})")
     if schema_version == PREPARED_NATIVE_BLUEPRINT_SCHEMA_VERSION:
         errors.extend(_native_blueprint_errors(record.get("native_blueprint")))
+        policy = record.get("silence_policy")
+        native = record.get("native_blueprint")
+        if isinstance(policy, dict) and isinstance(native, dict) and str(policy.get("explicit_policy", "")).strip():
+            current_policy = _silence_policy(
+                str(record.get("request_summary", "")), silence=str(policy["explicit_policy"])
+            )
+            block = native.get("block")
+            if policy.get("mode") != current_policy["mode"] or (
+                current_policy["mode"] == "report_each_run"
+                and isinstance(block, dict)
+                and "[SILENT]" in str(block.get("prompt", ""))
+            ):
+                errors.append(
+                    "stored silence policy conflicts with current Hermes cron behavior; "
+                    "recreate the immutable prepared blueprint before activation"
+                )
     if record.get("kind") not in BLUEPRINT_KINDS:
         errors.append(f"unsupported blueprint kind: {record.get('kind', '')}")
     blueprint_id = str(record.get("blueprint_id", ""))
@@ -581,18 +600,34 @@ def _schedule_intent(text: str, *, schedule: str = "") -> dict[str, object]:
 def _delivery_intent(text: str, *, delivery: str = "") -> dict[str, object]:
     # An explicitly selected delivery destination owns the target. Incidental
     # mentions of other platforms in the task must not add extra recipients.
-    source = (delivery.strip() or text).casefold()
-    surfaces = [surface for surface, terms in _DELIVERY_SURFACES.items() if any(term.casefold() in source for term in terms)]
-    # "bot-chat" is a Hermes machine-local agent-turn delivery, not the
-    # "origin" thread. The substring "chat" must never route it to both.
-    if "bot-chat" in surfaces:
-        surfaces = [surface for surface in surfaces if surface != "hermes-chat"]
-    if delivery.strip() and re.fullmatch(r"bot-chat:[A-Za-z0-9_.-]+", delivery.strip(), re.IGNORECASE):
-        surfaces = [delivery.strip()]
+    source = delivery.strip() or text
+    folded = source.casefold()
+    # Do not count the "chat" in a Bot Chat destination as a request for
+    # ordinary thread delivery. Independent "same thread" still counts.
+    without_bot_chat = re.sub(r"\bbot[- ]chat(?::[A-Za-z0-9_.-]+)?", "", folded)
+    surfaces = [
+        surface
+        for surface, terms in _DELIVERY_SURFACES.items()
+        if any(term.casefold() in (without_bot_chat if surface == "hermes-chat" else folded) for term in terms)
+    ]
+    # Hermes accepts platform:destination, including named Bot Chat profiles.
+    # Preserve a concrete target instead of collapsing it to its platform.
+    for index, surface in enumerate(surfaces):
+        if surface == "hermes-chat":
+            continue
+        qualified = re.search(rf"(?<![\w-]){re.escape(surface)}:[A-Za-z0-9_#@.+:-]+", source, re.IGNORECASE)
+        if qualified:
+            surfaces[index] = qualified.group(0)
+    if not delivery.strip() and re.search(
+        r"\b(?:send|deliver|notify|report|post|reply)\b.{0,60}?\b(?:to|in)\s+(?:(?:the|my)\s+)?(?:current|this|same)\s+(?:chat|thread)\b",
+        folded,
+    ) and not re.search(r"\b(?:send|deliver|notify|report|post|reply)\b.{0,60}?\bto\s+bot[- ]chat", folded):
+        surfaces = [surface for surface in surfaces if not surface.startswith("bot-chat")]
     if not surfaces and any(term.casefold() in source for term in _DELIVERY_TERMS):
         surfaces = ["hermes-chat"]
     if not surfaces:
-        surfaces = ["current-hermes-thread"]
+        # An explicit unknown destination must not silently turn into origin.
+        surfaces = [delivery.strip()] if delivery.strip() else ["current-hermes-thread"]
     return {
         "status": "prepared",
         "surfaces": surfaces,
@@ -605,7 +640,19 @@ def _silence_policy(text: str, *, silence: str = "") -> dict[str, object]:
     # Explicit instructions win over incidental words in the request. A
     # nonempty policy is not automatically a request to suppress delivery.
     source = (silence.strip() or text).casefold()
-    report_each_run = any(term.casefold() in source for term in _REPORT_EACH_RUN_TERMS)
+    # A negative every-run instruction cannot count as affirmative every-run.
+    report_source = source
+    for phrase in (
+        "do not report every run",
+        "don't report every run",
+        "never report every run",
+        "do not notify every run",
+        "don't notify every run",
+        "never notify every run",
+    ):
+        report_source = report_source.replace(phrase, "")
+    conditional_silence = "unless there are no changes" in source or "unless nothing changed" in source
+    report_each_run = not conditional_silence and any(term in report_source for term in _REPORT_EACH_RUN_TERMS)
     # Negative phrases can contain the word "silent" or "if nothing changed"
     # without asking for suppression. Keep true contradictions open to review.
     silent_source = source
@@ -617,7 +664,7 @@ def _silence_policy(text: str, *, silence: str = "") -> dict[str, object]:
         "even if nothing changed",
     ):
         silent_source = silent_source.replace(phrase, "")
-    silent = any(term.casefold() in silent_source for term in _SILENCE_TERMS)
+    silent = conditional_silence or any(term.casefold() in silent_source for term in _SILENCE_TERMS)
     return {
         "status": "prepared",
         "mode": "only_report_changes" if silent and not report_each_run else "report_each_run",
@@ -758,6 +805,13 @@ def _native_blueprint(
     prompt = request_summary
     if report_changes_only:
         prompt = f"{prompt}\n\nIf nothing changed since the previous run, reply with [SILENT] alone."
+    elif silence_policy.get("explicit_policy") and not silence_policy.get("requires_confirmation"):
+        # The request can still say "only if changed"; the explicit override
+        # must be present in the actual cron prompt, not just the metadata.
+        prompt = (
+            f"{prompt}\n\nReport the result on every run, including when nothing changed. "
+            "This explicit reporting rule overrides earlier change-only wording."
+        )
     create: dict[str, object] = {"action": "create", "schedule": schedule, "prompt": prompt, "deliver": deliver}
     job_skills = [omh_skill_display_name(item["skill"]) for item in skill_suggestions if item["skill"] != "automation-blueprint"]
     if job_skills:

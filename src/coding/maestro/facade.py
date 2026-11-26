@@ -28,7 +28,7 @@ _HANDOFF_FIELD_BY_OWNER_MODE: dict[str, HandoffField] = {
 # holds by construction: the handoff builder also serves runtime profiles and
 # the generic prompt fallback, which are not Maestro.
 _EXTERNAL_PROFILES = frozenset(
-    {*EXTERNAL_CLI_PROFILES, "omx-runtime", "omo-runtime", "omc-runtime", "generic"}
+    {*EXTERNAL_CLI_PROFILES, "omx-runtime", "pi-family-runtime", "omc-runtime", "generic"}
 )
 
 
@@ -79,6 +79,8 @@ def build_external_handoff(request: ExternalHandoffRequest) -> PreparedExternalH
         model_chains=request.model_chains,
         requested_model=request.requested_model,
         requested_effort=request.requested_effort,
+        requested_identity=request.requested_identity,
+        identity_config=request.identity_config,
         handoff_contract=request.handoff_contract,
     )
     selected_profile = payload.get("selected_executor_profile")

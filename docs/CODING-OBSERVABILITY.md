@@ -1,17 +1,17 @@
 # Seeing What Coding Work Is Running
 
-Multi-session coding work used to be invisible in three specific ways. Each is
-now fixed, and each fix has a boundary worth knowing.
+What the coding status surfaces show about multi-session coding work, and the
+boundary of each.
 
 ## What you get
 
 ```
 Running work — 3 unit(s), 2 running
 
-unit              runtime            model              status     elapsed   tokens       session
-research-sweep    claude-code        opus xhigh         running    35m       10,000,000   sess_9f2c4a
-api-ratelimit     codex              gpt-5.6-sol xhigh  running    4m        128,400      019a7b3e
-docs-pass         omo-runtime (pi)   glm-4.6            completed  12m       unknown      unknown
+unit              runtime                  model                  status     elapsed   tokens       session
+research-sweep    claude-code              claude-opus-5-5 xhigh  running    35m       10,000,000   sess_9f2c4a
+api-ratelimit     codex                    gpt-6.1-sol xhigh      running    4m        128,400      019a7b3e
+docs-pass         pi-family-runtime (pi)   glm-5.3                completed  12m       unknown      unknown
 ```
 
 Ask in chat — "what's running", "지금 뭐 돌고 있어", "what models are running" —
@@ -30,15 +30,15 @@ CLI board belongs to no conversation, so both answer in the global scope
 
 ```
 Coding status board (3 running, 1 stuck of 7 observed) — observed at 2026-08-03T12:00:00Z
-LABEL     RUNTIME  MODEL            STATUS          ELAPSED  TOKENS   TOOLS    SESSION
-research  claude   🟠 fable-5 high  Code · running  35m      unknown  unknown  unknown
-SOURCE           ID        MODEL                      STATE                   ELAPSED  TOKENS   TOOLS
-hermes-delegate  childrun  ⚪ gpt-5.6-sol high        running                 2m       1,200    unknown  Fix the parser
-hermes-kanban    aaaa0001  🟠 claude-sonnet-5 medium  running                 5m       3,400    7  Write the docs
-hermes-kanban    bbbb0002  ⬜ unknown                 stale                   34m      unknown  unknown  Task t_bbbb0002
-hermes-delegate  childend  ⚪ gpt-5.6-sol high        reported done           5m       1,200    unknown  Write the release note
-hermes-kanban    cccc0003  ⬜ unknown                 queued (retry pending)  unknown  unknown  unknown  Task t_cccc0003
-hermes-kanban    dddd0004  ⬜ unknown                 reported done           12m      unknown  unknown  Task t_dddd0004
+LABEL     RUNTIME  MODEL                     STATUS          ELAPSED  TOKENS   TOOLS    SESSION
+research  claude   🟠 claude-fable-5-1 high  Code · running  35m      unknown  unknown  unknown
+SOURCE           ID        MODEL                        STATE                   ELAPSED  TOKENS   TOOLS
+hermes-delegate  childrun  ⚪ gpt-6.1-sol high          running                 2m       1,200    unknown  Fix the parser
+hermes-kanban    aaaa0001  🟠 claude-sonnet-5-5 medium  running                 5m       3,400    7  Write the docs
+hermes-kanban    bbbb0002  ⬜ unknown                   stale                   34m      unknown  unknown  Task t_bbbb0002
+hermes-delegate  childend  ⚪ gpt-6.1-sol high          reported done           5m       1,200    unknown  Write the release note
+hermes-kanban    cccc0003  ⬜ unknown                   queued (retry pending)  unknown  unknown  unknown  Task t_cccc0003
+hermes-kanban    dddd0004  ⬜ unknown                   reported done           12m      unknown  unknown  Task t_dddd0004
 ```
 
 - **SOURCE** says which reader the row came from; **ID** is Hermes' own (a
@@ -89,8 +89,9 @@ first. Each node is a box of four lines: its title, its category and
 model with effort, its status with its glyph and duration (then the output
 tokens its child has written, `· ↓1.2k`, where the box has room), and its
 parents (`← Export API`) or `Start node`. The nodes of one frontier sit side by side
-over a `· Same frontier` label, and one connector joins a frontier to the
-next. Under the boxes, `Dependencies` lists every edge between two nodes, its
+over a `· Same frontier` label, and the edges between two frontiers are
+drawn: `│` under each parent, a bus joining a group of parents to its
+children, and `▼` over each child. Under the boxes, `Dependencies` lists every edge between two nodes, its
 kind named unless it is a `depends_on`, and `Node details` gives a card to
 each running or stuck node, and in `/dag` to the highlighted one: its whole
 title, category and model, status and output tokens (`↓1.2k tokens`), group
@@ -114,7 +115,8 @@ Running · Done 1/5 · 1 failed
                                   │ Start node                   │
                                   └──────────────────────────────┘
                                                   │
-                                                  ▼
+                ╭─────────────────────────────────┼─────────────────────────────────╮
+                ▼                                 ▼                                 ▼
 ┌──────────────────────────────┐  ┌──────────────────────────────┐  ┌──────────────────────────────┐
 │ Export button                │  │ Export docs                  │  │ Export CLI flag              │
 │ unspecified-high · glm-5.3:… │  │ writing                      │  │ quick · glm-5.3-flash:low    │
@@ -122,7 +124,8 @@ Running · Done 1/5 · 1 failed
 │ ← Export API                 │  │ ← Export API                 │  │ ← Export API                 │
 └──────────────────────────────┘  └──────────────────────────────┘  └──────────────────────────────┘
 · Same frontier
-                                                  │
+                │                                 │                                 │
+                ╰─────────────────────────────────┼─────────────────────────────────╯
                                                   ▼
                                   ┌──────────────────────────────┐
                                   │ Verify export                │
@@ -199,7 +202,7 @@ Where it shows:
   ends with the run's critical path and its bottlenecks, the nodes the most
   others wait on (`dag_core`).
 
-  ![/dag in a dark terminal: Export API folded, Verify export highlighted, Node details for the running node and the highlighted one](../assets/omh-dag-pager.png)
+  ![/dag in a dark terminal: Export API folded, Verify export highlighted, the running Export button in the dag-ulw aura, Node details for the running node and the highlighted one](../assets/omh-dag-pager.png)
 - **Slack, Discord, Telegram, Mattermost and Matrix** never get the box
   drawing. They see a delegated run, the conversation's lanes that no end
   post has closed yet, at three moments. Each is appended to the reply Hermes
@@ -349,11 +352,31 @@ What it shows, and what it leaves as `?`:
     waiting on its parents is `waiting` (`held` when one of them failed).
     Its child, bound by the `[dag:<run>/<node>]` goal marker, gives it a
     model, effort and time. A node no child has taken shows the category
-    its run planned. Nodes of an earlier repair group that were never
+    its run planned. `omh_dag` itself gives each open node (handed out,
+    running, or returned and not settled) its age as `open_for_s`, counted
+    from when the attempt first went out, and names one open past the stuck
+    mark (an hour, or the profile's `dag_stuck_after_s`; 0 turns it off) in
+    `stuck`, `say` and the run's status line (`1 open past 1h (Docs body
+    2h 10m)`). The profile's `dag_stale_after_s` and
+    `dag_max_lost_reoffers` move when a node no child took is offered again
+    (600 s) and how many times a restart's loss is (3). A ledger child no node
+    of the drawn run owns — one whose goal carries no `[dag:<run>/<node>]`
+    marker, or one bound to another run — is an `outside_dag` lane: it stays a
+    node of the graph with its state, title and usage, but it joins no layer
+    and no edge, and the drawings show it under its own `outside DAG` heading
+    (the desktop cards under `Outside DAG`), never as a start node of the run.
+    With no run drawn it is a plain lane. Nodes of an earlier repair group that were never
     accepted leave the drawing. Each node carries where it came from
     (`dag_origin`: `define`, `repair:<root>`, `extend:<round>`), and a repair
     node its repair cycle (`cycle`: 2 for the second repair of the same
-    node), which the TUI's tree draws as `↻ repair 2`. On a
+    node), which the TUI's tree draws as `↻ repair 2`. Each node also
+    carries its role (`role`: `build`, `baseline`, `verify` or `review`, as
+    `dag_run.node_role` reads it) and its place in the run's definition
+    order (`node_index`, which superseded and added nodes keep). The TUI's
+    briefing of a finished dag child reads both (`tui.dag_tree.bound_node`):
+    it names the child `● build @notify finished`, the handle in the hue
+    `node_index` picks. A graph without them shows no role, and the handle
+    takes a hue from its id. On a
     Docker or SSH terminal the handoff files live in that terminal, under
     its user's home. A node
     accepted while its handoff could not be read in the Docker or SSH
@@ -422,9 +445,18 @@ announced again. Hermes'
 default in-place compaction keeps one session id, and the graph reads that
 session alone.
 
-The boxes draw no edge, so no shape can be drawn wrong: one connector joins
-each frontier to the next whatever its edges, and the edges are exact in
-each box's parents line and in `Dependencies`. Every box of a drawing is one
+The boxes draw an edge only where it exists. Between two frontiers each
+group of parents and the children they lead to shares one bus, and a group
+is drawn only when every parent in it leads to every child, so two groups
+with no edge between them never share a bus (`╰──┴──┬──╯   ╭──┴──╯`). Where
+the edges of a gap cannot be drawn that way, one centred connector in
+marks of its own (`╎` then `▽`; `:` then `.` in ASCII) joins the two
+frontiers instead. It says the gap's edges are not drawn, and never reads
+as an edge between the boxes over and under it, as a straight `│` over `▼`
+does: a group in which some parent does not lead to every child, two groups
+whose buses would overlap, an edge that skips a frontier (every gap it
+crosses), and a frontier that wraps (the gaps on either side of it). Either way the edges
+are exact in each box's parents line and in `Dependencies`. Every box of a drawing is one
 width, as wide as its widest node needs and narrowed to put each frontier on
 one row, down to 22 cells (every line is cut to that width with `…`, and
 the category and model line, usually the widest, is the one that shows it); a
@@ -446,9 +478,13 @@ status line take its node's state: running in the blue the edge gradient
 ends at, handed out in its middle step, failed and cancelled in the error
 colour, stuck in the warning colour, done in the terminal's own foreground,
 waiting dim, and the box `/dag` highlights in the violet the gradient starts
-at. The connector between two frontiers is dim, and blue where it leads into
-a frontier with a node running. Every state keeps its glyph and its word, so
-nothing is told by colour alone. The tree's edges step from violet through
+at. The edges between two frontiers are dim, each group in blue where a
+child of it runs (the one connector, where it leads into a frontier with a
+node running). Every state keeps its glyph and its word, so
+nothing is told by colour alone. Where the composer's `dag-ulw` aura moves
+(truecolor, motion on), a running node's box border and title in `/dag`, and
+its title in the tree under the composer, run through that aura with its
+band moving; the graph printed into the transcript never does. The tree's edges step from violet through
 indigo to blue down its depth. The gradient's stops are theme tokens: a
 palette that names `dag_edge_start`, `dag_edge_mid` or `dag_edge_end`
 replaces them, and with them the colours of selected, handed out and running.
@@ -470,22 +506,12 @@ terminal's background; a printed command cannot ask the terminal for it as
 the TUI does, so with no name, in a pipe, with `NO_COLOR` and with `--json` it
 prints plain text. A chat post is always plain text.
 
-## What was actually broken
+## History
 
-**The model was dropped.** The runtime (`codex` / `claude_code`) was tracked
-end to end, but no progress surface carried the model. `_safe_signal` was a
-closed key allow-list with no model key. So OMH knew *which CLI* was running
-and could not say *which model* it was running on.
-
-**Token counts had no write site.** `omh coding fanout brief` already read
-`tokens_total` and `session_ref` and rendered columns for them. Nothing in
-`src/` ever wrote either key, so both columns printed `unknown` on every row,
-forever.
-
-**A running unit could not report itself.** Dispatch is blocking —
-`subprocess.run` inside a thread pool — so the dispatching process cannot
-narrate its own progress. There was no way for a second session to see that a
-unit was mid-flight, which is exactly the multi-session case that matters.
+Progress surfaces once carried the runtime but not the model, and nothing
+wrote `tokens_total` or `session_ref`, so those columns printed `unknown`. Both
+now have write sites, and a running unit reports itself through the progress
+bindings below rather than through the blocking dispatcher.
 
 ## The honesty contract
 
@@ -569,7 +595,7 @@ does not grade.
 
 Vocabulary in `src/coding/unit_execution_state.py`; the mid-run verdict is
 derived by `src/coding/unit_progress.py` from the stdout snapshots the dispatch
-already takes, and the two terminal states are assigned only after exit.
+already takes, and the three terminal states are assigned only after exit.
 
 | State | What was observed | Terminal |
 | --- | --- | --- |
@@ -579,7 +605,8 @@ already takes, and the two terminal states are assigned only after exit.
 | `account_limit` | The provider refused for account reasons: session or usage limit, quota, credits. | no |
 | `data_missing` | Objects the work needs are absent in its isolation — partial-clone blobs, a missing base commit, a ref that was described but never fetched. | no |
 | `progress_stalled` | The process is alive and the work is not moving: no new output past the threshold (15 minutes, `UNIT_STALL_AFTER_SECONDS`), **or** the same *failure-shaped* line repeating three times even while bytes grow. Repetition alone is not a stall — a green run prints `... ok` endlessly — so only lines matching `_FAILURE_SHAPED_WORDS` are counted. | no |
-| `failed` | The process ended without a verified result. Exit code 0 with the required result record missing is this state, with reason `result_missing` — never `verified`. | yes |
+| `failed` | The process ended without a verified result. Exit code 0 with the required result record missing is this state, with reason `result_missing` — never `verified`. So is a declared check the dispatcher ran and saw fail (`verification_failed`). | yes |
+| `unverified` | The process exited 0 and its result record validated, but no verification was observed: none was declared, or none was asked to run (reason `verification_not_observed`). Nothing failed and nothing was verified; a retry would repeat finished work, and proof of the work still has to come from somewhere. | yes |
 | `verified` | The result record validated against the contract and its verification was observed. The only success state. | yes |
 
 The three non-`running` mid-run states above the stall are conditions retrying
@@ -588,8 +615,8 @@ waited out. A matched shape is not provider, filesystem, or repository truth —
 it is what the output looked like.
 
 **Runtimes without structured output report `unknown` and say so.** The
-omo-runtime lane (pi / senpi / opencode) has no structured token surface, so
-its token columns stay unknown by design rather than being filled with a guess.
+`pi-family-runtime` lane has no structured token surface, so its token columns
+stay unknown by design rather than being filled with a guess.
 
 ## Why the token number is a sum, and what that means
 
@@ -839,7 +866,9 @@ anything:
 omh quality-evidence language-diagnostics \
   --owner claude-code --provider <provider> \
   --workspace <id> --baseline-revision <sha> --end-revision <sha> \
-  --diagnostics-revision <sha> [--introduced <json>] [--resolved <json>] [--json]
+  --diagnostics-revision <sha> \
+  [--introduced-json <json> | --introduced-file <path>] \
+  [--resolved-json <json> | --resolved-file <path>] [--json]
 ```
 
 It is read-only in both directions: it starts nothing and writes nothing. Plain
@@ -952,7 +981,7 @@ they produce byte-identical summaries apart from the owner attribution block.
 the owner, so two owners agreeing is one `==`.
 
 The equality is not vacuous. An owner whose stream this repo cannot read
-carries a lower evidence ceiling, so an `omo-runtime` `full_tests_passed`
+carries a lower evidence ceiling, so a `pi-family-runtime` `full_tests_passed`
 normalizes to `unmapped_source_event` rather than `tests_passed`. That run gets
 a different summary, with an evidence gap counted where a verification would
 otherwise have been claimed. That is the correct answer, not a gap to close by
@@ -1135,9 +1164,15 @@ comparison they want to Hermes.
 omh coding paired-run dispatch --decision decision.json --dry-run
 omh coding paired-run dispatch --decision decision.json --confirm-dispatch \
   --task-file task-a=task-a.txt --repo . --provider <provider>
+# a custom provider: declared without its secret, key by variable name
+omh coding paired-run dispatch --decision decision.json --confirm-dispatch \
+  --task-file task-a=task-a.txt --repo . --provider claude-proxy \
+  --provider-base-url http://127.0.0.1:8317/v1 --provider-api-mode chat_completions \
+  --provider-key-env MY_PROXY_KEY
 ```
 
-`--dry-run` parses a committed `paired_run_decision/v1` document, builds the
+`--dry-run` parses a committed `paired_run_decision/v2` document (a `v1` one
+still parses), builds the
 plan, prints it, and launches nothing. Without `--dry-run`, dispatch refuses
 unless `--confirm-dispatch` is typed. A confirmed Hermes matrix then reuses the
 already-sanctioned Hermes-child process boundary; it is not a third subprocess
@@ -1153,6 +1188,96 @@ a shared-resource key still serializes only the cells that name it. The
 Hermes-child bridge's normal
 single-dispatch guard remains the default for every other caller, while this
 confirmed matrix path opts into the paired-run scheduler's own bounded guard.
+
+### The arm setup each cell runs in
+
+Every other Hermes child runs in safe mode with the user's config ignored and
+file tools only. A confirmed paired run is the one caller that leaves safe
+mode, because otherwise both arms would be the same Hermes and the comparison
+would measure noise. Before any cell starts, the invocation prepares one
+disposable Hermes home per arm under a fresh temporary root outside any Hermes
+`profiles/` tree:
+
+- `config.yaml` names the arm's model and the provider. A built-in provider
+  reads its documented key variables; a custom provider is declared by
+  `--provider-base-url` (https, or plain http only to a loopback host; no
+  credentials, query or fragment), `--provider-api-mode` and
+  `--provider-key-env`, the NAME of the variable holding its key. The key is
+  never written to disk and an inline key is refused.
+- The variant home holds the packaged OMH plugin, enabled with its own
+  disposable OMH home, and exactly the arm's frozen `exposed_skills`. The
+  baseline home holds neither. Both arms run the same flags (`--ignore-rules
+  --toolsets file,skills`), so the homes are the only difference.
+- `--arm-toolsets` is the one opt-in that changes those flags, and it changes
+  them for both arms at once. It takes names from the closed set `file`,
+  `skills`, `terminal`, `delegation`; `file` and `skills` are required, and anything else is
+  refused before a home is built. `--arm-toolsets file,skills,terminal` gives
+  both arms Hermes' shell tool, running in the cell's detached worktree, so a
+  comparison of a plugin that runs tests is not a comparison against an arm
+  that cannot. `--yolo` is never passed, so Hermes' dangerous-command
+  approval stays on in both arms. No other Hermes child (`hermes-child
+  dispatch`, `fanout --final-review`, recovery) can take this flag; each keeps
+  safe mode and `--toolsets file`.
+- `delegation` gives both arms Hermes' own `delegate_task`, one level deep.
+  Both configs then carry the same `delegation:` block: `oneshot_max_children`
+  and `max_concurrent_children` of 6 (Hermes' one-shot default of 2 refuses a
+  whole call over it), `max_spawn_depth: 1`, `worktree_isolation: false` (the
+  children share the cell worktree), and the arm's own `model` and `provider`
+  for every child. The variant's OMH home also pins every routing category to
+  the arm's model (`routing/model-chains.json`), so `omh_delegate_route`
+  cannot move a child onto another model. Children run as threads of the arm
+  gateway and a one-shot session joins them inside the call, so the cell's
+  spawn-to-exit `elapsed_seconds` covers the whole job, children included. A
+  timed-out cell can leave children running in that gateway until the run's
+  homes close; run one job per decision when that matters.
+- A harness-owned `hermes gateway run --quiet` serves each home in its own
+  process group with a minimal environment, never a launchd or other service
+  job. One untimed warm-up chat absorbs the home's first-start work; its
+  seconds are reported per arm in `execution.arm_homes` and never enter a
+  cell's `elapsed_seconds`, which stays spawn-to-exit of the cell's own chat.
+  The whole gateway group is stopped and the root removed on exit, failure
+  included.
+
+At each cell's spawn the dispatcher reads the home from disk (plugin manifest
+present and enabled in config; the sorted OMH skills present) and signs that
+reading, with the canonical `toolsets` the child was spawned with, into the
+receipt as `arm_setup`. A caller cannot supply or keep one, and editing the
+stored toolsets fails verification. Fan-in refuses a cell with no signed
+setup, a variant that ran without the plugin, a baseline that ran with it, a
+skills digest that differs from the arm's `exposed_skills`, or toolsets that
+differ from the run's declared `arm_toolsets` (listed beside `arm_homes` in
+the execution report), and refuses the whole matrix when its arms' signed
+toolsets differ from each other. With `delegation` declared it also refuses a
+cell with no signed `cell_trace`, a trace whose `session_models` is null, and
+one that names any model other than the arm's. A delegating cell's usage
+carries no cost: Hermes folds each child's cost into the parent's total, so
+summing the rows could count the children twice; tokens and API calls still
+sum. The arm role fixes the plugin expectation, so
+`paired_run_decision/v2` needs no new field.
+
+After the cell's child exits, and while its arm home still exists, the
+dispatcher reads that child's own rows from the home's `state.db` and signs a
+metadata-only `cell_trace` into the same receipt
+(`src/coding/hermes_child_trace.py`): `session_count`, `api_call_count`, the
+input, output, cache-read, cache-write, reasoning and total token counts,
+`tool_call_count` and the ordered `tool_names` (capped at 200, with
+`tool_names_truncated`), `skill_view_count` and the `skill_view_names` it
+opened (capped at 50), and the size in characters of the system prompt and of
+the first request (`system_prompt_chars`, `first_request_chars`). For Hermes'
+own delegate children it adds `subagent_session_count`,
+`subagent_api_call_count`, `max_concurrent_subagents` (the most child
+`[started_at, ended_at)` spans open at one instant; null when a child has no
+end) and `session_models` (sorted distinct models of every new row; null past
+ten, never shortened). The sums above already include the children. Rows the home
+held before the cell, such as the warm-up chat, are left out. No prompt,
+reply, tool argument or tool result is kept, and a name that is not a short
+plain identifier is stored as `unrecognized`. A missing, locked or empty store
+leaves the trace null, never zero; a column the store lacks nulls only its own
+field. A caller cannot supply or keep a trace, and editing the stored one fails
+verification. The execution report lists each cell's verified trace, so a
+speed difference can be read as extra model round-trips, extra tool calls or
+a larger prompt instead of only as seconds. A tool reached through Hermes'
+deferred-tool bridge appears as `tool_call`, not under the tool's own name.
 
 The built-in receipt-capable adapter currently supports decision arms whose
 executor is `hermes`. A Codex, Claude Code, or generic arm is refused before
@@ -1186,7 +1311,7 @@ command line. What the payload states:
   touch.
 - **The boundary itself.** `local_runner_boundary` records that a confirmed
   dispatch uses an explicit confirmed adapter, that the built-in Hermes adapter
-  reuses the sanctioned child bridge, and that `paired_run_decision/v1`
+  reuses the sanctioned child bridge, and that `paired_run_decision/v2`
   carries no raw task content.
 
 Evidence closes the loop in one direction only. An execution matrix becomes an
@@ -1197,6 +1322,47 @@ rate-limited, and cleanup-failed cells each block the fan-in rather than
 degrading it to a weaker result. Behavioral verdicts stay explicit request
 values: an exit code, a process status, or anything the child printed never
 decides behavior.
+
+### Speed at equal quality
+
+A paired run answers whether the variant finishes the same frozen tasks faster
+than the baseline, and it may say so only when correctness did not drop.
+
+Time comes from one place. The Hermes-child dispatcher reads its monotonic
+clock right after the child process is spawned and again at the terminal event
+(completed, failed, timed out, or cancelled), and signs the difference, rounded
+to the millisecond, into the receipt's `elapsed_seconds`. Prepared and running
+events, and a cell cancelled before any process started, carry `null`. A
+caller cannot supply the figure, and editing it breaks the receipt signature.
+Each `paired_run_decision/v2` result row repeats it as
+`receipt_elapsed_seconds`, and parsing re-reads the signed receipt and refuses
+a row whose seconds differ.
+
+The aggregate's `speed_at_equal_quality` block is recomputed from the rows on
+every parse, so a hand-edited verdict or total does not survive either:
+
+- **`quality_gate`** is `held` when at least one task was observed on both arms
+  and none went from a baseline pass to a variant fail, `regressed` when any
+  did (`regressed_task_count` says how many), and `unmeasured` when no task was
+  observed on both arms. A variant that fixes a task the baseline failed does
+  not regress it.
+- **Timing** covers only tasks that both arms passed with seconds on both
+  sides (`timed_task_count`). Every other task is counted in `excluded` under
+  exactly one class: `one_arm_failed`, `both_failed`, `missing_elapsed`,
+  `infra_error`, or `not_observed`.
+- **`verdict`** is `variant_faster`, `variant_slower`, or `no_difference`
+  (comparing the two arms' total seconds over the timed tasks) only when the
+  gate held and at least one task was timed. A regressed gate gives
+  `quality_regressed` and every timing field is `null`, even when the variant
+  was faster. Anything else is `unmeasured`, again with `null` fields, never 0.
+- Beside the totals sit both arms' median seconds and `variant_faster_rate`,
+  the share of timed tasks the variant finished faster, in the
+  `omh_reported_rate/v1` shape with its denominator and exclusions.
+
+All of it is observed only from signed local receipts; the block states what
+those receipts recorded and makes no claim beyond the decision's task set. A
+`v1` decision has no timing: it still parses, reads as `unmeasured`, and may be
+superseded by a `v2` decision for the same pair, never the reverse.
 
 ## Showing the shape of one prepared artifact
 

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import secrets
 import signal
+import sys
 
 from ..coding.hermes_child_dispatch import DispatchConfirmationError, DispatchRecursionError, HermesChildDispatchError, HermesChildObservation, HermesChildRequest, dispatch_hermes_child
 from ..system.approval_tier import TIER_AUTO_ALLOWED, resolve_approval_tier
@@ -123,8 +124,11 @@ def cmd_hermes_child_dispatch(args: argparse.Namespace) -> int:
     observation = _result_payload(args, result.status, usage)
     if terminal_event is None:
         raise OmhError("Hermes child dispatch produced no sealed terminal observation")
-    _write_observation(args, observation, terminal_event)
-    _emit(args, observation)
+    signed = _write_observation(args, observation, terminal_event)
+    _emit(args, signed)
+    if result.cleanup_note:
+        # Beside the signed observation, not in it: the status is the child's, and the left scratch home is not.
+        print(f"omh: {result.cleanup_note}", file=sys.stderr)
     return 0 if result.status == "completed" else 1
 
 
@@ -235,9 +239,9 @@ def _write_observation(
     args: argparse.Namespace,
     observation: dict[str, JsonValue],
     dispatch_observation: HermesChildObservation | None = None,
-) -> None:
+) -> dict[str, JsonValue]:
     try:
-        write_signed_observation(_run_dir(args), observation, dispatch_observation)
+        return write_signed_observation(_run_dir(args), observation, dispatch_observation)
     except ReceiptVerificationError as exc:
         raise OmhError(str(exc)) from exc
 

@@ -103,7 +103,19 @@ def _extends(cluster: str, ch: str) -> bool:
         return True
     if _is_emoji_modifier(ch):
         return True
+    if _composes(cluster[-1], ch):
+        return True
     return len(cluster) == 1 and _is_regional_indicator(cluster) and _is_regional_indicator(ch)
+
+
+def _composes(before: str, ch: str) -> bool:
+    """True when NFC writes `before` and the letter `ch` as one code point (Kirat Rai: U+16D63 U+16D67 is U+16D69).
+
+    Every other character NFC joins to the one before it is a mark, which `_extends` joins already. A narrow letter
+    is asked here, so text NFC has not composed yet (`clusters_as_written`) splits where NFC text does."""
+    if unicodedata.category(ch) != "Lo" or unicodedata.east_asian_width(ch) in _WIDE:
+        return False
+    return len(unicodedata.normalize("NFC", before + ch)) == 1
 
 
 def _segment(text: str) -> list[str]:
@@ -128,6 +140,12 @@ def clusters(text: str) -> list[str]:
     if len(text) <= _KEPT_TEXT_CHARS:
         return list(_kept_clusters(text))
     return _segment(unicodedata.normalize("NFC", text))
+
+
+def clusters_as_written(text: str) -> list[str]:
+    """`clusters` without its NFC step: the same units in `text`'s own code points, for a copy or a cut that must hand
+    back what was written (a decomposed macOS path still matches its file). `cell_width` measures one as painted."""
+    return list(text) if text.isascii() else _segment(text)
 
 
 def _ascii_width(text: str) -> int:
@@ -249,9 +267,12 @@ def _tokens(items: list[_Item]) -> list[list[_Item]]:
     return tokens
 
 
-def _wrap_paragraph(items: list[_Item], cells: int) -> list[list[_Item]]:
-    lines: list[list[_Item]] = []
+def _wrap_paragraph(items: list[_Item], cells: int) -> list[tuple[list[_Item], str | None]]:
+    """The paragraph's rows, each with how it goes on from the row above: None for the first, "space" after a break
+    that dropped spaces, "cut" inside a word too long for a row (`style.WRAP_SPACE`, `style.WRAP_CUT`)."""
+    lines: list[tuple[list[_Item], str | None]] = []
     line: list[_Item] = []
+    kind: str | None = None  # how `line` goes on from the row before it
     width = 0
     pending: list[_Item] = []  # spaces seen since the last word; dropped at a break
     for token in _tokens(items):
@@ -266,19 +287,19 @@ def _wrap_paragraph(items: list[_Item], cells: int) -> list[list[_Item]]:
             pending = []
             continue
         if line:
-            lines.append(line)
-            line, width = [], 0
+            lines.append((line, kind))
+            line, width, kind = [], 0, "space"
         pending = []
         for item in token:  # fits on a fresh line in one go, or is hard broken
             if line and width + item[1] > cells:
                 cut = _path_break(line, item)
-                lines.append(line[:cut])
-                line = line[cut:]
+                lines.append((line[:cut], kind))
+                line, kind = line[cut:], "cut"
                 width = _items_width(line)
             line.append(item)
             width += item[1]
     trailing, _ = _fit(pending, cells - width)
-    lines.append(line + trailing)
+    lines.append((line + trailing, kind))
     return lines
 
 
@@ -293,9 +314,9 @@ def _path_break(line: list[_Item], following: _Item) -> int:
     return len(line)
 
 
-def _wrap_items(items: list[_Item], cells: int) -> list[list[_Item]]:
+def _wrap_items(items: list[_Item], cells: int) -> list[tuple[list[_Item], str | None]]:
     cells = max(cells, 1)
-    wrapped: list[list[_Item]] = []
+    wrapped: list[tuple[list[_Item], str | None]] = []
     for paragraph in _paragraphs(items):
         wrapped.extend(_wrap_paragraph(paragraph, cells))
     return wrapped
@@ -303,7 +324,7 @@ def _wrap_items(items: list[_Item], cells: int) -> list[list[_Item]]:
 
 def wrap(text: str, cells: int) -> list[str]:
     """`text` as lines of at most `cells` each (see the module docstring for the rules)."""
-    return [_items_text(line) for line in _wrap_items(_text_items(text), cells)]
+    return [_items_text(line) for line, _kind in _wrap_items(_text_items(text), cells)]
 
 
 def line_width(line: Line) -> int:
@@ -332,4 +353,10 @@ def truncate_line(line: Line, cells: int, ellipsis: str = "…") -> Line:
 
 def wrap_line(line: Line, cells: int) -> list[Line]:
     """`wrap` for a styled line; every span keeps its style across the breaks."""
-    return [_items_line(row) for row in _wrap_items(_line_items(line), cells)]
+    return [_items_line(row) for row, _kind in _wrap_items(_line_items(line), cells)]
+
+
+def wrap_line_marked(line: Line, cells: int) -> list[tuple[Line, str | None]]:
+    """`wrap_line`, each row with how it goes on from the row above (None, "space" or "cut"; see `_wrap_paragraph`),
+    for a caller that marks its rows so a copy joins them again (`style.wrap_mark`)."""
+    return [(_items_line(row), kind) for row, kind in _wrap_items(_line_items(line), cells)]

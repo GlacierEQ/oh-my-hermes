@@ -27,7 +27,7 @@ from omh.tui.diff_view import (
     diff_rows,
     parse_inline_diff,
 )
-from omh.tui.style import Span
+from omh.tui.style import WRAP_SPACE, Span, wrap_mark
 from omh.tui.theme import DEFAULT_THEME as THEME
 from omh.tui.width import is_control, line_width
 
@@ -107,19 +107,20 @@ class RowTests(unittest.TestCase):
                          ["     app.py", "   1  import os", "   2", '   3 -print("hello")', '   3 +print("hi")'])
 
     def test_rows_hang_under_the_tool_and_take_their_roles(self) -> None:
-        rows = diff_rows(parse_inline_diff(SAMPLE), 40, THEME)
+        # A file with no syntax table keeps the one-colour rows (syntax colour: test_tui_diff_syntax).
+        rows = diff_rows(parse_inline_diff(SAMPLE.replace("src/app.py", "src/app.txt")), 40, THEME)
         indent = Span("     ")
         self.assertEqual(
             rows,
             [
-                (indent, Span("src/app.py", THEME.label)),
+                (indent, Span("src/app.txt", THEME.label)),
                 # the hunk header is no row: its starts number the lines in the dim gutter
                 (Span("   1 ", THEME.muted), Span(" import os", THEME.code)),
                 (Span("   2 ", THEME.muted), Span("-print('hello')" + " " * 20, THEME.diff_remove)),
                 (Span("   2 ", THEME.muted), Span(f"+print('안녕 {EARTH}')" + " " * 18, THEME.diff_add)),  # 17 cells
                 (indent, Span("\\ No newline at end of file", THEME.muted)),
                 (indent, Span("… omitted 12 diff line(s) across 1", THEME.muted)),
-                (indent, Span("additional file(s)/section(s)", THEME.muted)),
+                (wrap_mark(WRAP_SPACE), indent, Span("additional file(s)/section(s)", THEME.muted)),  # joined on copy
             ],
         )
 

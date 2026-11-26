@@ -16,10 +16,17 @@ dispatch, a `depends_on`, a repair or an extend) from a node with none, and
 what comes after a repaired node (a node that depends on it, or an extend its
 check added) sits below that node's repair, which ran first. The
 nodes of one frontier sit side by side with a ``· Same frontier`` label
-under them, and one connector (``│`` then ``▼``) joins one frontier to the
-next, whatever its edges. So the drawing implies no edge: the edges are
-exact in each box's parents line and in the ``Dependencies`` section under
-the boxes, which lists every edge between two lanes. ``Node details`` then
+under them. Between two frontiers the edges are drawn: ``│`` under each
+parent's middle, a bus joining a group of parents to its children
+(``╰──┬──╯``, ``╭──┴──╮``), and ``▼`` over each child's middle. A group is
+drawn only when every parent in it leads to every child, so the drawing
+never joins two boxes no edge joins; where the edges cannot be drawn so (an
+edge that skips a frontier, a frontier that wraps, two groups that would
+share a bus cell), one centred connector of its own marks (``╎`` then
+``▽``) joins the two frontiers instead: it says the gap's edges are not
+drawn, never that its column's boxes are joined (`_edge_rows`). Either way the edges
+are exact in each box's parents line and in the ``Dependencies`` section
+under the boxes, which lists every edge between two lanes. ``Node details`` then
 gives a card to each running or stuck node, and in `/dag` to the highlighted
 one: its whole title, category and model, status and output tokens, group and
 session. The tree's status column takes the token count too where the row has
@@ -109,7 +116,11 @@ _L, _R, _U, _D = 1, 2, 4, 8
 class Charset:
     name: str
     lines: Mapping[int, str]
+    bends: Mapping[int, str]  # the corners where an edge turns, in place of `lines`' box corners
     arrow: str
+    # The one centred connector of a gap whose edges are not drawn: its own marks, so it never reads as the edge a
+    # straight `│` over `▼` draws from a parent's middle to a child's.
+    undrawn: tuple[str, str]
     glyphs: Mapping[str, str]
     pending: str  # a box's glyph for a waiting node
     unrecorded: str  # a box's glyph for a node whose state has no record (the tree draws `?`)
@@ -134,7 +145,9 @@ UNICODE: Final = Charset(
         _L | _R | _D: "┬", _L | _R | _U: "┴", _U | _D | _R: "├", _U | _D | _L: "┤", _L | _R | _U | _D: "┼",
         _L: "─", _R: "─", _U: "│", _D: "│",
     },
+    bends={_R | _D: "╭", _L | _D: "╮", _R | _U: "╰", _L | _U: "╯"},
     arrow="▼",
+    undrawn=("╎", "▽"),
     glyphs={
         "root": "◆", "waiting": "·", "dispatched": "◌", "running": "●", "stuck": "!", "done": "✓",
         "failed": "✗", "interrupted": "▪", "unknown": "?",
@@ -166,7 +179,9 @@ ASCII: Final = Charset(
             )
         },
     },
+    bends={},
     arrow="v",
+    undrawn=(":", "."),
     glyphs={
         "root": "#", "waiting": ".", "dispatched": "o", "running": "*", "stuck": "!", "done": "+",
         "failed": "x", "interrupted": "-", "unknown": "?",
@@ -306,7 +321,8 @@ def _status_parts(node: Mapping[str, Any]) -> tuple[str, float | None]:
     word = clean_text(node.get("status")) or _state(node)
     elapsed = node.get("elapsed_seconds")
     if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool) and 0 <= elapsed < ELAPSED_LIMIT:
-        if _state(node) in ("running", "stuck", "done", "failed", "interrupted"):
+        # A parked node's figure is the time since it parked (`delegation_graph._parked_fields`).
+        if _state(node) in ("running", "stuck", "done", "failed", "interrupted") or node.get("parked") is True:
             return word, float(elapsed)
     return word, None
 
@@ -364,10 +380,25 @@ def _title(node: Mapping[str, Any]) -> str:
 
 
 def _category(node: Mapping[str, Any]) -> str:
-    return clean_text(node.get("category")) or UNKNOWN_FIELD
+    category = clean_text(node.get("category"))
+    if category and category != UNKNOWN_FIELD:
+        return category
+    # A child Hermes' delegation backend routed has the user's option (or profile) where OMH has no lane.
+    label = clean_text(node.get("route_label"))
+    return f"@{label}" if label else UNKNOWN_FIELD
 
 
-STATE_ORDER: Final = ("running", "stuck", "failed", "dispatched", "waiting", "interrupted", "unknown", "done")
+STATE_ORDER: Final = (
+    "running", "stuck", "failed", "dispatched", "parked", "due", "waiting", "interrupted", "unknown", "done",
+)
+
+
+def parked_word(node: Mapping[str, Any]) -> str:
+    """``due`` for a parked node past its wake time (`delegation_graph._parked_fields`), ``parked`` for one still
+    waiting, \"\" for any other node."""
+    if node.get("parked") is not True:
+        return ""
+    return "due" if node.get("parked_due") is True else "parked"
 
 
 def header_parts(graph: Mapping[str, Any], charset: Charset = UNICODE) -> tuple[str, str]:
@@ -381,7 +412,9 @@ def header_parts(graph: Mapping[str, Any], charset: Charset = UNICODE) -> tuple[
     sep = charset.separator
     counts: dict[str, int] = {}
     for node in lanes:
-        state = _state(node)
+        # A parked node is a waiting one (`delegation_graph._parked_fields`), counted apart as its layer counts it:
+        # `due` once its wake time passed, so a wait that is over is not counted as one still going.
+        state = parked_word(node) or _state(node)
         counts[state] = counts.get(state, 0) + 1
     tally = [f"{counts[state]:,} {state}" for state in STATE_ORDER if counts.get(state)]
     hidden = graph.get("hidden_nodes")
@@ -510,6 +543,35 @@ def _repair_order(
             if dependent not in group and kinds.get((repaired, dependent)) != "dispatch" for member in sorted(group)]
 
 
+def _outside_lanes(graph: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The graph's ``outside_dag`` lanes (a dag run's unbound ledger children), in drawing order.
+
+    They stand beside the run, never in it: the boxes and the tree leave them
+    out, and `_outside_section` draws them under their own heading.
+    """
+    return sorted(
+        [node for node in _nodes(graph) if node.get("outside_dag") is True],
+        key=lambda node: (_order(node), str(node["id"])),
+    )
+
+
+def _without_outside(graph: Mapping[str, Any]) -> Mapping[str, Any]:
+    """``graph`` for the run's own drawing: no outside lane in nodes or edges.
+
+    The bounds a reader applied (`hidden_nodes`, `hidden_by_state`) already
+    name only the lanes it left out — the outside lanes here were kept, not
+    hidden — so they pass through untouched: moving drawn lanes to their own
+    group never shrinks what the reader omitted.
+    """
+    outside_ids = {str(node["id"]) for node in _outside_lanes(graph)}
+    nodes = [node for node in graph.get("nodes") or []
+             if not isinstance(node, Mapping) or str(node.get("id")) not in outside_ids]
+    edges = [edge for edge in graph.get("edges") or []
+             if not isinstance(edge, Mapping)
+             or (str(edge.get("from")) not in outside_ids and str(edge.get("to")) not in outside_ids)]
+    return {**graph, "nodes": nodes, "edges": edges}
+
+
 def _frontiers(graph: Mapping[str, Any]) -> _Frontiers | None:
     """The lanes by frontier: a lane's frontier is its longest path of recorded edges from a lane with none, and a
     lane that comes after a repaired lane sits below that lane's repair (`_repair_order`).
@@ -518,7 +580,8 @@ def _frontiers(graph: Mapping[str, Any]) -> _Frontiers | None:
     ``Start node``, and its model is named in the header. None when there is
     no lane, or the edges between lanes loop.
     """
-    lanes = {str(node["id"]): node for node in _nodes(graph) if node.get("kind") != "root"}
+    lanes = {str(node["id"]): node for node in _nodes(graph)
+             if node.get("kind") != "root" and node.get("outside_dag") is not True}
     if not lanes:
         return None
     ids = list(lanes)
@@ -809,7 +872,8 @@ def _box_header(graph: Mapping[str, Any], shape: _Frontiers, width: int, charset
 
 def _dependencies(shape: _Frontiers, width: int, charset: Charset) -> list[tuple[Segment, ...]]:
     """Every edge between lanes as text, ``Export API → Export button``, its kind named unless it is a
-    `depends_on`: the boxes draw one connector per frontier gap, so this is where the edges are exact."""
+    `depends_on`: where the boxes draw one centred connector for a frontier gap (`_edge_rows`), this is where its
+    edges are exact."""
     lines: list[tuple[Segment, ...]] = [(), (Segment("Dependencies", "header"),)]
     arrow = f" {charset.right} "
     for upper, lower, kind in shape.edges:
@@ -891,6 +955,69 @@ def _details(
     return lines
 
 
+def _edge_rows(
+    shape: _Frontiers, upper: int, middle: Mapping[str, int], charset: Charset,
+) -> list[tuple[Segment, ...]] | None:
+    """The edges from frontier ``upper`` to the next, drawn as they are: ``│`` under each parent's middle, a bus that
+    joins one group of parents to its children (``╰──┬──╯``, ``╭──┴──╮``), and ``▼`` over each child's middle.
+
+    A group is the parents and children its edges connect, and it is drawn
+    only when every parent in it leads to every child, so a bus never joins
+    two boxes no edge joins. None, and the one centred connector is drawn
+    in its own marks (``╎`` over ``▽``, `Charset.undrawn`, which read as no
+    edge), where the gap holds no edge, an edge into or out of it skips a
+    frontier, either frontier wraps (it has no single row to draw to), a
+    group is not every parent to every child, or two groups' buses would
+    share a cell.
+    Each group is dim, and blue where a child of it runs.
+    """
+    crossing = [(source, target) for source, target, _kind in shape.edges
+                if shape.layer[source] <= upper < shape.layer[target]]
+    if not crossing or any(shape.layer[source] != upper or shape.layer[target] != upper + 1
+                           or source not in middle or target not in middle for source, target in crossing):
+        return None
+    groups: list[tuple[set[str], set[str], int]] = []  # parents, children, edges
+    for source, target in crossing:
+        joined = [group for group in groups if source in group[0] or target in group[1]]
+        parents, children, count = {source}, {target}, 1
+        for group in joined:
+            parents, children, count = parents | group[0], children | group[1], count + group[2]
+            groups.remove(group)
+        groups.append((parents, children, count))
+    drawn: list[tuple[int, int, set[int], set[int], str]] = []  # first cell, last cell, parents', children's, role
+    for parents, children, count in groups:
+        if count != len(parents) * len(children):
+            return None
+        tops, bottoms = {middle[node_id] for node_id in parents}, {middle[node_id] for node_id in children}
+        running = any(_state(shape.lanes[node_id]) == "running" for node_id in children)
+        drawn.append((min(tops | bottoms), max(tops | bottoms), tops, bottoms,
+                      "connector:running" if running else "connector"))
+    drawn.sort()
+    if any(earlier[1] >= later[0] for earlier, later in zip(drawn, drawn[1:])):
+        return None
+
+    def row(marks: dict[int, tuple[str, str]]) -> tuple[Segment, ...]:
+        pieces, at = [], 0
+        for cell in sorted(marks):
+            mark, role = marks[cell]
+            pieces += [Segment(" " * (cell - at), ""), Segment(mark, role)]
+            at = cell + 1
+        return _tidy(pieces)
+
+    bar = charset.lines[_U | _D]
+    stubs = {cell: (bar, role) for _first, _last, tops, _bottoms, role in drawn for cell in tops}
+    arrows = {cell: (charset.arrow, role) for _first, _last, _tops, bottoms, role in drawn for cell in bottoms}
+    bus: dict[int, tuple[str, str]] = {}
+    for first, last, tops, bottoms, role in drawn:
+        for cell in range(first, last + 1):
+            bits = ((_U if cell in tops else 0) | (_D if cell in bottoms else 0)
+                    | (_L if cell > first else 0) | (_R if cell < last else 0))
+            bus[cell] = (charset.bends.get(bits) or charset.lines[bits], role)
+    if all(first == last for first, last, *_rest in drawn):
+        return [row(stubs), row(arrows)]  # every edge is straight down: no bus to draw
+    return [row(stubs), row(bus), row(arrows)]
+
+
 @dataclass(frozen=True)
 class _Boxes:
     lines: list[tuple[Segment, ...]]
@@ -928,6 +1055,11 @@ def _box_view(
     lines = [*_box_header(graph, shape, width, charset), ()]
     boxes: list[tuple[str, int, int]] = []
     order: list[str] = []
+    middle: dict[str, int] = {}  # the cell under each box's middle, in a frontier drawn on one row
+    for frontier in shape.rows:
+        if len(frontier) <= per_row:
+            left = (span - len(frontier) * (box_width + GAP) + GAP) // 2 + box_width // 2
+            middle.update((node_id, left + at * (box_width + GAP)) for at, node_id in enumerate(frontier))
     for index, frontier in enumerate(shape.rows):
         # A frontier is centred; one that wraps keeps the column its first row starts at, so it reads as one grid.
         offset = (span - min(per_row, len(frontier)) * (box_width + GAP) + GAP) // 2
@@ -952,15 +1084,23 @@ def _box_view(
         if len(frontier) > 1:
             lines.append(_tidy([Segment(" " * offset, ""), Segment(f"{charset.dot} Same frontier", "frontier")]))
         if index < len(shape.rows) - 1:
-            # Dim, and blue where it leads into a frontier with a node running.
+            edge_lines = _edge_rows(shape, index, middle, charset)
+            if edge_lines is not None:
+                lines += edge_lines
+                continue
+            # Its own marks (`Charset.undrawn`): a straight `│` over `▼` is an edge, and this is none. Dim, and blue
+            # where it leads into a frontier with a node running.
             below = {_state(shape.lanes[node_id]) for node_id in shape.rows[index + 1]}
             role = "connector:running" if "running" in below else "connector"
-            for mark in (charset.lines[_U | _D], charset.arrow):
+            for mark in charset.undrawn:
                 lines.append(_tidy([Segment(" " * connector, ""), Segment(mark, role)]))
     if sections >= 1 and shape.edges:
         lines += _dependencies(shape, width, charset)
     if sections >= 2 and (focus is None or focus.details):
         lines += _details(shape, order, width, charset, focus, spinner)
+    outside = _outside_lanes(graph)
+    if outside:
+        lines += _outside_section(outside, width, charset)
     if any(cells("".join(segment.text for segment in line)) > width for line in lines):
         return None
     return _Boxes(lines, tuple(boxes))
@@ -971,13 +1111,53 @@ def _group_label(label: object, charset: Charset) -> str:
     return clean_text(label).replace(UNICODE.separator, charset.separator)
 
 
+# ── the outside-DAG group ────────────────────────────────────────────────
+
+OUTSIDE_GROUP_LABEL: Final = "outside DAG"
+
+
+def _outside_section(outside: Sequence[Mapping[str, Any]], width: int, charset: Charset) -> list[tuple[Segment, ...]]:
+    """The run's unbound lanes under their own heading, after the run's drawing: ``outside DAG``, then one row a
+    lane — its glyph, title, then the tree's facts (category, model, status, a count or the session tail). A lane's
+    row never widens the drawing past ``width``; one lane one line, so a long roster stays bounded by its count.
+    """
+    sep = charset.separator
+    lines: list[tuple[Segment, ...]] = [(), (Segment(OUTSIDE_GROUP_LABEL, "group"),)]
+    for node in outside:
+        state = _state(node)
+        title = _title(node)
+        row: list[Segment] = [
+            Segment(SECTION_INDENT, ""), Segment(_glyph(node, charset, None), f"glyph:{state}"),
+            Segment(f" {title}", "unknown" if title == UNTITLED else f"node-title:{state}"),
+        ]
+        category, model = _tree_fields(node)
+        for text, role in ((category, "category"), (model, "model")):
+            if text:
+                row += [Segment(sep, "edge"), Segment(text, _field_role(text, role))]
+        row += [Segment(sep, "edge"), Segment(_status_text(node), f"status:{state}")]
+        tokens = _tokens_text(node, charset)
+        tail = clean_text(node.get("session_tail"))
+        if tokens:
+            row += [Segment(sep, "edge"), Segment(tokens, "more")]
+        elif tail:
+            row += [Segment(sep, "edge"), Segment(f"session {tail}", "more")]
+        lines.append(_cut_line(row, width, charset))
+    return lines
+
+
+def _outside_group_line(count: int, width: int, charset: Charset) -> tuple[Segment, ...]:
+    """The group alone as one line, for a drawing whose budget the rows do not fit: ``outside DAG · 3 lanes``."""
+    text = f"{OUTSIDE_GROUP_LABEL}{charset.separator}{count} lane{'' if count == 1 else 's'}"
+    return (Segment(fit(text, max(4, width - cells(SECTION_INDENT)), charset.ellipsis), "group"),)
+
+
 # ── the tree ─────────────────────────────────────────────────────────────
 
 
 def _tree_structure(graph: Mapping[str, Any]) -> tuple[
     Mapping[str, Any] | None, list[tuple[str, list[str]]], dict[str, list[str]], dict[str, Mapping[str, Any]]
 ]:
-    nodes = _nodes(graph)
+    nodes = [node for node in _nodes(graph) if node.get("outside_dag") is not True]
     by_id = {str(node["id"]): node for node in nodes}
     root = next((node for node in nodes if node.get("kind") == "root"), None)
     root_id = str(root["id"]) if root else ""
@@ -1271,11 +1451,13 @@ def render_delegation_view(
     safe_width = max(8, int(width)) if isinstance(width, int) and not isinstance(width, bool) else 80
     if not isinstance(graph, Mapping) or not _nodes(graph):
         return View((), "header")
+    # The run's unbound lanes never join the drawing's layers or tree: they are drawn under their own heading
+    # after whichever layout the run takes (`_outside_section`), or as one summary line where the budget is thin.
+    outside = _outside_lanes(graph)
+    full = graph
+    graph = _without_outside(graph) if outside else graph
     header = _header_lines(graph, safe_width, chosen)
-    # Whether any lane carries a count is part of the key: it changes the boxes' widths (`_box_natural`), so a
-    # decision made for a graph before its first count must not be replayed for it after, nor the other way round.
-    counted = _any_count(_nodes(graph))
-    key = (_structure(graph), counted, safe_width, max_lines, max_chars, chosen.name, layout, spinner, focus)
+    outside_lines = _outside_section(outside, safe_width, chosen) if outside else []
 
     def fits(lines: Sequence[tuple[Segment, ...]]) -> bool:
         if max_lines is not None and len(lines) > max_lines:
@@ -1286,30 +1468,58 @@ def render_delegation_view(
                 return False
         return True
 
+    def with_outside(view: View) -> View:
+        """``view`` with the outside-DAG group appended: its rows when they fit, else its heading with as many as
+        do, else the one-line summary — the group is never lost while a line of it fits."""
+        if not outside or view.layout in ("box", "tree"):
+            # The layouts draw the group themselves (`_box_view`, the tree's own fit): only the header leaves it out.
+            return view
+        if fits((*view.lines, *outside_lines)):
+            return View((*view.lines, *outside_lines), view.layout, view.hidden_nodes, view.levels, view.boxes)
+        # What room is left keeps the heading and the oldest rows; `+N more` closes a roster it cannot show whole.
+        room = (max_lines - len(view.lines)) if max_lines is not None else len(outside_lines)
+        if room >= 3:
+            kept = room - 1  # blank, the heading, then rows; the last kept row says how many lanes went unseen
+            summary = _outside_group_line(len(outside) - (kept - 2), safe_width, chosen)
+            shown = [*outside_lines[:kept], summary]
+            if fits((*view.lines, *shown)):
+                return View((*view.lines, *shown), view.layout, view.hidden_nodes, view.levels, view.boxes)
+        summary = _outside_group_line(len(outside), safe_width, chosen)
+        if fits((*view.lines, (), summary)):
+            return View((*view.lines, (), summary), view.layout, view.hidden_nodes, view.levels, view.boxes)
+        return view
+
+    # Whether any lane carries a count is part of the key: it changes the boxes' widths (`_box_natural`), so a
+    # decision made for a graph before its first count must not be replayed for it after, nor the other way round.
+    counted = _any_count(_nodes(graph))
+    key = (_structure(graph), counted, safe_width, max_lines, max_chars, chosen.name, layout, spinner, focus)
+
     def boxes(sections: int) -> View | None:
-        drawn = _box_view(graph, safe_width, chosen, sections=sections, focus=focus, spinner=spinner)
+        # The layouts filter outside lanes themselves (`_frontiers`, `_tree_structure`) and draw their group.
+        drawn = _box_view(full, safe_width, chosen, sections=sections, focus=focus, spinner=spinner)
         if drawn is None or not fits(drawn.lines):
             return None
         return View(tuple(drawn.lines), "box", boxes=drawn.boxes)
 
     def tree(hidden: set[str]) -> View | None:
-        body = _tree_lines(graph, safe_width, chosen, hidden, spinner)
-        if not fits((*header, *body)):
+        body = _tree_lines(full, safe_width, chosen, hidden, spinner)
+        # The group is part of the drawing, so the tree's own hide-order makes room for it as it would for lanes.
+        if not fits((*header, *body, *outside_lines)):
             return None
         levels = 1 + max((segment.level for line in body for segment in line if segment.role == "edge"), default=0)
-        return View((*header, *body), "tree", len(hidden), levels)
+        return View((*header, *body, *outside_lines), "tree", len(hidden), levels)
 
     decided = _DECISIONS.get(key)
     if decided is not None:
         kind, detail = decided
         replayed = boxes(detail) if kind == "box" else tree(set(detail)) if kind == "tree" else None
         if replayed is not None:
-            return replayed
+            return with_outside(replayed)
     view, decision = _choose(graph, safe_width, chosen, header, layout, boxes, tree, fits)
     if len(_DECISIONS) >= DECISION_LIMIT:
         _DECISIONS.pop(next(iter(_DECISIONS)))
     _DECISIONS[key] = decision
-    return view
+    return with_outside(view)
 
 
 _DECISIONS: dict[tuple[Any, ...], tuple[str, Any]] = {}

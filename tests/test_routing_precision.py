@@ -68,7 +68,65 @@ class RoutingPrecisionTests(unittest.TestCase):
         # Three science vocabulary controls remain direct answers.
         # Career actor repair adds five employer requests and two references.
         # Actor/objective follow-up adds seven employer contrasts.
-        self.assertEqual(payload["summary"]["case_count"], 1114)
+        # The Russian trigger pack adds three negatives its held-back words guard,
+        # and its review twenty-five everyday Russian turns.
+        # repro-audit adds one vocabulary control; its review replaces it with
+        # 19 controls that each say a phrase the skill once dispatched on;
+        # the #2324 review adds ten more for its execution and relation clauses,
+        # and its delta review ten more, one per position of the allow-listed shape,
+        # then four quoted or code-span trailing clauses.
+        # sprite-forge adds CSS pixel, soda brand and spreadsheet-sheet controls.
+        # The rendered-scene lane adds four negatives.
+        # A show-reel closed form beside a modifier symbol, and one after a
+        # channel backfill, add two. Fourteen backfills one word or one shape
+        # from inert, and two more characters the fold drops whole, add sixteen.
+        # A digit or capital sender name and a first line with no sender add three.
+        # show-reel's idea-video lane adds thirteen video words in other senses,
+        # and its second review eighteen more (UI, loop, fault, recording), and
+        # its third two Japanese logo animations on an app surface.
+        # The show-reel recall follow-up adds six closed-shape controls, and its
+        # review round four more.
+        # Two coding requests that name OMH as the tool stay off workflow-learning,
+        # and so do two throwaway OMH test messages and the user's own router,
+        # two tasks on what OMH selected or picked, and a Korean test request,
+        # and eight messages where a command follows what OMH chose.
+        # #2485: find-out tasks after what OMH picked, an OMH terminology
+        # loader migration, Korean messages with "OMH가" that read as on main,
+        # OMH ignoring files, and a filler adverb, a why-question about a
+        # parser and "Hermes with OMH" before a task stay off it too.
+        # systematic-review adds six review, screening and criteria controls.
+        # The ops-review pair keeps `리스크` and `블로커` spelled across other words out.
+        # model-compression adds eleven compress, quantize, prune and distill
+        # controls in another sense and moves "distill this model" to the
+        # intervention corpus.
+        # Its review round adds twenty-four controls with an ordinary
+        # statistics, 3D, game, signal or know-how word beside a shared phrase.
+        # Its second review round adds eighteen: billions that are money, data or
+        # volume, game and 3D bit widths, grid transformers, firmware quantization.
+        # Its third review round adds four: two billions of money or data.
+        # dag-ulw backlogs add thirteen: lists too short, looked at, held or put off, chores and reading, and
+        # fixes in the current directory or branch that are no live lookup.
+        # One-line code backlogs add ten: four made in the session, six one-line look-alikes that keep their route.
+        # skill-eval adds four: a chess, tennis, interview and Korean sales skill are a person's ability.
+        # Its review round adds one: a person's skill at using Codex.
+        # PR watch adds six: a PR queue, two videos, a how-to, a CI concept question and a watch-out warning.
+        # Its verification round adds three: a PR metric and two deploys watched beside a PR.
+        # Its final round adds three PR measures watched until a date.
+        # Its hold round adds five: four declined watches and CI on main.
+        # Monitor recipes add ten platform mentions that ask for no trigger.
+        # Their review round adds twelve: time questions, outages, APIs, `in linear`, 이전에, a plugin update.
+        # Cross-platform workflows add nine: replies, calendar questions, a reminder alert, a Sentry question,
+        # a bare vault and Figma exports.
+        # Its review round adds eight: words matched inside longer words, a common noun, an alert read, a reply,
+        # a secrets vault, a bolt, and two questions about meeting notes.
+        # Merged: 1584 (monitor recipes) + 17 cross-platform cases = 1601.
+        # Its anchor round adds one: viewing a Figma frame is a question.
+        # bot-template adds eight: four bot templates coded for a messenger or in a language, a Korean one,
+        # and a Jinja and two prompt templates.
+        # Its review round adds four repository template files named like a template id.
+        # Its verification round adds four: a template deleted, removed, exported, or built in Python.
+        # Its last round adds two bot templates written in Python beside a template id.
+        self.assertEqual(payload["summary"]["case_count"], 1632)
         self.assertEqual(payload["summary"]["passing_count"], payload["summary"]["case_count"])
         self.assertEqual(payload["summary"]["negative_case_count"], payload["summary"]["case_count"])
         self.assertEqual(payload["summary"]["negative_passing_count"], payload["summary"]["case_count"])
@@ -138,9 +196,31 @@ class RoutingPrecisionTests(unittest.TestCase):
         # A stop with a declarative reason is answered directly (+1).
         # The three science vocabulary controls also answer directly.
         # The two quoted employer controls are answered directly.
-        self.assertEqual(payload["summary"]["direct_answer_count"], 349)
+        # repro-audit's score explainer is answered directly (+1).
+        # The three sprite-forge vocabulary controls answer directly (+3).
+        # The rendered-scene lane's crime-scene control is a direct answer (+1).
+        # show-reel's quoted idea-video ask is translation input, answered directly (+1).
+        # A concept question under a busy-path gateway origin is answered directly (+1).
+        # 356 -> 359: the reach round's negatives that the router answers directly.
+        # 364 -> 370: four one-line code backlogs, functions to explain and a one-line typo answer directly.
+        # 370 -> 371: the PR watch lane's CI concept question is answered directly.
+        # 371 -> 372: its staging deploy beside a merged PR falls back to a direct answer.
+        # 372 -> 374: the monitor-trigger lane's calendar question and linear regression are answered directly.
+        # 374 -> 377: its review round's last-mail question, Gmail outage and `in linear regression`.
+        # 377 -> 379: the cross-platform calendar question and Sentry concept question are answered directly.
+        # 379 -> 380: viewing a Figma frame in presentation mode is answered directly.
+        self.assertEqual(payload["summary"]["direct_answer_count"], 380)
         # show-reel's README-link control is answered as a file lookup (+1).
-        self.assertEqual(payload["summary"]["file_lookup_count"], 11)
+        # "Use OMH to fix the failing test in billing.py" names a file: a file lookup (+1).
+        # Copying the skills OMH selected and summarizing the files it picked
+        # are file tasks (+2), and so is opening the files OMH selected (+1).
+        # Finding the unused keys of the config OMH picked, asked in Korean, is
+        # a file lookup (+1), and so is the English one with a courtesy tail (+1).
+        # A recruiter question and a contract clause that quote an
+        # architecture-deepening phrase are answered as file lookups (+2).
+        # 19 -> 20: the reach round's `at the same time instead` sentence reads as a file lookup.
+        # 20 -> 21: three files to read, said in one line, are a file lookup.
+        self.assertEqual(payload["summary"]["file_lookup_count"], 21)
         self.assertEqual(payload["summary"]["overroute_count"], 0)
         self.assertEqual(payload["summary"]["catalog_picker_count"], 0)
         self.assertEqual(payload["summary"]["generic_ack_count"], 0)
@@ -192,7 +272,59 @@ class RoutingPrecisionTests(unittest.TestCase):
         # two negatives that hold broad wording out (a red-team hiring
         # sentence and gop prose). Both `gộp` gate phrases clarify, so their
         # `merge` twins stay beside them and keep the dispatch path.
-        self.assertEqual(payload["summary"]["intervention_case_count"], 1130)
+        # The Russian trigger pack adds eleven interventions, its review nine,
+        # and three Korean ones that pin its scoring rule to Russian.
+        # repro-audit adds one HellaSwag log versus paper request, and its
+        # review three more requests in the admitted shape, then one that
+        # closes on the compared metric.
+        # sprite-forge adds one game character sprite sheet request.
+        # The rendered-scene lane adds five frontend interventions.
+        # Two show-reel closed forms after an acknowledgement-only channel backfill.
+        # show-reel's idea-video lane adds fourteen videos from an idea; its
+        # second review drops one and adds eight owners of a named video.
+        # The show-reel recall follow-up adds six recovered closed shapes.
+        # Two OMH meta tests (route hint vocabulary, router on workflow names)
+        # keep workflow-learning, and two reports on OMH's router reach it.
+        # Two CI-workflow edits through OMH dispatch the coding lane, and five
+        # reports or meta questions keep workflow-learning. A later command keeps
+        # release-cut, and two more reports keep workflow-learning. A command
+        # after "then" keeps command-operator, and "list the reasons" is a report.
+        # Three reports the classifier missed (a Korean 보냈어, OMH ignoring the
+        # request, OMH "apparently" choosing) reach workflow-learning, and a
+        # Korean casual "고쳐줘?" after what OMH picked keeps the coding lane,
+        # a Korean "정리해 둬" keeps toolbelt-readiness, OMH missing a test
+        # before an add-tests request keeps ultrawork, and two reports quoting
+        # the user's own migrate / rewrite ask reach workflow-learning.
+        # systematic-review adds four screening requests and two owner-keeping controls.
+        # The ops-review pair keeps `리스크블로커` and `주요리스크와 블로커`.
+        # model-compression adds eight compression requests and three owner-keeping controls.
+        # Its review round adds eight requests that missed: GGUF and 4-bit Korean
+        # quantization, distillation by parameter count, a llama model slimmed.
+        # Its second review round drops the Korean 4-bit case, which falls back to main.
+        # dag-ulw backlogs add eleven: five code backlogs that run as a graph, four listed look-alikes
+        # that keep their owner, two live lookups said with "current".
+        # One-line look-alikes add two: one bug's symptoms and one feature's parts keep their owner.
+        # skill-eval adds seven host-fit checks (four English, three Korean) and five asks that keep
+        # skill-health, skill-scout and agent-evaluation.
+        # Its review round adds three: two artifact checks that dispatch, one staff assessment that does not.
+        # PR watch adds seven: five waits on one PR that dispatch, a PR review and CI on main that keep their owner.
+        # Its verification round adds one: a deploy monitored after a merge keeps deploy-and-monitor.
+        # Its final round adds five PR waits that name logs, production, a server or a deploy elsewhere.
+        # Its hold round adds two: a declined review, then a PR watch, in English and Korean.
+        # Monitor recipes add seventeen: twelve platform triggers that dispatch and five neighbours that keep their owner.
+        # Their review round adds six neighbours that keep connector-operator or gateway-intent-card.
+        # Cross-platform workflows add twenty-seven: nineteen app items, meeting records, vault uses and Figma
+        # frames that dispatch, and eight sentences in another lane that keep their owner.
+        # Its review round adds eight more sentences in another lane that keep their owner.
+        # Cross-platform, merged with monitor recipes: two trigger sentences naming their work stay with
+        # automation-blueprint. Merged: 1390 (monitor recipes) + 37 cross-platform cases = 1427.
+        # Its verification round adds three: an existing PR link, an urgent spec to PR, a recall apart from the vault.
+        # bot-template adds eleven: eight applies and lists (five English with the desktop app's message, three Korean)
+        # that dispatch, and a PR, a release notes and an issue template that keep their owners.
+        # Its review round adds a Korean template file edit that keeps content-operator and a Korean recommend ask.
+        # Its verification round adds a Korean delete that keeps code-review.
+        # Its last round adds Korean Python code for a pr-review bot template, which keeps code-review.
+        self.assertEqual(payload["summary"]["intervention_case_count"], 1496)
         self.assertEqual(
             payload["summary"]["intervention_passing_count"], payload["summary"]["intervention_case_count"]
         )

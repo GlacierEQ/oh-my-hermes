@@ -14,6 +14,7 @@ from collections.abc import Callable
 import copy
 from datetime import datetime, timezone
 import json
+import re
 import os
 from pathlib import Path
 import sqlite3
@@ -154,6 +155,8 @@ def folded(rows: list[str]) -> tuple[int, int]:
                 earlier = count
             elif "later" in row:
                 later = count
+        elif re.fullmatch(r"✓ \d+ done", row):  # done items above the window fold into one row
+            earlier = int(row.split()[1])
     return earlier, later
 
 
@@ -335,7 +338,7 @@ class AgentsBlockTests(unittest.TestCase):
                 agent_row(0),
                 agent_row(1, state="done", category="critic", model="gpt-6.1-sol", effort="xhigh", route_origin="fallback"),
                 agent_row(
-                    2, state="queued", lane_backend="kanban", assignee="miku", native_status="ready", model="kimi-k3", effort=""
+                    2, state="queued", lane_backend="kanban", assignee="mbot", native_status="ready", model="kimi-k3", effort=""
                 ),
                 agent_row(3, dispatch_lane="maestro", executor_profile="claude_code", model="claude-fable-5-1"),
                 agent_row(4, category="inherit", model="glm-5.3", effort=""),
@@ -347,7 +350,7 @@ class AgentsBlockTests(unittest.TestCase):
         body = "\n".join(rows)
         self.assertIn("category:architect(claude-opus-5-5:high)", body)
         self.assertIn("category:critic(gpt-6.1-sol:xhigh fallback)", body)
-        self.assertIn("kanban/miku(kimi-k3)", body)
+        self.assertIn("kanban/mbot(kimi-k3)", body)
         self.assertIn("(claude/maestro claude-fable-5-1)", body)
         self.assertIn("inherit(glm-5.3)", body)
         self.assertNotIn("anthropic/", body, "the route names the model, not who serves it")
@@ -1047,7 +1050,7 @@ def parity_cases() -> list[dict]:
         agent_row(0, turn_count=3, tool_count=12, cost_usd=0.0431, cost_approximate=True, tokens_per_second=41.6,
                   cache_hit_percentage=88, context_percentage=40, fallback_count=1),
         agent_row(1, state="done", category="critic", model="gpt-6.1-sol", effort="xhigh", route_origin="fallback"),
-        agent_row(2, state="queued", lane_backend="kanban", assignee="miku", native_status="ready", model="kimi-k3"),
+        agent_row(2, state="queued", lane_backend="kanban", assignee="mbot", native_status="ready", model="kimi-k3"),
         agent_row(3, dispatch_lane="maestro", executor_profile="claude_code", model="claude-fable-5-1"),
         agent_row(
             4, state="blocked", action="Blocked worker 한글 제목", category="inherit", cost_usd=0, cost_status="included"
@@ -1106,6 +1109,9 @@ class PanelRowsTests(unittest.TestCase):
                 # which read as a stray dot (audit D7); the TUI draws none, so it
                 # comes off the recorded header and nothing else.
                 header, *items = rows["plan_rows"]
+                # The widget folded the done items above the window as `... (N earlier tasks)`; since the owner's
+                # pass of 2026-10-28 the panel says `✓ N done` for them, and nothing else on the rows moved.
+                items = [re.sub(r"^\.\.\. \((\d+) earlier tasks?\)$", r"✓ \1 done", item) for item in items]
                 self.assertEqual(mine[plan_at:], [header.removesuffix(" ."), *items])
                 # The widget opened the agents block with its fanout graph (`  [global] DAG ·` and one
                 # `  [R]/[+]/[!]` row per unit). The panel draws the delegation block from

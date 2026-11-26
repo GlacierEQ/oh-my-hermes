@@ -15,51 +15,18 @@ metadata:
 
 # Todo Checklist
 
-This is a Hermes-native `todo-checklist` workflow skill.
+Required: the work to be tracked. Output: a declared checklist with exactly one active item, explicit states as work completes.
 
 ## Why This Exists
 
 `todo-checklist` exists because `omh_todo` is registered on every session while nothing in the skill surface named it: a user who wanted a plan checklist searched for one and found no skill on the subject. The delivery engines declare a checklist as part of starting work, which serves someone running an engine and nobody else.
 
-## Do Not Use When
-
-- The work is one step, already finished, or answerable in this turn; a checklist that never advances is a panel of noise.
-- The user wants an accepted implementation plan split into parallel lanes with owners and verification commands; use `ulw-work`.
-- The user wants the planning content itself -- options, risks, acceptance criteria before execution; use `ulw-plan`.
-- The user is asking what coding work is running right now rather than what the plan says; use `omh-running-work-board`.
-
-## Examples
-
-Good example:
-
-- Prompt: declare a plan checklist for this migration so I can see where you are
-- Expected behavior: Declare numbered phases in delivery order with one task per observable outcome, exactly one active, and update states as work completes.
-- Why: The user wants the HUD checklist itself, for work that spans turns, without starting a delivery engine.
-
-Bad example:
-
-- Prompt: add a TODO comment above this function
-- Expected behavior: Edit the code; the plan todo panel has nothing to do with a source comment.
-- Why: `todo` is an everyday word in a coding session and this use of it is not a plan checklist.
-
-## Completion Checklist
-
-- Exactly one item is active, or the list is complete and every item is done.
-- The steps live in one tool; the same list is never written to both `todo_list` and `omh_todo`.
-- Use `action=advance` or a complete `action=set` list; never drop an item by omission.
-- Item states are described as declarations; observed results are cited separately or named as missing.
-- Name whether work is blocked or human-deferred.
-
-## Recovery Notes
-
-- After a partial `action=set`, resend every item; use `action=advance` for state changes.
-- If the panel shows nothing, read the current projection with `action=show` before re-declaring, so an existing checklist is not overwritten.
-- If the user redirects the session away from the plan, record that on the write rather than deleting the checklist or marking its items done.
+Contract: `references/full-contract.md` (examples, sibling boundaries, full artifact details).
 
 ## Workflow Lane
 
-- Current lane: **Automation and status** (`achievements`, `workspace-audit`, `production-audit`, `live-incident-response`, `automation-blueprint`, `github-event-ops`, `github-issue-intake`, `buzz`, `+40 more`) - schedules, status, health, and ops review.
-- If intent belongs to another lane, hand back to `oh-my-hermes` or name the adjacent workflow.
+- Current lane: **Automation and status** - schedules, status, health, and ops review.
+- If intent belongs to another lane, hand back to `omh-routing` or name the adjacent workflow.
 - Shared product, routing, compatibility, and evidence rules: `skill_view(name='omh-routing', file_path='references/skill-common-rail.md')`.
 
 ## When to Use
@@ -93,23 +60,24 @@ Handoff policy:
 
 Keep the steps in ONE tool, never both: a planning run, an accepted plan or a code-story template keeps them in `omh_todo`; otherwise `todo_list` holds them when `todo_list` is in your tool list or tool_search finds it, and OMH mirrors each write into this plan todo, else `omh_todo`. `omh_todo` alone holds `plan_stage`, checkpoint/record/recall, `blocked_reason` and `deferred_reason`. A checklist item is a plan declaration and never dispatches, executes, or verifies anything.
 
-Required inputs:
-
-- the work to be tracked
-
-Expected outputs:
-
-- a declared checklist with exactly one active item
-- explicit states as work completes
-
-Artifact expectations:
-
-- metadata-only `omh_todo/v1` plan todo owned by the declaring session
-
 Safety rules:
 
 - Checklist states never prove execution, verification, review, CI or merge.
 - Do not declare a checklist for one-step, finished or directly answerable work.
+
+## Completion Checklist
+
+- Exactly one item is active, or the list is complete and every item is done.
+- The steps live in one tool; the same list is never written to both `todo_list` and `omh_todo`.
+- Use `action=advance` or a complete `action=set` list; never drop an item by omission.
+- Item states are described as declarations; observed results are cited separately or named as missing.
+- Name whether work is blocked or human-deferred.
+
+## Recovery Notes
+
+- After a partial `action=set`, resend every item; use `action=advance` for state changes.
+- If the panel shows nothing, read the current projection with `action=show` before re-declaring, so an existing checklist is not overwritten.
+- If the user redirects the session away from the plan, record that on the write rather than deleting the checklist or marking its items done.
 
 ## Runtime Evidence
 
@@ -117,7 +85,7 @@ Record observed delegation results; otherwise return `not_available` or `not_obs
 Prepared OMH routing is not execution, review, CI, merge-readiness, or merge evidence.
 - Treat wrapper memory/context summaries as advisory local context, not proof of opaque Hermes memory reads or changes.
 Preserve workflow intent and stop conditions; verify before claiming completion.
-Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only; OMH's record terms (surface, lane, wrapper, handoff, evidence boundary, not_observed) stay in records and tool calls, never in the sentence the user reads unless they ask about one; and when a real unresolved user decision or a useful briefing discussion remains, offer one specific, content-linked question. Completed work needs no question; omit unrelated non-action footers and generic offers to continue.
+Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only. When the requested output is delivered, put any open points inside the result and end with no question or offer; only when the person asked to choose or decide and that choice is still theirs, end with one specific question about it, not a list, a generic offer, or a footer; the shared rail's Reply Language And Host Voice and Turn Ending sections hold the full rule.
 
 Use Hermes-native subagent/delegation features when available: native subagents -> Hermes delegation when available, otherwise sequential lanes.
 

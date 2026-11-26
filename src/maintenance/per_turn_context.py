@@ -52,6 +52,9 @@ _RUNNING_BOARD_UNITS = 6
 # so the scenario pins one message rather than claiming a bound over all of them.
 _ROUTED_REQUEST = "review this PR for bugs before merge"
 _PLAIN_REQUEST = "migrate the database schema and fix the tests"
+# A request to fix a code defect, so the turn carries the debugging method
+# block (`defect_fix_method`) beside its candidate line.
+_DEFECT_FIX_REQUEST = "python3 -m unittest tests.test_invoice fails: the tax comes out wrong. Find the cause and fix it."
 # A work request the rule table has no cue for, so the turn's only routing
 # text is the skill candidate line (`skill_shortlist`); three candidates, the
 # most the line names.
@@ -63,6 +66,36 @@ _CANDIDATE_REQUEST = (
 
 # The row Hermes writes when a background process it was told to watch exits.
 _PROCESS_COMPLETE_NOTICE = "[Background process proc_scenario finished with exit code 0]"
+# The turn after Hermes' `/plan` wrote a plan, accepting it in words the router
+# also routes, so the route hint, the active plan line and the plan follow-on
+# line ride one turn (`plan_follow_on`).
+_PLAN_ACCEPTANCE = "looks good, implement the plan"
+_PLAN_TURN_HISTORY = (
+    {"role": "user", "content": "[/plan \u2014 plan mode]\n\nFor this turn, you are in PLAN MODE \u2014 planning only.\n"},
+    {"role": "assistant", "content": "Saved the plan to .hermes/plans/2026-11-04_101500-export.md. Carry it out?"},
+)
+
+
+# The platform a console session's turn names (`OPERATOR_CONSOLE_PLATFORMS`): the
+# OMH TUI and Hermes' TUI pass "tui". Its first turn carries the console choices
+# line (`console_choices`), which a messaging platform's never does.
+_CONSOLE_PLATFORM = "tui"
+# A person's turn after a clarify of the session timed out while they were away.
+_CLARIFY_TIMED_OUT_HISTORY = (
+    {"role": "user", "content": "merge it once CI passes"},
+    {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": "call_scenario", "type": "function", "function": {"name": "clarify", "arguments": "{}"}}],
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "call_scenario",
+        "content": json.dumps({"responses": [], "outcome": "timed_out", "notice": "[user did not respond within 60m]"}),
+    },
+    {"role": "assistant", "content": "CI is still red on one job; merge now, or rerun it?"},
+    {"role": "user", "content": "back, what now"},
+)
 
 
 class _RecordingPluginContext:
@@ -228,11 +261,15 @@ def _run_pre_llm_call(
     # `section` is whether the host rendered the awareness system prompt
     # section for this session, as every admitted host does; without it the
     # primer rides the fenced context, as on a host that lacks the API.
+    from ..plugin_bundle.omh.plan_follow_on import reset_plan_follow_on_state
+    from ..plugin_bundle.omh.defect_fix_method import reset_method_block_state
     from ..plugin_bundle.omh.skill_shortlist import reset_candidate_line_state
 
     llm_hooks._reset_awareness_section_state()
     # Every scenario runs under one session id; each measures a fresh session.
     reset_candidate_line_state()
+    reset_method_block_state()
+    reset_plan_follow_on_state()
     try:
         with tempfile.TemporaryDirectory() as tmp:
             omh_home = Path(tmp) / "omh"
@@ -278,10 +315,18 @@ def pre_llm_call_context_scenario_chars() -> dict[str, int]:
 
     - `first_turn_without_section`: a session's first turn on a request with
       no OMH vocabulary, on a host that did not render the section (the primer
-      alone, inside the fence). This is the fallback, not the default.
+      inside the fence, plus the request's candidate line and, since it asks
+      to fix the tests, the debugging method block). This is the fallback,
+      not the default.
     - `route_hint`: a first turn on a routed request (the route hint).
     - `skill_candidates`: a later turn on a work request that gets the skill
       candidate line and no route hint.
+    - `defect_fix_method`: a later turn whose request asks to fix a code
+      defect, so it carries the debugging method block once per session
+      (`defect_fix_method`) beside whatever candidate line it gets. The
+      routed request below is a review, not a fix, so `all_surfaces` does not
+      carry the block; a fix request that is also routed, with a role and a
+      full board, can exceed it, as the other unseeded parts below can.
     - `role_marker`: a later turn carrying an `[omh-role:...]` marker, the
       largest shipped role.
     - `active_workflow`: a later turn while a workflow is active.
@@ -295,10 +340,17 @@ def pre_llm_call_context_scenario_chars() -> dict[str, int]:
     - `held_native_write`: a later turn after a todo_list write that an open
       accepted plan's hold kept out of the record, so the plan line and the
       one-time held-write line ride together.
+    - `plan_acceptance`: a later turn accepting the plan Hermes' `/plan` wrote
+      the turn before, while a plan workflow is active, so the route hint,
+      the active plan line and the plan follow-on line ride together.
+    - `clarify_timed_out`: a console session's turn the person opens after a
+      clarify of the session timed out, so the console choices line's
+      re-ask variant rides it (`console_choices`).
     - `all_surfaces_without_section`: `all_surfaces` on the fallback, primer
       included; the fallback's maximum.
     - `all_surfaces`: the route hint, candidate line, largest role, active
-      workflow and running board in one first turn (the two plan scenarios
+      workflow and running board in one first turn of a console session, so
+      the console choices line rides it too (the plan and clarify scenarios
       above need a later turn and are not part of it). The parts add, so
       this is the largest of the seeded scenarios; it is not a bound on every
       turn, because the parts listed below are not seeded. The routed request
@@ -323,7 +375,13 @@ def pre_llm_call_context_scenario_chars() -> dict[str, int]:
       recorded ids, profiles and statuses; needs live executor records under
       `omh_home`;
     - the `[OMH Degraded]` line: a fixed sentence plus the failing component
-      names, emitted only when a local call failed.
+      names, emitted only when a local call failed;
+    - the `[OMH dag]` open-run line (`dag_open_run_nudge`): one fixed line
+      per reason naming a run id and at most three node ids, once per
+      situation, and needs a stored dag run with no node running;
+    - the `[OMH group chat]` marker instruction (`messenger_judgement`): one
+      fixed sentence set, only in a Slack or Discord room where Hermes lets a
+      silence marker stand, and needs a message the gateway let through.
     """
     no_seed: tuple[Callable[[Path], None], ...] = ()
     later = {"is_first_turn": False}
@@ -333,6 +391,7 @@ def pre_llm_call_context_scenario_chars() -> dict[str, int]:
         ),
         "route_hint": _run_pre_llm_call(no_seed, user_message=_ROUTED_REQUEST, is_first_turn=True),
         "skill_candidates": _run_pre_llm_call(no_seed, user_message=_CANDIDATE_REQUEST, **later),
+        "defect_fix_method": _run_pre_llm_call(no_seed, user_message=_DEFECT_FIX_REQUEST, **later),
         "role_marker": _largest_role("continue", no_seed, **later),
         "active_workflow": _run_pre_llm_call((_seed_active_workflow,), user_message="continue", **later),
         "running_work_board": _run_pre_llm_call((_seed_running_board,), user_message="continue", **later),
@@ -351,16 +410,31 @@ def pre_llm_call_context_scenario_chars() -> dict[str, int]:
         "held_native_write": _run_pre_llm_call(
             (_seed_held_native_write,), user_message="continue", **later
         ),
+        "plan_acceptance": _run_pre_llm_call(
+            (_seed_active_workflow,),
+            user_message=_PLAN_ACCEPTANCE,
+            conversation_history=[*_PLAN_TURN_HISTORY, {"role": "user", "content": _PLAN_ACCEPTANCE}],
+            **later,
+        ),
+        "clarify_timed_out": _run_pre_llm_call(
+            no_seed,
+            user_message=_CLARIFY_TIMED_OUT_HISTORY[-1]["content"],
+            conversation_history=list(_CLARIFY_TIMED_OUT_HISTORY),
+            platform=_CONSOLE_PLATFORM,
+            **later,
+        ),
         "all_surfaces": _largest_role(
             _ROUTED_REQUEST,
             (_seed_active_workflow, _seed_running_board),
             is_first_turn=True,
+            platform=_CONSOLE_PLATFORM,
         ),
         "all_surfaces_without_section": _largest_role(
             _ROUTED_REQUEST,
             (_seed_active_workflow, _seed_running_board),
             section=False,
             is_first_turn=True,
+            platform=_CONSOLE_PLATFORM,
         ),
     }
 

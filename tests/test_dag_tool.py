@@ -37,6 +37,7 @@ from omh.plugin_bundle.omh import dag_run  # noqa: E402
 from omh.plugin_bundle.omh import host_process  # noqa: E402
 from omh.plugin_bundle.omh import runtime_paths  # noqa: E402
 from omh.plugin_bundle.omh.delegation_ledger import dag_binding, read_ledger  # noqa: E402
+from omh.plugin_bundle.omh.named_owner_choice import note_turn_owners  # noqa: E402
 from omh.plugin_bundle.omh.tools import dag_tool  # noqa: E402
 from omh.routing import owner_preference  # noqa: E402
 from omh.routing.coding_route_actions import OWNER_PREFERENCE_ROUTE_FAMILY  # noqa: E402
@@ -45,16 +46,23 @@ PROMPT = "TASK: do it\nDELIVERABLE: a change\nSCOPE: only its files\nVERIFY: run
 
 
 def node(node_id: str, *, category: str = "quick", depends_on: tuple[str, ...] = (), scope: tuple[str, ...] = (),
-         label: str = "", prompt: str = PROMPT) -> dict:
-    return {"id": node_id, "label": label or f"Node {node_id}", "category": category, "prompt": prompt,
-            "depends_on": list(depends_on), "write_scope": list(scope)}
+         label: str = "", prompt: str = PROMPT, role: str = "", owner: str = "") -> dict:
+    """A node as the parent sends it; ``role`` and ``owner`` only when given, as a parent that names none sends none."""
+    raw = {"id": node_id, "label": label or f"Node {node_id}", "category": category, "prompt": prompt,
+           "depends_on": list(depends_on), "write_scope": list(scope)}
+    if role:
+        raw["role"] = role
+    if owner:
+        raw["owner"] = owner
+    return raw
 
 
 FEATURE = [
     node("api", scope=("src/api.py",)),
     node("ui", category="unspecified-low", scope=("src/ui.py",)),
     node("docs", category="writing", depends_on=("api",), scope=("docs/api.md",)),
-    node("verify", category="unspecified-high", depends_on=("api", "ui", "docs"), label="Verify the feature"),
+    node("verify", category="unspecified-high", depends_on=("api", "ui", "docs"), label="Verify the feature",
+         role="verify"),
 ]
 
 
@@ -201,6 +209,22 @@ class Answers(Base):
 
 
 @contextmanager
+def detector_module(source: str | None) -> Iterator[None]:
+    """Import a real optional host package, restoring modules and path afterwards."""
+    with TemporaryDirectory() as tmp, patch_modules({}):
+        package = Path(tmp) / "agent"
+        package.mkdir()
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        if source is not None:
+            (package / "oneshot_footprint.py").write_text(source, encoding="utf-8")
+        for name in list(sys.modules):
+            if name == "agent" or name.startswith("agent."):
+                del sys.modules[name]
+        with patch.object(sys, "path", [tmp, *sys.path]):
+            yield
+
+
+@contextmanager
 def terminal_env(value: str | None = None) -> Iterator[None]:
     """``TERMINAL_ENV`` as given, or unset: the variable `terminal_backend` falls back to."""
     with patch.dict(os.environ):
@@ -220,7 +244,8 @@ class DefineTests(unittest.TestCase):
                 for node_id, task in zip(call_row["nodes"], call_row["tasks"]):
                     with self.subTest(node=node_id):
                         self.assertIn(f"Run goal (saved):\n{goal}\n", task["context"])
-                        self.assertTrue(task["context"].startswith(PROMPT + "\n"))
+                        self.assertTrue(task["context"].startswith(f"Run goal (saved):\n{goal}\n"))
+                        self.assertIn(f"\n\n{PROMPT}\n", task["context"])
                         self.assertEqual(task["goal"], f"Node {node_id} [dag:feat/{node_id}]")
                         self.assertIn("The run goal is acceptance context, not permission to widen your SCOPE.",
                                       task["context"])
@@ -240,7 +265,11 @@ class DefineTests(unittest.TestCase):
         self.assertEqual(result["topology"]["layers"], [["api", "ui"], ["docs"], ["verify"]])
         self.assertEqual(result["topology"]["critical_path"], ["api", "docs", "verify"])
         self.assertEqual(result["topology"]["bottlenecks"][0], {"node": "api", "blocks": 2})
-        self.assertEqual(result["lint"], [])
+        # api and ui write code and no node reviews them, four nodes carry no judgement category, api and ui name no
+        # review focus, and the run was defined without goal criteria (the define reply alone says so): advice, never
+        # a refusal.
+        self.assertEqual(result["lint"], ["no_review_node", "no_judgement_node", "no_review_focus:api",
+                                          "no_review_focus:ui", "no_goal_criteria"])
         self.assertEqual([(c["category"], c["nodes"], c["route"]["action"]) for c in result["calls"]],
                          [("quick", ["api"], "set"), ("unspecified-low", ["ui"], "set")])
         task = result["calls"][0]["tasks"][0]
@@ -266,6 +295,38 @@ class DefineTests(unittest.TestCase):
                 result = call(action="define", run="feat", nodes=nodes)
                 self.assertEqual((result["status"], result["reason"]), ("refused", reason), result)
 
+    def test_read_only_is_stored_only_when_true_and_refused_beside_a_write_scope(self) -> None:
+        """A read_only node changes nothing but its handoff (`dag_scope_guard`), so a write scope contradicts it."""
+        explore = {**node("explore", label="Explore the parser", role="review"), "read_only": True}
+        with homes() as home:
+            slots_table(home)
+            plain = dag_run.new_record(PARENT, "plain", "", "", [node("explore", label="Explore the parser",
+                                                                      role="review")], 0)
+            sent_false = dag_run.new_record(PARENT, "off", "", "", [
+                {**node("explore", label="Explore the parser", role="review"), "read_only": False}], 0)
+            result = call(action="define", run="feat", nodes=[explore])
+            self.assertEqual(result["status"], "ok", result)
+            stored = dag_run.read_run(dag_run.record_path(home.omh, PARENT, "feat"))
+        self.assertIs(stored["nodes"][0]["read_only"], True)
+        self.assertNotEqual(stored["digest"], plain["digest"])
+        # `read_only: false` is not stored, so the node keeps the digest it had before the field existed.
+        self.assertNotIn("read_only", sent_false["nodes"][0])
+        self.assertEqual(sent_false["digest"], plain["digest"])
+        refused = {
+            "read_only_with_write_scope": {**node("explore", scope=("src/x.py",)), "read_only": True},
+            "invalid_read_only": {**node("explore"), "read_only": "yes"},
+        }
+        for reason, raw in refused.items():
+            with self.subTest(reason=reason), homes():
+                result = call(action="define", run="feat", nodes=[raw])
+                self.assertEqual((result["status"], result["reason"]), ("refused", reason), result)
+                self.assertIn("Node explore", result["say"])
+        # A write scope with read_only false is an ordinary build node.
+        with homes() as home:
+            slots_table(home)
+            ok = call(action="define", run="feat", nodes=[{**node("api", scope=("src/x.py",)), "read_only": False}])
+        self.assertEqual(ok["status"], "ok", ok)
+
     def test_a_label_holding_either_lanes_marker_is_refused(self) -> None:
         """Mutation: refuse only `[dag:`; a leading team key would bind this node's child to a team part."""
         for label in ("[omh-team:t1/a/attempt-1] Fix the parser", "Fix the parser [dag:feat/b]"):
@@ -279,21 +340,73 @@ class DefineTests(unittest.TestCase):
                           nodes=[node("a", scope=("x.py",)), node("b", scope=("x.py",), depends_on=("a",))])
         self.assertEqual(result["status"], "ok", result)
 
+    def test_scopes_written_differently_still_overlap(self) -> None:
+        """Mutation: compare entries as written; a directory, `./` or a glob then lets two nodes write one file."""
+        for first, second in (("src/", "src/x.py"), ("src/x.py", "./src/x.py"), ("src/*.py", "src/x.py"),
+                              ("src/**/*.py", "src/x.py")):
+            with self.subTest(first=first, second=second), homes():
+                refused = call(action="define", run="feat", nodes=[node("a", scope=(first,)), node("b", scope=(second,))])
+                # Through a third node is still no edge: only a direct one orders the two writers.
+                chained = call(action="define", run="chain", nodes=[
+                    node("a", scope=(first,)), node("m", depends_on=("a",)), node("b", depends_on=("m",), scope=(second,))])
+                joined = call(action="define", run="joined", nodes=[
+                    node("a", scope=(first,)), node("b", depends_on=("a",), scope=(second,))])
+            self.assertEqual((refused["status"], refused["reason"]), ("refused", "write_scope_overlap"), refused)
+            self.assertEqual(refused["say"],
+                             f"These nodes write overlapping paths with no edge between them: a writes {first} and "
+                             f"b writes {second}. Make one of each pair depend on the other, or split the scope.")
+            self.assertEqual(chained["reason"], "write_scope_overlap", chained)
+            self.assertEqual(joined["status"], "ok", joined)
+
+    def test_neighbouring_names_do_not_overlap(self) -> None:
+        for first, second in (("src/a", "src/ab"), ("docs/x.md", "docs/xy.md")):
+            with self.subTest(first=first, second=second), homes():
+                result = call(action="define", run="feat", nodes=[node("a", scope=(first,)), node("b", scope=(second,))])
+            self.assertEqual(result["status"], "ok", result)
+
     def test_lint_is_advice_and_never_rejects(self) -> None:
-        nodes = [node("a", category="deep", prompt="Do the thing."), node("b", category="deep-work", scope=("b.py",)),
+        # A partial marker set is lint; a prompt with no marker at all is refused (see DefineTests.preflight).
+        nodes = [node("a", category="deep", prompt="TASK: do the thing."), node("b", category="deep-work", scope=("b.py",)),
                  node("c", category="ultrabrain"), node("d", category="ultrabrain")]
         with homes():
             result = call(action="define", run="feat", nodes=nodes)
         self.assertEqual(result["status"], "ok", result)
-        self.assertIn("missing_markers:a:TASK,DELIVERABLE,SCOPE,VERIFY,STOP_WHEN", result["lint"])
+        self.assertIn("missing_markers:a:DELIVERABLE,SCOPE,VERIFY,STOP_WHEN", result["lint"])
         self.assertIn("no_verification_node", result["lint"])
         self.assertIn("ultrabrain_more_than_once", result["lint"])
         with homes():
             deep = call(action="define", run="deep", nodes=[node("a", category="deep"), node("b", category="deep-work")])
         self.assertIn("all_nodes_deep", deep["lint"])
         with homes():
-            miss = call(action="define", run="miss", nodes=[node("a", scope=("a.py",)), node("verify")])
+            miss = call(action="define", run="miss", nodes=[node("a", scope=("a.py",)), node("verify", role="verify")])
         self.assertIn("verification_misses:a", miss["lint"])
+
+    def test_a_wide_graph_with_no_judgement_node_is_linted(self) -> None:
+        """Four nodes all on the ladder name the missing judgement node; three nodes, or one judgement node, do not.
+
+        Mutation: count `deep` or `unspecified-high` as a judgement node, drop the four-node floor, or let two
+        `ultrabrain` nodes raise `no_judgement_node` beside `ultrabrain_more_than_once`.
+        """
+        def ladder(*categories: str) -> list[dict]:
+            return [node(f"n{index}", category=category, scope=(f"n{index}.py",))
+                    for index, category in enumerate(categories)]
+
+        with homes():
+            wide = call(action="define", run="wide", nodes=ladder("quick", "unspecified-low", "unspecified-high", "quick"))
+        self.assertEqual(wide["status"], "ok", wide)
+        self.assertIn("no_judgement_node", wide["lint"])
+        for run, categories in (("three", ("quick", "unspecified-low", "unspecified-high")),
+                                ("architect", ("quick", "unspecified-low", "architect", "quick")),
+                                ("forensics", ("quick", "forensics", "unspecified-high", "quick")),
+                                ("ultrabrain", ("quick", "unspecified-low", "ultrabrain", "quick"))):
+            with self.subTest(run=run), homes():
+                result = call(action="define", run=run, nodes=ladder(*categories))
+            self.assertEqual(result["status"], "ok", result)
+            self.assertNotIn("no_judgement_node", result["lint"])
+        with homes():
+            twice = call(action="define", run="twice", nodes=ladder("quick", "ultrabrain", "ultrabrain", "quick"))
+        self.assertIn("ultrabrain_more_than_once", twice["lint"])
+        self.assertNotIn("no_judgement_node", twice["lint"])
 
     def test_the_same_definition_is_reused_and_a_different_one_refused(self) -> None:
         with homes():
@@ -335,7 +448,7 @@ class SlotTests(unittest.TestCase):
 
     def test_a_category_larger_than_the_cap_splits_into_calls(self) -> None:
         nodes = [node(f"n{index}", scope=(f"f{index}",)) for index in range(3)] + [
-            node("verify", depends_on=("n0", "n1", "n2"))]
+            node("verify", role="verify", depends_on=("n0", "n1", "n2"))]
         with homes() as home:
             home.hermes.joinpath("config.yaml").write_text("delegation:\n  max_concurrent_children: 2\n")
             slots_table(home)
@@ -349,6 +462,147 @@ class SlotTests(unittest.TestCase):
             self.assertEqual(dag_tool._cap("x"), 6)
         with patch.dict(os.environ, {dag_tool.MAX_CONCURRENT_ENV: ""}):
             self.assertEqual(dag_tool._cap(None), dag_tool.DEFAULT_MAX_CONCURRENT_CHILDREN)
+
+
+class IdentityNodeTests(unittest.TestCase):
+    """A node's optional ``identity`` rides the same dispatch machinery as categories."""
+
+    @staticmethod
+    def _identities(home, document: dict) -> None:
+        routing = home.omh / "routing"
+        routing.mkdir(parents=True, exist_ok=True)
+        (routing / "identities.json").write_text(json.dumps(document), encoding="utf-8")
+
+    DOCUMENT = {
+        "schema_version": "omh_identity_profiles/v1",
+        "identities": {
+            "qa": {"prompt": "QA prompt body", "model_chain": [{"model_id": "m1"}, {"model_id": "m2"}]},
+            "dev": {"prompt": "dev prompt", "model_chain": [{"model_id": "x"}]},
+        },
+    }
+
+    def test_define_hands_out_both_origins_with_their_digests(self) -> None:
+        with homes() as home:
+            slots_table(home)
+            self._identities(home, self.DOCUMENT)
+            result = call(action="define", run="feat", nodes=[
+                {**node("a", scope=("a.py",)), "identity": "custom:qa"},
+                {**node("b", scope=("b.py",)), "identity": "builtin:builder"},
+                node("c", scope=("c.py",)),
+            ])
+            record = dag_run.read_run(dag_run.record_path(home.omh, PARENT, "feat"))
+            status = call(action="status", run="feat")
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIsNotNone(record)
+        calls = {row["nodes"][0]: row for row in result["calls"]}
+        self.assertEqual(calls["a"]["identity"], "custom:qa")
+        self.assertEqual(calls["a"]["route"]["identity"], "custom:qa")
+        self.assertEqual(calls["a"]["route"]["attempt"], 0)
+        self.assertEqual(calls["b"]["identity"], "builtin:builder")
+        self.assertNotIn("identity", calls["c"])
+        # Same category, different selection: grouped by identity as well.
+        attempts = {item["id"]: item["attempts"][-1] for item in record["nodes"]}
+        self.assertEqual(attempts["a"]["identity"], "custom:qa")
+        self.assertTrue(attempts["a"]["identity_digest"])
+        self.assertEqual(attempts["b"]["identity"], "builtin:builder")
+        self.assertNotIn("identity", attempts["c"])
+        rows = {row["id"]: row for row in status["nodes"]}
+        self.assertEqual(rows["a"]["identity"], "custom:qa")
+        self.assertNotIn("identity", rows["c"])
+
+    def test_unqualified_or_unknown_selection_is_refused(self) -> None:
+        for identity, reason in ((("qa", "invalid_identity"), ("custom:ghost", "identity_unavailable"),
+                                 ("builtin:ghost", "identity_unavailable"), ("QA:LOUD", "invalid_identity"))):
+            with self.subTest(identity=identity), homes() as home:
+                slots_table(home)
+                self._identities(home, self.DOCUMENT)
+                result = call(action="define", run="feat", nodes=[{**node("a"), "identity": identity}])
+            self.assertEqual((result["status"], result["reason"]), ("refused", reason), result)
+
+    def test_each_node_retries_from_its_own_chain_position(self) -> None:
+        with homes() as home:
+            slots_table(home)
+            self._identities(home, self.DOCUMENT)
+            call(action="define", run="feat", nodes=[
+                {**node("a", scope=("a.py",)), "identity": "custom:qa"},
+                {**node("b", scope=("b.py",)), "identity": "custom:qa"},
+                {**node("c", scope=("c.py",)), "identity": "custom:dev"},
+            ])
+            first = call(action="settle", run="feat", node="a", outcome="failed", provider_error=True)
+            second = call(action="settle", run="feat", node="c", outcome="failed", provider_error=True)
+        # a's retry continues its own chain at position 1 — never the position
+        # another same-category node last used.
+        (call_a,) = first["calls"]
+        self.assertEqual((call_a["identity"], call_a["route"]["attempt"]), ("custom:qa", 1))
+        # dev's chain has one entry: position 1 is exhausted, a typed refusal,
+        # not a silent hop onto qa's lane or the category's.
+        self.assertEqual((second["status"], second["reason"]), ("refused", "identity_chain_exhausted"), second)
+        self.assertEqual(second.get("calls", []), [])
+
+    def test_disabled_or_changed_selection_refuses_the_next_dispatch(self) -> None:
+        for mutate, reason in (
+            (lambda doc: doc["identities"]["qa"].update(enabled=False), "identity_unavailable"),
+            (lambda doc: doc["identities"]["qa"].update(prompt="edited"), "identity_config_changed"),
+        ):
+            with self.subTest(reason=reason), homes() as home:
+                slots_table(home)
+                document = json.loads(json.dumps(self.DOCUMENT))
+                self._identities(home, document)
+                call(action="define", run="feat", nodes=[{**node("a"), "identity": "custom:qa"}])
+                mutate(document)
+                self._identities(home, document)
+                result = call(action="settle", run="feat", node="a", outcome="failed", provider_error=True)
+            self.assertEqual((result["status"], result["reason"]), ("refused", reason), result)
+            self.assertEqual(result.get("calls", []), [])
+
+    def test_export_cannot_carry_a_selected_identity(self) -> None:
+        nodes = [node("plan", category="unspecified-low", label="Plan the change"),
+                 {**node("api", depends_on=("plan",), scope=("src/api.py",), owner="codex"),
+                  "identity": "builtin:builder"}]
+        with homes() as home:
+            slots_table(home)
+            choose(home, "codex")
+            call(action="define", run="feat", nodes=nodes)
+            handoff(home, "feat", "plan")
+            call(action="settle", run="feat", node="plan", outcome="accepted")
+            refused = call(action="export", run="feat", owner="codex")
+        self.assertEqual((refused["status"], refused["reason"]),
+                         ("refused", "identity_capability_unavailable"), refused)
+
+    def test_a_spent_child_budget_cannot_substitute_the_parent(self) -> None:
+        with homes() as home, patch.object(dag_tool, "_single_query_session", return_value=True):
+            oneshot_config(home, 3)
+            document = json.loads(json.dumps(self.DOCUMENT))
+            # Two chain entries so the provider-error retry has a position to take.
+            document["identities"]["qa"]["model_chain"].append({"model_id": "m3"})
+            self._identities(home, document)
+            call(action="define", run="feat", nodes=[
+                {**node("a", scope=("a.py",)), "identity": "custom:qa"},
+                node("b", scope=("b.py",)), node("c", scope=("c.py",)),
+            ])
+            for node_id in ("a", "b", "c"):
+                child_started(home, "feat", node_id)
+            retried = call(action="settle", run="feat", node="a", outcome="failed", provider_error=True)
+            for node_id in ("b", "c"):
+                handoff(home, "feat", node_id)
+            call(action="settle", run="feat", node="b", outcome="accepted")
+            left = call(action="settle", run="feat", node="c", outcome="accepted")
+        # a's retry is held only while siblings run; once the child budget is
+        # spent the parent cannot stand in for a selected prompt and policy.
+        self.assertEqual(retried["held_for_slots"], ["a"])
+        self.assertEqual((left["status"], left["reason"]),
+                         ("refused", "identity_capability_unavailable"), left)
+        self.assertEqual(left.get("calls", []), [])
+
+    def test_nodes_without_identity_keep_their_legacy_calls(self) -> None:
+        # No identity configured at all: the same graph as before unifies.
+        with homes() as home:
+            slots_table(home)
+            result = call(action="define", run="feat", nodes=FEATURE)
+        self.assertEqual(result["status"], "ok", result)
+        for row in result["calls"]:
+            self.assertNotIn("identity", row)
+            self.assertNotIn("attempt", row["route"])
 
 
 class SettleTests(unittest.TestCase):
@@ -408,6 +662,196 @@ class SettleTests(unittest.TestCase):
             self._run(home)
             result = call(action="settle", run="feat", node="docs", outcome="accepted")
         self.assertEqual(result["reason"], "node_not_out")
+
+
+def hermes_isolation(isolation: object, local: object = True) -> patch_modules:
+    """Hermes' `tools.delegate_tool._get_worktree_isolation` and `tools.subagent_worktree.local_backend_active`.
+
+    Each answers its value, or raises it when it is an exception.
+    """
+    def answer(value: object):
+        def read() -> object:
+            if isinstance(value, Exception):
+                raise value
+            return value
+        return read
+
+    delegate = SimpleNamespace(_get_worktree_isolation=answer(isolation))
+    worktree = SimpleNamespace(local_backend_active=answer(local))
+    return patch_modules({"tools": SimpleNamespace(delegate_tool=delegate, subagent_worktree=worktree),
+                          "tools.delegate_tool": delegate, "tools.subagent_worktree": worktree})
+
+
+def no_hermes_isolation() -> patch_modules:
+    """Hermes' isolation getters cannot be imported: the config file is read."""
+    return patch_modules({"tools.delegate_tool": None, "tools.subagent_worktree": None})
+
+
+class WorktreeIsolationTests(unittest.TestCase):
+    """Hermes' `delegation.worktree_isolation` gives each child a worktree of its own from the parent's HEAD.
+
+    A dependent or the verify node would then start without the earlier nodes' edits, so a run is never defined
+    with it on, and a run defined before it was turned on hands out no call while it is on.
+    """
+
+    def _config(self, home, text: bytes | str) -> None:
+        path = home.hermes / "config.yaml"
+        if isinstance(text, bytes):
+            path.write_bytes(text)
+        else:
+            path.write_text(text, encoding="utf-8")
+
+    def test_the_config_is_read_as_hermes_reads_it_with_bool(self) -> None:
+        """Hermes does `bool(cfg.get("worktree_isolation", False))` over PyYAML: every value but a false one is on."""
+        on = {
+            "true": "  worktree_isolation: true\n", "True": "  worktree_isolation: True\n",
+            "yes": "  worktree_isolation: yes\n", "ON": "  worktree_isolation: ON\n",
+            "one": "  worktree_isolation: 1\n", "commented": "  worktree_isolation: true  # one tree each\n",
+            "quoted false": "  worktree_isolation: 'false'\n", "quoted no": '  worktree_isolation: "no"\n',
+            "quoted zero": "  worktree_isolation: '0'\n", "y": "  worktree_isolation: y\n",
+            "enabled": "  worktree_isolation: enabled\n", "float one": "  worktree_isolation: 1.0\n",
+            "quoted hash": "  worktree_isolation: 'tr#ue'\n", "env": "  worktree_isolation: ${DAG_ISOLATION}\n",
+            "list": "  worktree_isolation: [true]\n", "anchor": "  worktree_isolation: &on true\n",
+            "block scalar": "  worktree_isolation: |\n    false\n",
+            "quoted key": '  "worktree_isolation": true\n',
+        }
+        off = {
+            "false": "  worktree_isolation: false\n", "False": "  worktree_isolation: False\n",
+            "NO": "  worktree_isolation: NO\n", "Off": "  worktree_isolation: Off\n",
+            "zero": "  worktree_isolation: 0\n", "float zero": "  worktree_isolation: 0.0\n",
+            "minus zero": "  worktree_isolation: -0\n", "hex zero": "  worktree_isolation: 0x0\n",
+            "null": "  worktree_isolation: null\n", "tilde": "  worktree_isolation: ~\n",
+            "empty": "  worktree_isolation:\n", "quoted empty": "  worktree_isolation: ''\n",
+            "empty list": "  worktree_isolation: []\n", "absent": "  max_concurrent_children: 3\n",
+        }
+        with no_hermes_isolation():
+            for expected, cases in ((True, on), (False, off)):
+                for name, line in cases.items():
+                    with self.subTest(value=name), homes() as home:
+                        self._config(home, "delegation:\n" + line)
+                        self.assertIs(dag_tool.worktree_isolation_on(home.hermes), expected)
+            for name, text in (("inline mapping", "delegation: {worktree_isolation: true}\n"),
+                               ("other section", "terminal:\n  worktree_isolation: true\n"),
+                               ("no config", None)):
+                with self.subTest(value=name), homes() as home:
+                    if text is not None:
+                        self._config(home, text)
+                    self.assertIs(dag_tool.worktree_isolation_on(home.hermes), name == "inline mapping")
+
+    def test_define_is_refused_while_isolation_is_on_and_keeps_no_record(self) -> None:
+        with homes() as home, no_hermes_isolation():
+            slots_table(home)
+            self._config(home, "delegation:\n  max_concurrent_children: 3\n  worktree_isolation: 'false'\n")
+            result = call(action="define", run="feat", nodes=FEATURE)
+            self.assertIsNone(dag_run.read_run(dag_run.record_path(home.omh, PARENT, "feat")))
+        self.assertEqual((result["status"], result["reason"]), ("refused", "worktree_isolation_on"), result)
+        self.assertEqual(result["say"], dag_tool.WORKTREE_ISOLATION_REFUSED)
+        self.assertIn("`hermes config set delegation.worktree_isolation false`", result["say"])
+
+    def test_hermes_own_answer_is_preferred_over_the_config_file(self) -> None:
+        cases = (
+            ("hermes on, file off", True, True, "false", "refused"),
+            ("hermes off, file on", False, True, "true", "ok"),
+            ("hermes on, terminal not local", True, False, "true", "ok"),
+            ("hermes getter raised, file on", RuntimeError("moved"), True, "true", "refused"),
+            ("hermes getter raised, file off", RuntimeError("moved"), True, "false", "ok"),
+        )
+        for name, isolation, local, value, status in cases:
+            with self.subTest(case=name), homes() as home, hermes_isolation(isolation, local):
+                slots_table(home)
+                self._config(home, f"delegation:\n  worktree_isolation: {value}\n")
+                result = call(action="define", run="feat", nodes=FEATURE)
+                self.assertEqual(result["status"], status, result)
+
+    def test_isolation_off_or_absent_defines_as_before(self) -> None:
+        configs: dict[str, str | None] = {
+            "absent": None,
+            "false": "delegation:\n  worktree_isolation: false\n",
+            "off": "delegation:\n  worktree_isolation: off\n",
+            "zero": "delegation:\n  worktree_isolation: 0\n",
+            "other_section": "terminal:\n  worktree_isolation: true\n",
+        }
+        expected = None
+        for name, text in configs.items():
+            with self.subTest(config=name), homes() as home, no_hermes_isolation():
+                slots_table(home)
+                if text is not None:
+                    self._config(home, text)
+                result = call(action="define", run="feat", nodes=FEATURE)
+                self.assertEqual(result["status"], "ok", result)
+                self.assertNotIn("worktree_isolation", result.get("say", ""))
+                shape = ([c["nodes"] for c in result["calls"]], result.get("say", ""), result["state"])
+                expected = expected or shape
+                self.assertEqual(shape, expected)
+
+    def test_an_unreadable_config_counts_as_off_and_define_answers_as_before(self) -> None:
+        """Fail-open only on a read failure: the guard says off, and define answers as it did without the guard."""
+        for name in ("not_utf8", "directory"):
+            answers = []
+            for guarded in (True, False):
+                with self.subTest(config=name, guarded=guarded), homes() as home, no_hermes_isolation():
+                    slots_table(home)
+                    if name == "directory":
+                        (home.hermes / "config.yaml").mkdir()
+                    else:
+                        self._config(home, b"delegation:\n  worktree_isolation: true\n  note: \xff\xfe\n")
+                    self.assertFalse(dag_tool.worktree_isolation_on(home.hermes))
+                    with nullcontext() if guarded else patch.object(dag_tool, "worktree_isolation_on",
+                                                                    return_value=False):
+                        answers.append(call(action="define", run="feat", nodes=FEATURE))
+            self.assertEqual(answers[0], answers[1])
+            self.assertNotEqual(answers[0].get("reason"), "worktree_isolation_on")
+
+    @unittest.skipUnless(SANDBOX_SHELL, SANDBOX_SKIP)
+    def test_a_docker_or_ssh_terminal_skips_the_guard_and_says_only_the_terminal_step(self) -> None:
+        """Hermes skips isolation on a terminal that is not local, so the run is defined and only TERMINAL_FIRST shows."""
+        with homes() as home, Terminal("docker", None).modules():
+            slots_table(home)
+            self._config(home, "delegation:\n  worktree_isolation: true\n")
+            result = call(action="define", run="feat", nodes=FEATURE)
+        self.assertEqual(result["status"], "ok", result)
+        self.assertEqual(result["calls"], [])
+        self.assertIn(dag_tool.TERMINAL_FIRST.format(backend="docker"), result["say"])
+        self.assertNotIn("worktree_isolation", result["say"])
+
+    def test_a_run_defined_before_isolation_hands_out_nothing_while_it_is_on(self) -> None:
+        with homes() as home, no_hermes_isolation():
+            slots_table(home)
+            self._config(home, "delegation:\n  max_concurrent_children: 10\n")
+            call(action="define", run="feat", nodes=FEATURE)
+            child_started(home, "feat", "api")
+            handoff(home, "feat", "api")
+            stop(home, "child-api", now=time.time())
+            quiet = call(action="status", run="feat")
+            self._config(home, "delegation:\n  max_concurrent_children: 10\n  worktree_isolation: true\n")
+            settled = call(action="settle", run="feat", node="api", outcome="accepted")
+            ready = call(action="ready", run="feat")
+            status = call(action="status", run="feat")
+            self._config(home, "delegation:\n  max_concurrent_children: 10\n  worktree_isolation: false\n")
+            after = call(action="ready", run="feat")
+        # The outcome is still recorded; only the next node does not go out, and status names why.
+        self.assertEqual(settled["settled"], {"node": "api", "outcome": "accepted"})
+        self.assertEqual(settled["counts"]["done"], 1)
+        self.assertEqual(settled["calls"], [])
+        self.assertTrue(settled["say"].endswith(dag_tool.WORKTREE_ISOLATION_HELD), settled["say"])
+        self.assertNotIn("held_for_slots", settled)
+        self.assertEqual(ready["calls"], [])
+        self.assertIn(dag_tool.WORKTREE_ISOLATION_HELD, ready["say"])
+        self.assertEqual(status["say"], dag_tool.WORKTREE_ISOLATION_HELD)
+        self.assertNotIn("worktree_isolation", quiet.get("say", ""))
+        self.assertEqual([c["nodes"] for c in after["calls"]], [["docs"]])
+        self.assertNotIn("worktree_isolation", after.get("say", ""))
+
+    def test_the_setting_is_read_without_writing_the_config(self) -> None:
+        text = "delegation:\n  worktree_isolation: yes\n"
+        with homes() as home, no_hermes_isolation():
+            self._config(home, text)
+            before = (home.hermes / "config.yaml").stat()
+            self.assertTrue(dag_tool.worktree_isolation_on(home.hermes))
+            call(action="define", run="feat", nodes=FEATURE)
+            after = (home.hermes / "config.yaml").stat()
+            self.assertEqual((home.hermes / "config.yaml").read_text(encoding="utf-8"), text)
+        self.assertEqual((before.st_ino, before.st_mtime_ns), (after.st_ino, after.st_mtime_ns))
 
 
 FILE_ANSWER = {"output": "OMH_HANDOFF_FILE\n", "returncode": 0}
@@ -556,11 +1000,11 @@ class RemoteBackendTests(unittest.TestCase):
             self.assertEqual(record["handoff_root"], "")
             self.assertIn(f"write your report to {host}:", defined["calls"][0]["tasks"][0]["context"])
         with homes() as home, terminal_env(), Terminal(
-                "docker", Answers({"output": "\x1b]0;t\x07OMH_BACKEND_HOME=/home/dev.ops@corp\n", "returncode": 0})
+                "docker", Answers({"output": "\x1b]0;t\x07OMH_BACKEND_HOME=/home/dev.ops@corp.example\n", "returncode": 0})
         ).modules():
             call(action="define", run="feat", nodes=FEATURE)
             pinned = dag_run.read_run(dag_run.record_path(home.omh, PARENT, "feat"))["handoff_root"]
-        self.assertEqual(pinned, "/home/dev.ops@corp/.omh/dag")
+        self.assertEqual(pinned, "/home/dev.ops@corp.example/.omh/dag")
 
     def test_with_no_terminal_up_nothing_goes_out_until_one_is(self) -> None:
         """Mutation: hand out the host path, start an environment, or say it again once the root is pinned.
@@ -777,7 +1221,7 @@ class RepairTests(unittest.TestCase):
 
     def _failed_verify(self, home) -> None:
         slots_table(home)
-        call(action="define", run="feat", nodes=[node("api", scope=("a.py",)), node("verify", depends_on=("api",))])
+        call(action="define", run="feat", nodes=[node("api", scope=("a.py",)), node("verify", role="verify", depends_on=("api",))])
         handoff(home, "feat", "api")
         call(action="settle", run="feat", node="api", outcome="accepted")
         call(action="settle", run="feat", node="verify", outcome="failed", reason="2 tests red")
@@ -786,7 +1230,7 @@ class RepairTests(unittest.TestCase):
         with homes() as home:
             self._failed_verify(home)
             repaired = call(action="repair", run="feat", node="verify", nodes=[
-                node("fix", scope=("a.py",), depends_on=("api",)), node("verify2", depends_on=("fix",))])
+                node("fix", scope=("a.py",), depends_on=("api",)), node("verify2", role="verify", depends_on=("fix",))])
             handoff(home, "feat", "fix")
             call(action="settle", run="feat", node="fix", outcome="accepted")
             handoff(home, "feat", "verify2")
@@ -801,6 +1245,18 @@ class RepairTests(unittest.TestCase):
         self.assertEqual([c["nodes"] for c in repaired["calls"]], [["fix"]])
         self.assertEqual(done["state"], "done")
         self.assertEqual({row["id"]: row["state"] for row in done["nodes"]}["verify"], "accepted")
+
+    def test_repair_takes_a_read_only_node_and_refuses_one_with_a_scope(self) -> None:
+        with homes() as home:
+            self._failed_verify(home)
+            refused = call(action="repair", run="feat", node="verify", nodes=[
+                {**node("look", role="review", depends_on=("api",), scope=("a.py",)), "read_only": True}])
+            repaired = call(action="repair", run="feat", node="verify", nodes=[
+                {**node("look", role="review", depends_on=("api",), label="Review the fix"), "read_only": True}])
+            record = dag_run.read_run(dag_run.record_path(home.omh, PARENT, "feat"))
+        self.assertEqual((refused["status"], refused["reason"]), ("refused", "read_only_with_write_scope"), refused)
+        self.assertEqual(repaired["status"], "ok", repaired)
+        self.assertIs({n["id"]: n for n in record["nodes"]}["look"]["read_only"], True)
 
     def test_two_cycles_then_the_run_stops_and_reports(self) -> None:
         with homes() as home:
@@ -817,6 +1273,46 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(third["reason"], "repair_limit_reached")
         superseded = {row["id"]: row["state"] for row in second["nodes"]}
         self.assertEqual(superseded["v2"], "superseded")
+
+    def test_a_repair_writing_a_runnable_nodes_file_under_another_spelling_is_refused(self) -> None:
+        with homes() as home:
+            slots_table(home)
+            call(action="define", run="feat", nodes=[
+                node("api", scope=("a.py",)), node("ui", scope=("src/ui.py",)),
+                node("verify", role="verify", depends_on=("api", "ui"), label="Verify")])
+            call(action="settle", run="feat", node="api", outcome="failed")
+            refused = call(action="repair", run="feat", node="api", nodes=[node("fix", scope=("a.py", "src/"))])
+            repaired = call(action="repair", run="feat", node="api", nodes=[node("fix", scope=("a.py", "lib/"))])
+        self.assertEqual((refused["status"], refused["reason"]), ("refused", "write_scope_overlap"), refused)
+        self.assertEqual(repaired["status"], "ok", repaired)
+
+    def test_a_repair_is_not_refused_over_two_earlier_nodes(self) -> None:
+        """Mutation: check every runnable pair at repair; the model cannot change a and b, and loops until cancel."""
+        with homes() as home:
+            slots_table(home)
+            # A run recorded before scopes were compared as paths: a and b overlap with no edge.
+            path = dag_run.record_path(home.omh, PARENT, "feat")
+            call(action="define", run="feat", nodes=[node("a", scope=("a.py",)), node("b", scope=("src/x.py",)),
+                                                     node("c", scope=("c.py",))])
+            record = dag_run.read_run(path)
+            record["nodes"][0]["write_scope"] = ["src/"]
+            path.write_text(json.dumps(record), encoding="utf-8")
+            call(action="settle", run="feat", node="c", outcome="failed")
+            repaired = call(action="repair", run="feat", node="c", nodes=[node("fix", scope=("z.py",))])
+        self.assertEqual(repaired["status"], "ok", repaired)
+
+    def test_a_second_repair_is_not_refused_over_the_first_repairs_overlap(self) -> None:
+        with homes() as home:
+            slots_table(home)
+            call(action="define", run="feat", nodes=[
+                node("r1", scope=("a.py",)), node("d1", depends_on=("r1",), scope=("src/",)), node("r2", scope=("b.py",)),
+                node("verify", role="verify", depends_on=("d1", "r2"), label="Verify")])
+            call(action="settle", run="feat", node="r1", outcome="failed")
+            first = call(action="repair", run="feat", node="r1", nodes=[node("fix1", scope=("src/x.py",))])
+            call(action="settle", run="feat", node="r2", outcome="failed")
+            second = call(action="repair", run="feat", node="r2", nodes=[node("fix2", scope=("z.py",))])
+        self.assertEqual(first["status"], "ok", first)
+        self.assertEqual(second["status"], "ok", second)
 
     def test_a_repair_node_may_not_wait_on_an_open_node(self) -> None:
         with homes() as home:
@@ -841,23 +1337,430 @@ class RepairTests(unittest.TestCase):
         self.assertEqual(result["reason"], "not_failed")
 
 
+class PreflightTests(unittest.TestCase):
+    """What define refuses before a node is ever handed out, and the serial-graph lint."""
+
+    def test_define_refuses_over_oneshot_budget(self) -> None:
+        with homes() as home, patch.object(dag_tool, "_single_query_session", return_value=True):
+            (home.hermes / "config.yaml").write_text("delegation:\n  oneshot_max_children: 1\n", encoding="utf-8")
+            result = call(action="define", run="feat", nodes=[node("a"), node("b")])
+        self.assertEqual((result["status"], result["reason"]), ("refused", "oneshot_budget_exceeded"), result)
+        self.assertIn("1", result["say"])
+        self.assertIn("2", result["say"])
+
+    def test_define_allows_interactive_session(self) -> None:
+        with homes() as home, patch.object(dag_tool, "_single_query_session", return_value=False):
+            (home.hermes / "config.yaml").write_text("delegation:\n  oneshot_max_children: 1\n", encoding="utf-8")
+            result = call(action="define", run="feat", nodes=[node("a"), node("b"), node("c")])
+        self.assertEqual(result["status"], "ok", result)
+
+    def test_a_healthy_detector_saying_interactive_leaves_the_graph_uncapped(self) -> None:
+        with homes() as home, detector_module("def is_single_query_session():\n    return False\n"):
+            (home.hermes / "config.yaml").write_text("delegation:\n  oneshot_max_children: 1\n", encoding="utf-8")
+            self.assertFalse(dag_tool._single_query_session())
+            self.assertIsNone(dag_tool.oneshot_child_limit(home.hermes))
+            result = call(action="define", run="feat", nodes=[node("a"), node("b"), node("c")])
+            self.assertEqual(result["status"], "ok", result)
+            self.assertTrue(dag_run.record_path(home.omh, PARENT, "feat").exists())
+
+    def test_an_absent_optional_detector_is_not_one_shot_and_stays_uncapped(self) -> None:
+        # `None` in sys.modules blocks the import the way an install without the
+        # host package does; the absent path is the documented no-cap answer.
+        with homes() as home, patch_modules({"agent": None, "agent.oneshot_footprint": None}):
+            (home.hermes / "config.yaml").write_text("delegation:\n  oneshot_max_children: 1\n", encoding="utf-8")
+            result = call(action="define", run="feat", nodes=[node("a"), node("b"), node("c")])
+        self.assertEqual(result["status"], "ok", result)
+
+    def _assert_detector_refuses_without_record_changes(self, source: str) -> None:
+        for existing in (False, True):
+            with self.subTest(existing=existing), homes() as home, detector_module(source):
+                slots_table(home)
+                (home.hermes / "config.yaml").write_text(
+                    "delegation:\n  oneshot_max_children: 1\n", encoding="utf-8")
+                if existing:
+                    with patch.object(dag_tool, "_single_query_session", return_value=False):
+                        self.assertEqual(call(action="define", run="feat", nodes=[node("a")])["status"], "ok")
+                path = dag_run.record_path(home.omh, PARENT, "feat")
+                before = path.read_bytes() if path.exists() else None
+                for operation in (dag_tool._single_query_session, lambda: dag_tool.oneshot_child_limit(home.hermes)):
+                    with self.assertRaises(dag_run.DagRefusal) as raised:
+                        operation()
+                    self.assertEqual(raised.exception.reason, "oneshot_detection_unavailable")
+                result = call(action="define", run="feat", nodes=[node("a"), node("b"), node("c")])
+                self.assertEqual((result["status"], result.get("reason")),
+                                 ("refused", "oneshot_detection_unavailable"), result)
+                self.assertIn("one-shot", result["say"])
+                for secret in ("ModuleNotFoundError", "ImportError", "RuntimeError",
+                               "omh_review_missing_detector_dependency", "private failure"):
+                    self.assertNotIn(secret, json.dumps(result))
+                self.assertEqual(path.exists(), existing)
+                self.assertEqual(path.read_bytes() if path.exists() else None, before)
+
+    def test_missing_dependency_during_detector_invocation_refuses_without_record_changes(self) -> None:
+        sources = ["def is_single_query_session():\n    import omh_review_missing_detector_dependency\n"]
+        # Even a permitted absence name (or no name) from the callable is a failure.
+        for missing in ("agent", "agent.oneshot_footprint", None):
+            sources.append("def is_single_query_session():\n"
+                           f"    raise ModuleNotFoundError('private failure', name={missing!r})\n")
+        for source in sources:
+            with self.subTest(source=source):
+                self._assert_detector_refuses_without_record_changes(source)
+
+    def test_missing_dependency_during_detector_import_refuses_without_record_changes(self) -> None:
+        sources = ["import omh_review_missing_detector_dependency\n"]
+        # Prefix matches and unnamed ImportErrors do not establish optional absence.
+        for missing in ("agent.other_dependency", "agent.oneshot_footprint.dependency", None):
+            sources.append(f"raise ModuleNotFoundError('private failure', name={missing!r})\n")
+        sources.extend(("raise ImportError('private failure')\n", "raise RuntimeError('private failure')\n", ""))
+        for source in sources:
+            with self.subTest(source=source):
+                self._assert_detector_refuses_without_record_changes(source)
+
+    def test_an_absent_agent_package_stays_uncapped(self) -> None:
+        with homes() as home, patch_modules({"agent": None}):
+            (home.hermes / "config.yaml").write_text("delegation:\n  oneshot_max_children: 1\n", encoding="utf-8")
+            self.assertFalse(dag_tool._single_query_session())
+            self.assertIsNone(dag_tool.oneshot_child_limit(home.hermes))
+            result = call(action="define", run="feat", nodes=[node("a"), node("b"), node("c")])
+            self.assertEqual(result["status"], "ok", result)
+            self.assertTrue(dag_run.record_path(home.omh, PARENT, "feat").exists())
+
+    def test_an_absent_detector_module_in_a_present_agent_stays_uncapped(self) -> None:
+        with homes() as home, detector_module(None):
+            (home.hermes / "config.yaml").write_text("delegation:\n  oneshot_max_children: 1\n", encoding="utf-8")
+            self.assertFalse(dag_tool._single_query_session())
+            self.assertIsNone(dag_tool.oneshot_child_limit(home.hermes))
+            result = call(action="define", run="feat", nodes=[node("a"), node("b"), node("c")])
+            self.assertEqual(result["status"], "ok", result)
+            self.assertTrue(dag_run.record_path(home.omh, PARENT, "feat").exists())
+
+    def test_a_healthy_imported_oneshot_detector_enforces_the_budget(self) -> None:
+        with homes() as home, detector_module("def is_single_query_session():\n    return True\n"):
+            (home.hermes / "config.yaml").write_text("delegation:\n  oneshot_max_children: 1\n", encoding="utf-8")
+            self.assertTrue(dag_tool._single_query_session())
+            self.assertEqual(dag_tool.oneshot_child_limit(home.hermes), 1)
+            result = call(action="define", run="feat", nodes=[node("a"), node("b"), node("c")])
+            self.assertEqual((result["status"], result.get("reason")),
+                             ("refused", "oneshot_budget_exceeded"), result)
+            self.assertFalse(dag_run.record_path(home.omh, PARENT, "feat").exists())
+
+    def test_a_broken_installed_detector_refuses_by_name_and_writes_nothing(self) -> None:
+        def broken() -> bool:
+            raise RuntimeError("host one-shot state is unreadable")
+
+        detector = SimpleNamespace(is_single_query_session=broken)
+        with homes() as home, patch_modules({"agent": SimpleNamespace(oneshot_footprint=detector),
+                                             "agent.oneshot_footprint": detector}):
+            (home.hermes / "config.yaml").write_text("delegation:\n  oneshot_max_children: 1\n", encoding="utf-8")
+            result = call(action="define", run="feat", nodes=[node("a"), node("b")])
+            written = dag_run.record_path(home.omh, PARENT, "feat").exists()
+        self.assertEqual((result["status"], result["reason"]), ("refused", "oneshot_detection_unavailable"), result)
+        self.assertIn("one-shot", result["say"])
+        self.assertNotIn("host one-shot state is unreadable", result["say"])
+        self.assertNotIn("RuntimeError", result["say"])
+        self.assertFalse(written, "a refused define must not leave a run record behind")
+
+    def test_zero_limit_is_unlimited_but_invalid_values_follow_the_host_default(self) -> None:
+        cases = (("0", "ok"), ("-1", "refused"), ("many", "refused"))
+        for raw, status in cases:
+            with self.subTest(raw=raw), homes() as home, \
+                    patch.object(dag_tool, "_single_query_session", return_value=True):
+                (home.hermes / "config.yaml").write_text(
+                    f"delegation:\n  oneshot_max_children: {raw}\n", encoding="utf-8")
+                result = call(action="define", run="feat", nodes=[node("a"), node("b"), node("c")])
+            self.assertEqual((result["status"], result.get("reason")),
+                             (status, None if status == "ok" else "oneshot_budget_exceeded"), result)
+            if status == "refused":
+                self.assertIn("at most 2 nodes", result["say"])
+
+    def test_define_refuses_markerless_node(self) -> None:
+        with homes():
+            result = call(action="define", run="feat", nodes=[node("a", prompt="Do the thing.")])
+        self.assertEqual((result["status"], result["reason"]), ("refused", "prompt_markers_missing"), result)
+        self.assertIn("a", result["say"])
+        self.assertIn("TASK", result["say"])
+
+    def test_partial_markers_stay_lint(self) -> None:
+        with homes():
+            result = call(action="define", run="feat",
+                          nodes=[node("a", prompt="TASK: do it\nDELIVERABLE: a change")])
+        self.assertEqual(result["status"], "ok", result)
+        self.assertIn("missing_markers:a:SCOPE,VERIFY,STOP_WHEN", result["lint"])
+
+    def test_lint_serial_graph(self) -> None:
+        chain = [node("n0")] + [node(f"n{index}", depends_on=(f"n{index - 1}",)) for index in range(1, 5)]
+        wide = [node("n0"), node("n1"), node("n2"), node("n3"),
+                node("n4", depends_on=("n0", "n1", "n2", "n3"))]
+        self.assertIn("serial_graph:5 build nodes, 5 of them in one chain; most of the build work is one chain, "
+                      "so split it into parallel lanes where the work allows, or fold a small step that only follows "
+                      "another into the node it follows.",
+                      dag_run.lint([dag_run._validated_node(item) for item in chain]))
+        self.assertFalse([finding for finding in dag_run.lint([dag_run._validated_node(item) for item in wide])
+                          if finding.startswith("serial_graph")])
+
+    def test_serial_graph_counts_the_chain_of_build_nodes_only(self) -> None:
+        """Baseline, review and verify nodes are serial by design: a graph as parallel as its build work allows gets no
+        advice, and a chain of build nodes still does. Mutations: count every node again, count every node on the
+        path, move the 80% share, or let one build node make a chain."""
+        def shape(*specs: tuple[str, str, tuple[str, ...]]) -> list[dict]:
+            return [dag_run._validated_node(node(node_id, role=role, depends_on=after,
+                                                 scope=(f"src/{node_id}.py",) if role == "build" else ()))
+                    for node_id, role, after in specs]
+
+        def serial(nodes: list[dict]) -> list[str]:
+            return [finding for finding in dag_run.lint(nodes) if finding.startswith("serial_graph")]
+
+        builds = lambda *ids, after=(): [(item, "build", after) for item in ids]  # noqa: E731
+        quiet = {
+            "(a) baseline, one build, verify": shape(("base", "baseline", ()), ("b1", "build", ("base",)),
+                                                     ("check", "verify", ("b1",))),
+            "(b) baseline, two builds side by side, review, verify": shape(
+                ("base", "baseline", ()), *builds("api", "ui", after=("base",)), ("rev", "review", ("api", "ui")),
+                ("check", "verify", ("rev",))),
+            "(c) baseline, three builds side by side, verify": shape(
+                ("base", "baseline", ()), *builds("b1", "b2", "b3", after=("base",)),
+                ("check", "verify", ("b1", "b2", "b3"))),
+            "(e) three chained builds and a verify: under five nodes": shape(
+                ("b1", "build", ()), ("b2", "build", ("b1",)), ("b3", "build", ("b2",)), ("check", "verify", ("b3",))),
+            "(f) four builds side by side, one after them, verify": shape(
+                *builds("b1", "b2", "b3", "b4"), ("wire", "build", ("b1", "b2", "b3", "b4")),
+                ("check", "verify", ("wire",))),
+            "(h) baseline, one build, review, two verifies in a row": shape(
+                ("base", "baseline", ()), ("b1", "build", ("base",)), ("rev", "review", ("b1",)),
+                ("check", "verify", ("rev",)), ("check2", "verify", ("check",))),
+            "(k) three of five builds in one chain: under 80%": shape(
+                ("b1", "build", ()), ("b2", "build", ("b1",)), ("b3", "build", ("b2",)), *builds("b4", "b5"),
+                ("check", "verify", ("b3", "b4", "b5"))),
+            # On purpose: it fired on main only because the verify node was counted (critical path 4 of 5 nodes).
+            "(l) a chain of three builds beside one other build, verify: 3 of 4": shape(
+                ("b1", "build", ()), ("b2", "build", ("b1",)), ("b3", "build", ("b2",)), ("b4", "build", ()),
+                ("check", "verify", ("b3", "b4"))),
+        }
+        for label, nodes in quiet.items():
+            with self.subTest(label):
+                self.assertEqual(serial(nodes), [])
+        fires = {
+            "(d) baseline, four chained builds, verify": (shape(
+                ("base", "baseline", ()), ("b1", "build", ("base",)), ("b2", "build", ("b1",)),
+                ("b3", "build", ("b2",)), ("b4", "build", ("b3",)), ("check", "verify", ("b4",))), 4, 4),
+            "(i) baseline, two chained builds, review, verify": (shape(
+                ("base", "baseline", ()), ("b1", "build", ("base",)), ("b2", "build", ("b1",)),
+                ("rev", "review", ("b2",)), ("check", "verify", ("rev",))), 2, 2),
+            "(j) four of five builds in one chain: exactly 80%": (shape(
+                ("b1", "build", ()), ("b2", "build", ("b1",)), ("b3", "build", ("b2",)), ("b4", "build", ("b3",)),
+                ("b5", "build", ()), ("check", "verify", ("b4", "b5"))), 5, 4),
+            # A join takes its longest parent: b5 waits on the three-build chain and on b4.
+            "(m) a join of a three-build chain and one build: 4 of 5": (shape(
+                ("b1", "build", ()), ("b2", "build", ("b1",)), ("b3", "build", ("b2",)), ("b4", "build", ()),
+                ("b5", "build", ("b3", "b4")), ("check", "verify", ("b5",))), 5, 4),
+            # Ids that sort against the layer order: each child's id sorts before its parent's.
+            "(n) a chain whose ids sort backwards": (shape(
+                ("z4", "build", ()), ("y3", "build", ("z4",)), ("x2", "build", ("y3",)), ("w1", "build", ("x2",)),
+                ("a-check", "verify", ("w1",))), 4, 4),
+            # Nodes stored before nodes carried a role: `node_role` reads them by their label, so the verify-like
+            # one is no build node and the others are.
+            "(o) role-less nodes stored before roles existed": ([
+                {key: value for key, value in item.items() if key != "role"}
+                for item in shape(("b1", "build", ()), ("b2", "build", ("b1",)), ("b3", "build", ("b2",)),
+                                  ("b4", "build", ("b3",)))
+            ] + [{key: value for key, value in dag_run._validated_node(
+                node("check", label="Verify the feature", depends_on=("b4",), role="verify")).items()
+                if key != "role"}], 4, 4),
+        }
+        for label, (nodes, total, chain) in fires.items():
+            with self.subTest(label):
+                self.assertEqual(serial(nodes), [
+                    f"serial_graph:{total} build nodes, {chain} of them in one chain; most of the build work is one "
+                    "chain, so split it into parallel lanes where the work allows, or fold a small step that only "
+                    "follows another into the node it follows."])
+        # Through the tool, as the reviewer measured it: shape (b) defines with no serial_graph advice.
+        with homes():
+            defined = call(action="define", run="feat", nodes=[
+                node("base", role="baseline"), node("api", depends_on=("base",), scope=("src/api.py",)),
+                node("ui", depends_on=("base",), scope=("src/ui.py",)),
+                node("rev", category="review", depends_on=("api", "ui"), role="review"),
+                node("check", depends_on=("rev",), role="verify")])
+        self.assertEqual(defined["status"], "ok", defined)
+        self.assertFalse([finding for finding in defined["lint"] if finding.startswith("serial_graph")], defined["lint"])
+
+
+def oneshot_config(home, limit: int, *, cap: int = 10) -> None:
+    slots_table(home)
+    (home.hermes / "config.yaml").write_text(
+        f"delegation:\n  oneshot_max_children: {limit}\n  max_concurrent_children: {cap}\n", encoding="utf-8")
+
+
+def tasks_in(result: dict) -> int:
+    return sum(len(item["tasks"]) for item in result.get("calls", []))
+
+
+class OneShotBudgetTests(unittest.TestCase):
+    """The one-shot child budget across define, ready, settle, repair and extend: what this process already spent."""
+
+    def test_define_counts_children_this_session_already_started(self) -> None:
+        with homes() as home, patch.object(dag_tool, "_single_query_session", return_value=True):
+            oneshot_config(home, 3)
+            start(home, "child-other", "sa-other", "Look something up", now=time.time())
+            refused = call(action="define", run="feat", nodes=[node("a"), node("b"), node("c")])
+            defined = call(action="define", run="feat", nodes=[node("a"), node("b")])
+        self.assertEqual((refused["status"], refused["reason"]), ("refused", "oneshot_budget_exceeded"), refused)
+        self.assertIn("at most 2 nodes", refused["say"])
+        self.assertIn("delegation.oneshot_max_children is 3", refused["say"])
+        self.assertIn("already started 1", refused["say"])
+        self.assertEqual(defined["status"], "ok", defined)
+        self.assertEqual(tasks_in(defined), 2)
+        self.assertEqual(defined["slots"]["oneshot"], {"limit": 3, "spent": 1, "remaining": 2})
+
+    def test_waves_never_carry_more_tasks_than_the_budget_left(self) -> None:
+        with homes() as home, patch.object(dag_tool, "_single_query_session", return_value=True):
+            oneshot_config(home, 3)
+            defined = call(action="define", run="feat", nodes=[node("a"), node("b"), node("c")])
+            child_started(home, "feat", "a")
+            child_started(home, "feat", "b")
+            # a's child died on a provider error; c's call has not started its child yet, and will take the last one.
+            retried = call(action="settle", run="feat", node="a", outcome="failed", provider_error=True)
+            again = call(action="ready", run="feat")
+            child_started(home, "feat", "c")
+            for item in ("b", "c"):
+                handoff(home, "feat", item)
+            call(action="settle", run="feat", node="b", outcome="accepted")
+            left = call(action="settle", run="feat", node="c", outcome="accepted")
+            handoff(home, "feat", "a")
+            done = call(action="settle", run="feat", node="a", outcome="accepted")
+            record = dag_run.read_run(dag_run.record_path(home.omh, PARENT, "feat"))
+        self.assertEqual(tasks_in(defined), 3)
+        self.assertEqual(retried["settled"]["outcome"], "retry")
+        for result in (retried, again):
+            self.assertEqual(result["calls"], [], result)
+            self.assertEqual(result["held_for_slots"], ["a"])
+            self.assertIn("delegation.oneshot_max_children", result["say"])
+            self.assertEqual(result["slots"]["oneshot"], {"limit": 3, "spent": 2, "remaining": 1})
+        # Nothing else out and no child left: the parent does the node itself, with its handoff path, and settles it.
+        self.assertEqual((left["calls"], left["for_parent"]), ([], ["a"]), left)
+        self.assertNotIn("held_for_slots", left)
+        self.assertIn("yourself", left["say"])
+        self.assertIn("delegation.oneshot_max_children is 3", left["say"])
+        # The tail only: Windows may spell the temp home in 8.3 short form on one side and long on the other.
+        expected = Path(dag_run.node_handoff(record, home.omh, "a"))
+        self.assertIn(str(Path(expected.parent.parent.name, expected.parent.name, expected.name)), left["say"])
+        self.assertEqual(done["state"], "done", done)
+        self.assertEqual(record["nodes"][0]["attempts"][-1]["lane"], "parent")
+
+    def test_a_reoffered_node_costs_a_child_too(self) -> None:
+        with homes() as home, patch.object(dag_tool, "_single_query_session", return_value=True):
+            oneshot_config(home, 2)
+            moment = time.time()
+            with patch.object(dag_tool.time, "time", return_value=moment):
+                call(action="define", run="feat", nodes=[node("a"), node("b")])
+            start(home, "child-other", "sa-other", "Something else", now=moment)
+            # No child ever took the call: both nodes come back once the hand-out is stale, with one child left.
+            with patch.object(dag_tool.time, "time", return_value=moment + dag_run.HANDOUT_STALE_SECONDS + 1):
+                reoffered = call(action="ready", run="feat")
+        self.assertEqual(tasks_in(reoffered), 1, reoffered)
+        self.assertEqual(reoffered["held_for_slots"], ["b"])
+
+    def test_a_grandchild_and_a_repeated_start_do_not_count(self) -> None:
+        from omh.plugin_bundle.omh import delegation_ledger
+
+        with homes() as home:
+            moment = time.time()
+            start(home, "child-a", "sa-a", "Top-level", now=moment)
+            start(home, "child-a", "sa-a", "Top-level", now=moment)
+            start(home, "grand-a", "sa-grand", "Nested", parent="child-a", parent_subagent="sa-a", now=moment)
+            self.assertEqual(delegation_ledger.oneshot_children_spawned([PARENT]), 1)
+            # Hermes charged the child even when its record cannot be written.
+            with patch.object(delegation_ledger, "_update", return_value=False):
+                self.assertFalse(start(home, "child-b", "sa-b", "Top-level", now=moment))
+            self.assertEqual(delegation_ledger.oneshot_children_spawned([PARENT, "other-session"]), 2)
+            self.assertEqual(delegation_ledger.oneshot_children_spawned(["other-session"]), 0)
+
+    def _failed_verify(self, home) -> None:
+        call(action="define", run="feat", nodes=[node("api", scope=("a.py",)), node("verify", role="verify", depends_on=("api",))])
+        child_started(home, "feat", "api")
+        handoff(home, "feat", "api")
+        call(action="settle", run="feat", node="api", outcome="accepted")
+        child_started(home, "feat", "verify")
+        call(action="settle", run="feat", node="verify", outcome="failed", reason="2 tests red")
+
+    def test_repair_and_extend_refuse_more_nodes_than_children_left(self) -> None:
+        repair_nodes = [node("fix", scope=("a.py",), depends_on=("api",)), node("verify2", role="verify", depends_on=("fix",))]
+        extend_nodes = [node("more", depends_on=("api",)), node("check", depends_on=("more",))]
+        for oneshot in (True, False):
+            with self.subTest(oneshot=oneshot), homes() as home, \
+                    patch.object(dag_tool, "_single_query_session", return_value=oneshot):
+                oneshot_config(home, 3)
+                self._failed_verify(home)
+                path = dag_run.record_path(home.omh, PARENT, "feat")
+                before = path.read_bytes()
+                repaired = call(action="repair", run="feat", node="verify", nodes=repair_nodes)
+                if oneshot:
+                    self.assertEqual((repaired["status"], repaired["reason"]), ("refused", "oneshot_budget_exceeded"))
+                    self.assertIn("1 more child", repaired["say"])
+                    self.assertEqual(path.read_bytes(), before)
+                else:
+                    self.assertEqual(repaired["settled"]["repair_nodes"], ["fix", "verify2"], repaired)
+            with self.subTest(oneshot=oneshot, action="extend"), homes() as home, \
+                    patch.object(dag_tool, "_single_query_session", return_value=oneshot):
+                oneshot_config(home, 2)
+                call(action="define", run="feat", nodes=[node("api", scope=("a.py",))])
+                child_started(home, "feat", "api")
+                handoff(home, "feat", "api")
+                call(action="settle", run="feat", node="api", outcome="accepted")
+                path = dag_run.record_path(home.omh, PARENT, "feat")
+                before = path.read_bytes()
+                extended = call(action="extend", run="feat", node="api", nodes=extend_nodes)
+                if oneshot:
+                    self.assertEqual((extended["status"], extended["reason"]), ("refused", "oneshot_budget_exceeded"))
+                    self.assertEqual(path.read_bytes(), before)
+                    one = call(action="extend", run="feat", node="api", nodes=extend_nodes[:1])
+                    self.assertEqual((one["status"], tasks_in(one)), ("ok", 1), one)
+                else:
+                    self.assertEqual(extended["settled"]["extend_nodes"], ["more", "check"], extended)
+
+    def test_interactive_and_unlimited_waves_are_unchanged(self) -> None:
+        nodes = [node(f"n{index}", scope=(f"f{index}",)) for index in range(3)]
+        for oneshot, limit in ((False, 1), (True, 0)):
+            with self.subTest(oneshot=oneshot, limit=limit), homes() as home, \
+                    patch.object(dag_tool, "_single_query_session", return_value=oneshot):
+                oneshot_config(home, limit, cap=2)
+                start(home, "child-other", "sa-other", "Something else", now=time.time())
+                result = call(action="define", run="feat", nodes=nodes)
+                self.assertEqual(result["status"], "ok", result)
+                self.assertNotIn("oneshot", result["slots"])
+                self.assertEqual([item["nodes"] for item in result["calls"]], [["n0", "n1"], ["n2"]])
+                self.assertNotIn("held_for_slots", result)
+                self.assertNotIn("say", result)
+
+
 class ExtendTests(unittest.TestCase):
     """Work found missing after every node passed: an extend round on the same run, at most two per run."""
 
     def _done(self, home) -> dict:
         slots_table(home)
         call(action="define", run="feat", nodes=[node("api", scope=("a.py",)),
-                                                 node("verify", depends_on=("api",), label="Verify the feature")])
+                                                 node("verify", role="verify", depends_on=("api",), label="Verify the feature")])
         handoff(home, "feat", "api")
         call(action="settle", run="feat", node="api", outcome="accepted")
         handoff(home, "feat", "verify")
         return call(action="settle", run="feat", node="verify", outcome="accepted")
 
+    def test_extend_takes_a_read_only_node_and_refuses_one_with_a_scope(self) -> None:
+        with homes() as home:
+            self._done(home)
+            refused = call(action="extend", run="feat", nodes=[
+                {**node("audit", role="review", depends_on=("api",), scope=("a.py",)), "read_only": True}])
+            extended = call(action="extend", run="feat", nodes=[
+                {**node("audit", role="review", depends_on=("api",), label="Review the export"), "read_only": True}])
+            record = dag_run.read_run(dag_run.record_path(home.omh, PARENT, "feat"))
+        self.assertEqual((refused["status"], refused["reason"]), ("refused", "read_only_with_write_scope"), refused)
+        self.assertEqual(extended["status"], "ok", extended)
+        self.assertIs({n["id"]: n for n in record["nodes"]}["audit"]["read_only"], True)
+
     def test_extend_adds_a_round_to_the_same_run_and_records_where_each_node_came_from(self) -> None:
         with homes() as home:
             done = self._done(home)
             extended = call(action="extend", run="feat", nodes=[
-                node("csv", scope=("a.py",), depends_on=("api",)), node("verify2", depends_on=("csv",),
+                node("csv", scope=("a.py",), depends_on=("api",)), node("verify2", role="verify", depends_on=("csv",),
                                                                         label="Verify CSV")])
             record = dag_run.read_run(dag_run.record_path(home.omh, PARENT, "feat"))
         self.assertEqual((done["state"], done["extend_rounds_left"]), ("done", 2))
@@ -900,11 +1803,46 @@ class ExtendTests(unittest.TestCase):
             self.assertEqual(result.get("reason"), reason, result)
         self.assertEqual((unchanged["state"], len(unchanged["nodes"])), ("done", 2))
 
+    def test_an_earlier_nodes_file_under_another_spelling_is_refused(self) -> None:
+        with homes() as home:
+            self._done(home)
+            refused = {entry: call(action="extend", run="feat", nodes=[node("x", scope=(entry,))])
+                       for entry in ("./a.py", "*.py")}
+            extended = call(action="extend", run="feat", nodes=[node("x", scope=("ab.py",))])
+        for entry, result in refused.items():
+            self.assertEqual((entry, result.get("reason")), (entry, "write_scope_overlap"), result)
+        self.assertEqual(extended["status"], "ok", extended)
+
+    def test_one_refusal_names_every_overlapping_pair(self) -> None:
+        """Mutation: raise on the first pair; a directory entry then costs one refused round per node it covers."""
+        with homes() as home:
+            slots_table(home)
+            call(action="define", run="feat", nodes=[node(name, scope=(f"src/{name}.py",)) for name in "abc"])
+            for name in "abc":
+                handoff(home, "feat", name)
+                call(action="settle", run="feat", node=name, outcome="accepted")
+            refused = call(action="extend", run="feat", nodes=[node("x", scope=("src/",))])
+        self.assertEqual(refused.get("reason"), "write_scope_overlap", refused)
+        self.assertEqual(refused["say"], "These nodes write overlapping paths with no edge between them: "
+                                         "a writes src/a.py and x writes src/; b writes src/b.py and x writes src/; "
+                                         "c writes src/c.py and x writes src/. "
+                                         "Make one of each pair depend on the other, or split the scope.")
+
+    def test_the_refusal_names_a_bounded_number_of_pairs(self) -> None:
+        nodes = [node(f"n{index}", scope=(f"src/n{index}.py",)) for index in range(dag_run.OVERLAPS_NAMED + 3)]
+        with homes():
+            refused = call(action="define", run="feat", nodes=[*nodes, node("x", scope=("src/",))])
+        self.assertEqual(refused.get("reason"), "write_scope_overlap", refused)
+        self.assertEqual(refused["say"].count(" and x writes src/"), dag_run.OVERLAPS_NAMED)
+        self.assertIn("src/ and 3 more pairs. Make one of each pair", refused["say"])
+
     def test_the_new_nodes_are_linted(self) -> None:
         with homes() as home:
             self._done(home)
-            extended = call(action="extend", run="feat", nodes=[node("csv", scope=("b.py",), prompt="just do it")])
-        self.assertIn("missing_markers:csv:TASK,DELIVERABLE,SCOPE,VERIFY,STOP_WHEN", extended["lint"])
+            markerless = call(action="extend", run="feat", nodes=[node("csv", scope=("b.py",), prompt="just do it")])
+            extended = call(action="extend", run="feat", nodes=[node("csv", scope=("b.py",), prompt="TASK: add CSV")])
+        self.assertEqual((markerless["status"], markerless["reason"]), ("refused", "prompt_markers_missing"))
+        self.assertIn("missing_markers:csv:DELIVERABLE,SCOPE,VERIFY,STOP_WHEN", extended["lint"])
         self.assertIn("verification_misses:csv", extended["lint"])
 
     def test_two_rounds_then_the_parent_reports_what_is_open(self) -> None:
@@ -939,7 +1877,7 @@ class ExtendTests(unittest.TestCase):
 
     def _done_after_a_superseded_repair(self, home) -> None:
         slots_table(home)
-        call(action="define", run="feat", nodes=[node("api", scope=("a.py",)), node("verify", depends_on=("api",))])
+        call(action="define", run="feat", nodes=[node("api", scope=("a.py",)), node("verify", role="verify", depends_on=("api",))])
         handoff(home, "feat", "api")
         call(action="settle", run="feat", node="api", outcome="accepted")
         call(action="settle", run="feat", node="verify", outcome="failed")
@@ -952,6 +1890,100 @@ class ExtendTests(unittest.TestCase):
         done = call(action="settle", run="feat", node="verify", outcome="accepted")
         self.assertEqual(done["state"], "done", done)
         self.assertEqual({row["id"]: row["state"] for row in done["nodes"]}["v2"], "superseded")
+
+
+class ClosingUsageTests(unittest.TestCase):
+    """#2684: a finished run carries what its children used, from Hermes' own rows; a running one carries nothing."""
+
+    @staticmethod
+    def _counted(home, session: str, uncached: int, read: int, write: int, output: int, *,
+                 actual: float | None = None, estimated: float | None = None) -> None:
+        home.session(session, "glm-5.3-flash", parent=PARENT, started=time.time())
+        home.tokens(session, output)
+        home.execute("UPDATE sessions SET input_tokens = ?, cache_read_tokens = ?, cache_write_tokens = ?, "
+                     "actual_cost_usd = ?, estimated_cost_usd = ? WHERE id = ?",
+                     (uncached, read, write, actual, estimated, session))
+
+    def _run(self, home) -> None:
+        slots_table(home)
+        for column, kind in (("input_tokens", "INTEGER DEFAULT 0"), ("cache_read_tokens", "INTEGER DEFAULT 0"),
+                             ("cache_write_tokens", "INTEGER DEFAULT 0"), ("actual_cost_usd", "REAL"),
+                             ("estimated_cost_usd", "REAL")):
+            home.execute(f"ALTER TABLE sessions ADD COLUMN {column} {kind}")
+        call(action="define", run="feat", nodes=[node("api", scope=("a.py",)),
+                                                 node("verify", role="verify", depends_on=("api",))])
+
+    def _finish(self, home, node_id: str) -> dict:
+        child_started(home, "feat", node_id)
+        handoff(home, "feat", node_id)
+        stop(home, f"child-{node_id}", now=time.time())
+        return call(action="settle", run="feat", node=node_id, outcome="accepted")
+
+    def test_a_done_run_adds_up_its_childrens_recorded_usage(self) -> None:
+        """Mutation: leave out a child, count the output in the cache share, or price an unpriced child."""
+        with homes() as home:
+            self._run(home)
+            self._counted(home, "child-api", 1_000, 8_000, 1_000, 500, actual=0.04)
+            first = self._finish(home, "api")
+            self._counted(home, "child-verify", 500, 2_000, 0, 200, estimated=0.01)
+            done = self._finish(home, "verify")
+            status = call(action="status", run="feat")
+        self.assertEqual(first["state"], "running")
+        self.assertNotIn("usage", first)
+        self.assertNotIn("usage_line", first)
+        self.assertEqual(done["state"], "done", done)
+        self.assertEqual(done["usage"], {"input": 1_500, "cache_read": 10_000, "cache_write": 1_000, "output": 700,
+                                         "cost_usd": 0.05, "cost_estimated": True, "children": 2,
+                                         "children_unrecorded": 0, "priced": 2})
+        self.assertEqual(done["usage_line"], "DAG feat · 2 children · 13.2k tokens · cache 80.0% · ~$0.0500 (2/2 priced)")
+        self.assertEqual(status["usage"], done["usage"])
+
+    def test_an_unpriced_child_makes_the_cost_a_floor_and_an_uncounted_one_is_named(self) -> None:
+        with homes() as home:
+            self._run(home)
+            self._counted(home, "child-api", 1_000, 0, 0, 100, actual=0.02)
+            self._finish(home, "api")
+            self._counted(home, "child-verify", 400, 0, 0, 50)
+            partial = self._finish(home, "verify")
+        self.assertEqual(partial["usage"]["cost_usd"], 0.02)
+        self.assertTrue(partial["usage"]["cost_partial"])
+        self.assertEqual(partial["usage_line"], "DAG feat · 2 children · 1.6k tokens · cache 0.0% · ≥$0.0200 (1/2 priced)")
+        with homes() as home:
+            self._run(home)
+            self._counted(home, "child-api", 300, 0, 0, 20)
+            self._finish(home, "api")
+            home.session("child-verify", "glm-5.3-flash", parent=PARENT, started=time.time())  # no count at all
+            unpriced = self._finish(home, "verify")
+        self.assertEqual(unpriced["usage_line"], "DAG feat · 1 child · 320 tokens · cache 0.0% · cost not recorded · 1 with no record")
+        self.assertNotIn("cost_usd", unpriced["usage"])
+
+    def test_the_run_summary_closes_with_the_same_figures_before_the_goal_line(self) -> None:
+        """Mutation: drop the usage line from the summary, or put it after the goal line."""
+        from omh.plugin_bundle.omh.tools.run_summary_tool import omh_run_summary_handler
+
+        with homes() as home:
+            self._run(home)
+            for column in ("reasoning_tokens", "api_call_count"):  # the summary's own row read needs them
+                home.execute(f"ALTER TABLE sessions ADD COLUMN {column} INTEGER DEFAULT 0")
+            home.session(PARENT, "claude-opus-5-5", started=time.time() - 60)
+            self._counted(home, "child-api", 1_000, 8_000, 1_000, 500, actual=0.04)
+            self._finish(home, "api")
+            self._counted(home, "child-verify", 500, 2_000, 0, 200, actual=0.01)
+            self._finish(home, "verify")
+            summary = json.loads(omh_run_summary_handler({"language": "ko"}, session_id=PARENT))
+        lines = summary["summary_text"].splitlines()
+        self.assertEqual(lines[-2:], ["DAG 사용량 (feat): 2 children · 13.2k tokens · cache 80.0% · $0.0500 (2/2 priced)",
+                                      "목표 검증 (DAG feat): verified"])
+        self.assertEqual(summary["dag_goal"]["usage"]["children"], 2)
+
+    def test_a_run_whose_children_counted_nothing_carries_no_usage(self) -> None:
+        with homes() as home:
+            self._run(home)
+            self._finish(home, "api")
+            done = self._finish(home, "verify")
+        self.assertEqual(done["state"], "done")
+        self.assertNotIn("usage", done)
+        self.assertNotIn("usage_line", done)
 
 
 class LifecycleTests(unittest.TestCase):
@@ -973,6 +2005,40 @@ class LifecycleTests(unittest.TestCase):
             settle = call(action="settle", run="feat", node="api", outcome="accepted")
         self.assertEqual(result["state"], "cancelled")
         self.assertEqual(settle["reason"], "run_cancelled")
+
+    def test_cancel_names_still_running_children(self) -> None:
+        with homes() as home:
+            slots_table(home)
+            call(action="define", run="feat", nodes=[node("api"), node("docs")])
+            call(action="ready", run="feat")
+            child_started(home, "feat", "api")
+            result = call(action="cancel", run="feat")
+        still = result.get("still_running", [])
+        self.assertEqual([row["id"] for row in still], ["api"])
+        self.assertEqual(still[0]["subagent_id"], "sa-api")
+        self.assertIn("open_for_s", still[0])
+        self.assertIn("api as subagent sa-api", result["say"])
+        self.assertIn("delegate_task action=stop", result["say"])
+        self.assertIn("never settles them", result["say"])
+
+    def test_a_repeated_cancel_still_names_the_running_child(self) -> None:
+        with homes() as home:
+            slots_table(home)
+            call(action="define", run="feat", nodes=[node("api"), node("docs")])
+            call(action="ready", run="feat")
+            child_started(home, "feat", "api")
+            call(action="cancel", run="feat")
+            again = call(action="cancel", run="feat")
+        self.assertEqual([row["subagent_id"] for row in again.get("still_running", [])], ["sa-api"])
+        self.assertNotIn("No child is still running", again["say"])
+
+    def test_cancel_without_running_children_says_so(self) -> None:
+        with homes() as home:
+            slots_table(home)
+            call(action="define", run="feat", nodes=FEATURE)
+            result = call(action="cancel", run="feat")
+        self.assertNotIn("still_running", result)
+        self.assertIn("No child is still running", result["say"])
 
     def test_the_record_holds_no_child_output(self) -> None:
         with homes() as home:
@@ -1239,35 +2305,155 @@ class RestartTests(unittest.TestCase):
                                        "completion.")
 
 
+def resumable_table(home, rows: list[tuple[str, str, dict]], *, expires_at: float | None = None) -> None:
+    """Hermes 0.23.2's `resumable_subagents` rows: (subagent id, state, record)."""
+    home.execute("CREATE TABLE IF NOT EXISTS resumable_subagents (subagent_id TEXT PRIMARY KEY, state TEXT NOT NULL, "
+                 "pinned INTEGER NOT NULL DEFAULT 0, stop_cause TEXT, owner_pid INTEGER, owner_started_at INTEGER, "
+                 "record_json TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL, expires_at REAL)")
+    for sid, state, record in rows:
+        home.execute("INSERT OR REPLACE INTO resumable_subagents (subagent_id, state, record_json, created_at, "
+                     "updated_at, expires_at) VALUES (?, ?, ?, 0, 0, ?)", (sid, state, json.dumps(record), expires_at))
+
+
+def promised(**extra) -> dict:
+    return {"auto_promised": True, "resume_mode": "AUTO_AT", "next_attempt_at": 1_900_000_000.0, "auto_attempts": 0,
+            **extra}
+
+
+class AutoResumeTests(unittest.TestCase):
+    """Hermes' `delegation.auto_resume` continues a child a usage limit or a restart stopped, under the same id.
+
+    Mutation: drop the `waiting_resume` read in `dag_tool._children`, mark such a child lost, let settle accept
+    over it, or name it stuck.
+    """
+
+    def out(self, home, moment: float, *, probes: dict) -> None:
+        slots_table(home)
+        with patch.object(dag_tool.time, "time", return_value=moment), patch_modules(probes):
+            call(action="define", run="feat", nodes=[node("api")])
+            child_started(home, "feat", "api", now=moment + 1)
+
+    def test_a_limit_stopped_child_hermes_will_resume_keeps_its_node_running(self) -> None:
+        moment = time.time()
+        with homes() as home:
+            self.out(home, moment, probes=hermes_process(1000))
+            stop(home, "child-api", "error", now=moment + 30)
+            resumable_table(home, [("sa-api", "resumable", promised())])
+            with patch.object(dag_tool.time, "time", return_value=moment + 60), patch_modules(hermes_process(1000)):
+                ready = call(action="ready", run="feat")
+                refused = call(action="settle", run="feat", node="api", outcome="failed", reason="limit")
+        self.assertEqual((ready["nodes"][0]["state"], ready["calls"]), ("running", []))
+        self.assertEqual(ready["nodes"][0]["waiting_resume"], {"at": 1_900_000_000.0, "attempt": 1})
+        self.assertIn("do not dispatch it again", ready["say"])
+        self.assertEqual(refused["status"], "refused")
+        self.assertEqual(refused["reason"], "child_resume_pending")
+
+    def test_a_restart_ended_child_hermes_will_resume_is_not_lost_or_offered_again(self) -> None:
+        moment = time.time()
+        with homes() as home:
+            self.out(home, moment, probes=hermes_process(1000))
+            resumable_table(home, [("sa-api", "claimed", promised(resume_mode="AUTO_ON_BOOT", auto_attempts=1))])
+            with patch.object(dag_tool.time, "time", return_value=moment + 60), patch_modules(hermes_process(5000)):
+                ready = call(action="ready", run="feat")
+            attempts = dag_run.read_run(dag_run.record_path(home.omh, PARENT, "feat"))["nodes"][0]["attempts"]
+        self.assertEqual((ready["nodes"][0]["state"], ready["calls"]), ("running", []))
+        self.assertEqual(ready["nodes"][0]["waiting_resume"], {"at": None, "attempt": 1})
+        self.assertNotIn("lost", attempts[0])
+
+    def test_the_resumed_runs_success_settles_as_accepted(self) -> None:
+        """The whole path: limit stop, resume under the same id, completed stop, accepted."""
+        moment = time.time()
+        with homes() as home:
+            self.out(home, moment, probes=hermes_process(1000))
+            stop(home, "child-api", "error", now=moment + 30)
+            resumable_table(home, [("sa-api", "resumable", promised())])
+            with patch_modules(hermes_process(1000)):
+                start(home, "child-api", "sa-api", "Node api [dag:feat/api]", now=moment + 3600)
+            resumable_table(home, [("sa-api", "running", {"auto_promised": False})])
+            stop(home, "child-api", "completed", now=moment + 3700)
+            handoff(home, "feat", "api")
+            with patch.object(dag_tool.time, "time", return_value=moment + 3800), patch_modules(hermes_process(1000)):
+                settled = call(action="settle", run="feat", node="api", outcome="accepted")
+        self.assertEqual(settled["nodes"][0]["state"], "accepted")
+
+    def test_no_promise_keeps_the_old_rules(self) -> None:
+        """A child Hermes gave up on, never promised, or whose record expired: lost after a restart, failed stop."""
+        moment = time.time()
+        cases = (("gave up", "resumable", promised(auto_gave_up="gave up after 2 automatic attempts"), None),
+                 ("never promised", "resumable", promised(auto_promised=False), None),
+                 ("stopped by the parent", "stopped", promised(), None),
+                 ("expired", "resumable", promised(), moment - 1))
+        for name, state, record, expires in cases:
+            with self.subTest(case=name), homes() as home:
+                self.out(home, moment, probes=hermes_process(1000))
+                resumable_table(home, [("sa-api", state, record)], expires_at=expires)
+                with patch.object(dag_tool.time, "time", return_value=moment + 60), \
+                        patch_modules(hermes_process(5000)):
+                    ready = call(action="ready", run="feat")
+                self.assertEqual([c["nodes"] for c in ready["calls"]], [["api"]])
+                self.assertNotIn("waiting_resume", ready["nodes"][0])
+
+    def test_a_hermes_without_the_table_reads_nothing(self) -> None:
+        """Hermes before 0.23.2: no `resumable_subagents`, the restart rule as it was."""
+        moment = time.time()
+        with homes() as home:
+            self.out(home, moment, probes=hermes_process(1000))
+            with patch.object(dag_tool.time, "time", return_value=moment + 60), patch_modules(hermes_process(5000)):
+                ready = call(action="ready", run="feat")
+        self.assertEqual([c["nodes"] for c in ready["calls"]], [["api"]])
+
+    def test_a_waiting_node_is_not_named_stuck(self) -> None:
+        moment = time.time()
+        with homes() as home:
+            self.out(home, moment, probes=hermes_process(1000))
+            stop(home, "child-api", "error", now=moment + 30)
+            resumable_table(home, [("sa-api", "resumable", promised())])
+            with patch.object(dag_tool.time, "time", return_value=moment + 5 * 3600), \
+                    patch_modules(hermes_process(1000)):
+                status = call(action="status", run="feat")
+        self.assertNotIn("stuck", status)
+
+
 CODING = [
     node("plan", category="unspecified-low", label="Plan the change"),
-    node("api", depends_on=("plan",), scope=("src/api.py",)),
-    node("ui", depends_on=("plan",), scope=("src/ui.py",)),
-    node("review", depends_on=("plan",), scope=("docs/review.md",), label="Review the plan"),
+    node("api", depends_on=("plan",), scope=("src/api.py",), owner="codex"),
+    node("ui", depends_on=("plan",), scope=("src/ui.py",), owner="codex"),
+    node("review", role="review", depends_on=("plan",), scope=("docs/review.md",), label="Review the plan"),
     node("verify", category="unspecified-high", depends_on=("api", "ui", "review"), label="Verify the feature"),
 ]
 
 
-def choose(home, owner: str, *, age: float = 0.0) -> dict:
-    """The record the router writes when the person names ``owner``, dated ``age`` seconds ago."""
-    from datetime import datetime, timedelta, timezone
+def choose(home, *owners: str) -> tuple[str, ...]:
+    """This turn's dag-ulw request names ``owners``, as `pre_llm_call` records it for the session."""
+    return note_turn_owners(PARENT, "/dag-ulw build it with " + " and ".join(owners))
 
-    moment = (datetime.now(timezone.utc) - timedelta(seconds=age)).isoformat()
-    state = owner_preference.record_in_message_explicit_naming(
+
+def new_request(text: str = "/dag-ulw build it") -> None:
+    """The person's next turn, which names no owner unless ``text`` does."""
+    note_turn_owners(PARENT, text)
+
+
+def router_record(owner: str, *, accepted: bool = False) -> dict:
+    """A fresh, valid choice the router writes for `omh chat` or `omh coding`: another request's choice."""
+    from datetime import datetime, timezone
+
+    moment = datetime.now(timezone.utc).isoformat()
+    if accepted:
+        return owner_preference.record_accepted_explicit_choice(
+            None, route_family=OWNER_PREFERENCE_ROUTE_FAMILY, selected_owner=owner, occurred_at=moment)
+    return owner_preference.record_in_message_explicit_naming(
         None, route_family=OWNER_PREFERENCE_ROUTE_FAMILY, selected_owner=owner,
         naming_cue=f"named_executor:{owner}", occurred_at=moment)
-    put_record(home, state)
-    return state
 
 
 def put_record(home, state: object) -> None:
-    path = home.omh.joinpath(*dag_tool.OWNER_PREFERENCE_FILE)
+    path = home.omh.joinpath(*owner_preference.OWNER_PREFERENCE_PATH_SEGMENTS)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state), encoding="utf-8")
 
 
 class ExportTests(unittest.TestCase):
-    """The coding owner the person already chose takes the coding nodes; everything else stays on delegate_task."""
+    """The coding owner the defining request named takes its coding nodes; everything else stays on delegate_task."""
 
     def _planned(self, home) -> dict:
         slots_table(home)  # ten free slots: the pool has room, and the coding nodes still go to the owner
@@ -1304,9 +2490,9 @@ class ExportTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_export_round_trips_into_a_fanout_contract(self) -> None:
-        nodes = [node("api", scope=("src/api.py",)), node("ui", scope=("src/ui.py",)),
-                 node("docs", depends_on=("api",), scope=("docs/api.md",)),
-                 node("verify", depends_on=("api", "ui", "docs"))]
+        nodes = [node("api", scope=("src/api.py",), owner="codex"), node("ui", scope=("src/ui.py",), owner="codex"),
+                 node("docs", depends_on=("api",), scope=("docs/api.md",), owner="codex"),
+                 node("verify", role="verify", depends_on=("api", "ui", "docs"))]
         with homes() as home:
             slots_table(home)
             choose(home, "codex")
@@ -1332,8 +2518,10 @@ class ExportTests(unittest.TestCase):
     def test_a_second_export_in_one_run_keeps_the_first_exports_files(self) -> None:
         # api goes first; ui waits on a native node, so it goes in a second export once that node passed. The first
         # export's prepare or dispatch may not have run yet: its goal file must still be the one its id was made from.
-        nodes = [node("api", scope=("src/api.py",)), node("notes", depends_on=("api",), label="Write the notes"),
-                 node("ui", depends_on=("notes",), scope=("src/ui.py",)), node("verify", depends_on=("ui",))]
+        nodes = [node("api", scope=("src/api.py",), owner="codex"),
+                 node("notes", depends_on=("api",), label="Write the notes"),
+                 node("ui", depends_on=("notes",), scope=("src/ui.py",), owner="codex"),
+                 node("verify", role="verify", depends_on=("ui",))]
         with homes() as home:
             slots_table(home)
             choose(home, "codex")
@@ -1369,55 +2557,63 @@ class ExportTests(unittest.TestCase):
         self.assertFalse(offered & {"api", "ui"}, later["calls"])
         self.assertNotIn("export", later)
 
-    def test_the_choice_counts_for_a_day_and_never_from_the_future(self) -> None:
-        for age, expected in ((23 * 3600 + 59 * 60, "codex"), (24 * 3600 + 60, ""), (-60, "")):
-            with self.subTest(age=age), homes() as home:
-                choose(home, "codex", age=age)
-                self.assertEqual(dag_tool.owner_choice(home.omh, now=time.time()), expected)
-
-    def test_export_reads_the_record_exactly_as_the_router_does(self) -> None:
-        from datetime import datetime, timezone
-
-        moment = datetime.now(timezone.utc).isoformat()
-        valid = owner_preference.record_in_message_explicit_naming(
-            None, route_family=OWNER_PREFERENCE_ROUTE_FAMILY, selected_owner="codex",
-            naming_cue="named_executor:codex", occurred_at=moment)
-        accepted = owner_preference.record_accepted_explicit_choice(
-            None, route_family=OWNER_PREFERENCE_ROUTE_FAMILY, selected_owner="claude-code", occurred_at=moment)
-
-        def changed(state: dict, path: tuple[str, ...], value: object) -> dict:
-            copy = json.loads(json.dumps(state))
-            target = copy
-            for key in path[:-1]:
-                target = target[key]
-            target[path[-1]] = value
-            return copy
-
-        route = ("routes", OWNER_PREFERENCE_ROUTE_FAMILY)
-        states = {
-            "valid in_message_naming": valid,
-            "valid accepted choice": accepted,
-            # The review's four (owner_seam_probe): records the router reads as no choice.
-            "raw minimal record": {"schema_version": "coding_owner_preference/v1", "routes": {
-                OWNER_PREFERENCE_ROUTE_FAMILY: {"provenance": "in_message_naming", "selected_owner": "codex",
-                                                "last_choice_at": moment}}},
-            "in_message_naming without a naming cue": changed(valid, (*route, "naming_cue"), ""),
-            "owner with a zero count": changed(valid, (*route, "consecutive_accepted_explicit_choices"), 0),
-            "privacy boundary broken": changed(valid, ("privacy", "mode"), "full"),
-            "no provenance": changed(changed(valid, (*route, "provenance"), ""), (*route, "naming_cue"), ""),
-            "secret-shaped owner": changed(valid, (*route, "selected_owner"), "token-codex"),
-            "not a mapping": ["codex"],
-        }
-        for label, state in states.items():
+    def test_a_choice_counts_only_for_the_request_that_defined_the_run(self) -> None:
+        # Mutation: read a router record again, or keep an earlier turn's naming; either case then exports.
+        records = {"omh chat naming": router_record("codex"), "accepted answer": router_record("codex", accepted=True)}
+        for label, state in records.items():
             with self.subTest(label), homes() as home:
                 put_record(home, state)
-                provenance = owner_preference.explicit_choice_provenance(
-                    state if isinstance(state, dict) else None, route_family=OWNER_PREFERENCE_ROUTE_FAMILY)
-                router_owner = (state["routes"][OWNER_PREFERENCE_ROUTE_FAMILY]["selected_owner"]
-                                if provenance else "")
-                self.assertEqual(dag_tool.owner_choice(home.omh, now=time.time()), router_owner)
-        self.assertEqual(sum(1 for state in states.values() if owner_preference.explicit_choice_provenance(
-            state if isinstance(state, dict) else None, route_family=OWNER_PREFERENCE_ROUTE_FAMILY)), 2)
+                ready = self._planned(home)
+                self.assertNotIn("export", ready)
+                self.assertEqual(ready["exports"], [])
+                self.assertIn("Node api names codex, which the request that defined this run did not name",
+                              ready["say"])
+                self.assertEqual(call(action="export", run="feat", owner="codex")["reason"], "owner_not_chosen")
+        with self.subTest("an earlier request's naming"), homes() as home:
+            choose(home, "codex")
+            new_request()
+            ready = self._planned(home)
+            self.assertEqual(ready["exports"], [])
+            self.assertEqual(call(action="export", run="feat", owner="codex")["reason"], "owner_not_chosen")
+
+    def test_the_defining_requests_choice_holds_for_the_runs_later_turns_only(self) -> None:
+        with homes() as home:
+            choose(home, "codex")
+            ready = self._planned(home)
+            new_request("/dag-ulw build the next feature")
+            self.assertEqual(call(action="status", run="feat")["export"]["nodes"], ["api", "ui"])
+            self.assertEqual(call(action="export", run="feat", owner="codex")["status"], "ok")
+            call(action="define", run="next", nodes=[node("db", scope=("src/db.py",), owner="codex")])
+            later = call(action="export", run="next", owner="codex")
+        self.assertEqual(ready["export"]["nodes"], ["api", "ui"])
+        self.assertEqual(later["reason"], "owner_not_chosen")
+
+    def test_a_cancelled_run_is_not_defined_again_and_a_new_id_takes_the_owner(self) -> None:
+        # Mutation: let `define` reuse a cancelled run with the same nodes; it then answers "already defined" with
+        # no owners, and every later call is refused as cancelled.
+        with homes() as home:
+            call(action="define", run="feat", nodes=CODING)
+            call(action="cancel", run="feat")
+            choose(home, "codex")
+            again = call(action="define", run="feat", nodes=CODING)
+            fresh = call(action="define", run="feat-codex", nodes=CODING)
+            stored = json.loads(dag_run.record_path(home.omh, PARENT, "feat-codex").read_text(encoding="utf-8"))
+        self.assertEqual((again["status"], again["reason"]), ("refused", "run_cancelled"), again)
+        self.assertIn("new run id", again["say"])
+        self.assertEqual(fresh["status"], "ok", fresh)
+        self.assertEqual(stored["owners"], ["codex"])
+
+    def test_a_run_record_keeps_only_known_owners(self) -> None:
+        with homes() as home:
+            choose(home, "codex")
+            call(action="define", run="feat", nodes=CODING)
+            path = dag_run.record_path(home.omh, PARENT, "feat")
+            stored = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["owners"], ["codex"])
+            for owners in ("codex", ["gemini"], [1]):
+                with self.subTest(owners=owners):
+                    path.write_text(json.dumps({**stored, "owners": owners}), encoding="utf-8")
+                    self.assertIsNone(dag_run.read_run(path))
 
     def test_the_opaque_reference_check_is_the_routers(self) -> None:
         from omh.plugin_bundle.omh import owner_preference_record as bundle
@@ -1430,7 +2626,7 @@ class ExportTests(unittest.TestCase):
                                                          core._AWS_ACCESS_KEY, core._GOOGLE_API_KEY)])
 
     def test_more_than_four_units_need_a_spawn_plan(self) -> None:
-        nodes = [node(f"part{index}", scope=(f"src/part{index}.py",)) for index in range(5)]
+        nodes = [node(f"part{index}", scope=(f"src/part{index}.py",), owner="codex") for index in range(5)]
         plan = {field: "five disjoint files" for field in dag_tool.SPAWN_PLAN_FIELDS}
         with homes() as home:
             slots_table(home)
@@ -1442,10 +2638,6 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(exported["status"], "ok", exported)
 
     def test_constants_held_against_the_router_and_the_fanout_contract(self) -> None:
-        self.assertEqual(dag_tool.OWNER_PREFERENCE_FILE, owner_preference.OWNER_PREFERENCE_PATH_SEGMENTS)
-        self.assertEqual(dag_tool.OWNER_PREFERENCE_SCHEMA, owner_preference.OWNER_PREFERENCE_SCHEMA_VERSION)
-        self.assertEqual(dag_tool.OWNER_PROVENANCES, owner_preference.OWNER_PREFERENCE_EXPLICIT_CHOICE_PROVENANCES)
-        self.assertEqual(dag_tool.OWNER_ROUTE_FAMILY, OWNER_PREFERENCE_ROUTE_FAMILY)
         self.assertEqual(set(dag_tool.EXTERNAL_OWNERS), set(EXTERNAL_CLI_PROFILES))
         self.assertEqual(dag_tool.SPAWN_PLAN_THRESHOLD, FANOUT_SPAWN_PLAN_THRESHOLD)
         self.assertEqual(dag_tool.SPAWN_PLAN_FIELDS, FANOUT_SPAWN_PLAN_FIELDS)

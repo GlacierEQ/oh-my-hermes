@@ -1,6 +1,6 @@
 ---
 name: "omh-market-research"
-description: "[omh] Market sizing or customer/competitive analysis: investigate a scoped market with TAM/SAM/SOM sensitivity, attributed customer evidence, and comparable competitor/pricing profiles before a decision brief. Use when the user says: market-research, market sizing, tam sam som, bottom up market sizing, market size sensitivity, customer evidence analysis, jtbd evidence matrix, competitor pricing profiles."
+description: "[omh] Market sizing or customer/competitive analysis."
 license: MIT
 metadata:
   hermes:
@@ -66,7 +66,7 @@ Bad example:
 
 Use when the task needs market-specific analysis of addressable demand, customer jobs and pains, or comparable competitor and pricing evidence, not merely a generic brief or source list.
 
-    Strong routing signals: `market-research`, `market sizing`, `tam sam som`, `bottom up market sizing`, `market size sensitivity`, `customer evidence analysis`, `jtbd evidence matrix`, `competitor pricing profiles`, `competitive pricing analysis`
+    Strong routing signals: `market-research`, `market sizing`, `tam sam som`, `bottom up market sizing`, `market size sensitivity`, `customer evidence analysis`, `jtbd evidence matrix`, `competitor pricing profiles`, `competitive pricing analysis`, `시장 규모`, `경쟁사 분석`, `시장규모`, `경쟁사분석`
 
 ## Catalog Metadata
 
@@ -92,7 +92,7 @@ Required inputs:
 Expert clarification questions:
 - `decision and audience`
   - English: Which decision must this inform, for which audience and decision owner?
-  - Korean: Which decision must this inform, for which audience and decision owner?
+  - Korean: 이 조사가 뒷받침할 의사결정은 무엇이고, 대상 청중과 결정권자는 누구인가요?
 
 Expected outputs:
 

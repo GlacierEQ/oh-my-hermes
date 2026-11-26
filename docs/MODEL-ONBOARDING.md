@@ -59,7 +59,10 @@ the machine-readable `surface_efforts`. A ladder can also move between
 generations of one tier: GPT-6.1 Sol's API page drops the `none` rung GPT-6
 Sol documents, so 6.1 Sol takes Astra's shape (`low` floor, `off` and
 `minimal` raised on record) while GPT-6 Sol keeps sending `none`; copy the
-ladder from the new page, never from the predecessor's contract. Record the API ladder and limits as the contract and put each
+ladder from the new page, never from the predecessor's contract, unless the
+new page documents no ladder and the vendor names the model's base (GPT-6
+Cyber is a variant of GPT-6 Astra, §4): then inherit the base's ladder and
+record where it came from in `effort_ladder_source`. Record the API ladder and limits as the contract and put each
 other surface in `surface_notes`, labeled; do not average them and do not
 let the narrowest surface overwrite the API record.
 
@@ -182,10 +185,10 @@ What does apply, and what this step therefore produces:
   otherwise the tier it could read (installed, enabled, credential name
   present) with one note per plugin quoting what that plugin's catalog entry
   declares and where OMH read it, and a note naming any hook the plugin
-  declares that OMH also registers. It reads names only, never a credential
-  value, and it never says what a plugin does at runtime, because OMH did not
-  observe that. `omh doctor --json` carries the full `jev_sidekick_posture/v1`
-  payload under the check's `detail`.
+  declares that OMH also registers. It reports names only, never copies a
+  credential value, and it never says what a plugin does at runtime, because
+  OMH did not observe that. `omh doctor --json` carries the full
+  `jev_sidekick_posture/v1` payload under the check's `detail`.
 - OMH's own route to the model, where one exists. For Jev that is the opt-in
   `omh_jev_ask` plugin tool and the six default-installed `omh-jev-*` skills
   that call it (`omh-jev-ask`, `omh-jev-route`, `omh-jev-failure-triage`,
@@ -217,8 +220,8 @@ hermes --oneshot "Reply with exactly the single word OK." --in "$PWD" \
 `usage.json` names the `model` and `provider` that answered and a
 `cost_status` (`included` for a subscription route, `unknown` when the host
 cannot price it); a provider rejection lands there too, with `failed: true`.
-Gateways serve vendor-prefixed ids (`z-ai/glm-5.2-ultrafast`,
-`moonshotai/kimi-k3-ultrafast`) and reject the bare alias, so probe the id
+Gateways serve vendor-prefixed ids (OpenRouter lists Kimi K3.1 Pro as
+`moonshotai/kimi-k3.1-pro`) and reject the bare alias, so probe the id
 exactly as the manifest will name it. GPT-6 Astra sat "released" for a day
 before the owner account served it; #1310 stayed blocked on this probe, not
 on the release note.
@@ -327,8 +330,23 @@ official contract.
    only in the reasoning channel is rejected), and the preset the vendor
    benchmarks with says how much scaffolding the model wants (DeepSeek:
    Minimal — one shell tool, a one-line persona — scored above Standard).
+   The same lane reads the vendor's own coding client (Codex CLI, Claude
+   Code, Gemini CLI, Qwen Code, ZCode, the Kimi client, DeepSeek Harness)
+   for official-client facts. These come from the maintainer's
+   vendor-harness snapshot root: one directory per vendor and version,
+   holding the client's prompts, tools, model catalog, and policy lines
+   with a `meta.json` that pins the source. Refreshing that root when a
+   client releases (detect the version, extract it, diff against the
+   previous snapshot) is the maintainer's job. It runs outside this
+   repository and outside any user workspace, and no OMH command does it.
+   The rule for this step: copy a ladder or limit from the vendor client
+   at a pinned tag (or, for a closed binary, a pinned version), and record
+   the tag and commit sha (or the binary sha256) beside it. Never copy from
+   a branch head or from memory. A closed client is paraphrased, never
+   quoted. [Vendor Harness Review](VENDOR-HARNESS-REVIEW.md) is the
+   2026-11-20 pass.
 4. **Community harnesses** — OpenCode / models.dev, OpenRouter's endpoint
-   listing, oh-my-openagent, oh-my-pi, Aider, and the issue trackers. Use
+   listing, oh-my-pi, Aider, and the issue trackers. Use
    them for divergence (which ids 400, which harnesses drop the passback,
    who records off-peak as list price), never for the contract.
 
@@ -347,7 +365,13 @@ exact-model table when the new generation's documented traits differ from
 the family's and the older generation's prompts must stay byte-stable (GPT-6
 Astra over GPT-5.6) — and keep counters the guide says to keep even when it
 reads as redundant (for Claude 5.1: the single verification pass). Do not
-restate universal protocol rules inside a family entry. Then:
+restate universal protocol rules inside a family entry. A family block
+written for one generation can state a rule that a later generation's
+contract contradicts. The `qwen` block says the non-thinking Qwen3-Coder
+must not be asked for reasoning, and Qwen4-Max is hybrid with thinking on
+by default. Grepping the family block for the old generation's name
+(`Qwen3-Coder`, "non-thinking") finds it. The counter then goes in the
+exact-model table and the family block stays byte-stable. Then:
 
 - Update the family's section in `MODEL_OPTI.md` (trait, injected text,
   version rule, source). `tests/test_unit_prompt_protocol.py` fails when a
@@ -372,7 +396,11 @@ Rules that have held across every onboarding so far:
   behind Haiku 5.5 and to the 2025 Qwen3-Coder, the first retiree with no
   same-line successor: its row is written out with an empty `successor` and
   a reason naming the model that now holds its only slot; and on 2026-10-24
-  to Kimi K3 behind Kimi K3.1 Pro).
+  to Kimi K3 behind Kimi K3.1 Pro; on 2026-10-28 to Gemini 3.1 Pro
+  behind Gemini 4 Argon; on 2026-11-10 to Claude Fable 5.1 behind
+  Fable 5.2, the `ultrabrain` head included; and on 2026-11-18 to GPT-6
+  Astra behind GPT-6.2 Astra and GPT-6.1 Sol behind GPT-6.2 Sol, two lines
+  of one family moved in one pass, the shared final order included).
   Record each retirement as a `RETIREMENT_DECISIONS` row with its
   own `decision_date`. The table is keyed by model id, so a second
   retirement of the same id rewrites its row rather than adding one: GPT-5.6
@@ -398,6 +426,21 @@ Rules that have held across every onboarding so far:
   effort it carried, because Sol's list price is at or below Terra's on
   every documented rate. Editorial and unmeasured; the `high` pair on
   `deep` confirms or reverses it.
+- A tier can skip a generation and come back. OpenAI shipped no GPT-6
+  Terra, then released GPT-6.1 Terra on 2026-10-26. It is onboarded as a
+  new exact contract with no slot of its own: GPT-5.6 Terra's slots already
+  went to GPT-6 Sol, and that retirement row stays as written. Re-adding a
+  Terra slot is a fresh placement decision, not an undo of the retirement.
+  Copy the ladder from the new model page, not from the sibling released
+  just before it. 6.1 Terra keeps `none` where 6.1 Sol dropped it.
+- A successor of a model that held no slot takes none either. Qwen3.8-Max
+  was priced and recognized but never chained, so Qwen4-Max (2026-11-16)
+  was onboarded with an exact contract, a price row, and calibration, but
+  no chain entry and no retirement row: there is nothing to retire and no
+  slot to inherit, and joining a chain is a fresh owner decision. A
+  Token Plan or similar preview id that publishes a different ladder and no
+  per-token price (`qwen4-max-preview`) is recognized only: it keeps the
+  family block and gets no contract, no price row, and no chain entry.
 - A chain names the id the vendor's own API serves, not the spelling a
   gateway or a model card uses. DeepSeek serves `deepseek-flash` and
   rejects `deepseek-v4.1-flash` with HTTP 400, so the chain names the
@@ -406,21 +449,50 @@ Rules that have held across every onboarding so far:
   `EXACT_CONTRACT_POINTER_ALIASES` (source and plugin mirror) so the plugin's
   `mixture_category_for` projects in both directions and a child observed
   under either spelling keeps its category label; a mode or tier variant is
-  not a pointer and only projects forward. Read the Hermes provider
+  not a pointer and only projects forward. A declared second spelling
+  whose row equals a pointer's own row (`deepseek-v4.1-flash-1017`, the
+  snapshot the pointer serves) also labels the pointer's category; it is
+  not a pointer itself, so nothing reaches it in reverse. Read the Hermes provider
   profile for the family before choosing the alias — it is the one place
   that shows what the wire will carry.
 - An access-restricted sibling (Mythos 5.1 = Fable 5.1 under Project
-  Glasswing) stays out of every shipped chain: naming a model most accounts
+  Glasswing; Mythos 5.2 = Fable 5.2 for organizations Anthropic has
+  verified) stays out of every shipped chain: naming a model most accounts
   cannot reach reads as a second model in the public tables. Keep it
   recognized, priced, and routable for a user who asks for it by name.
-- The Claude vendor order inside any chain is Opus 5.5 → Fable 5.1 (owner
-  decision, 2026-10-13), which reverses the 2026-09-06 Fable → Opus order.
-  The Hermes lane and the Maestro lane are different surfaces and both
-  follow it. The Maestro lane's Claude Code frontier chain is
-  `claude-opus-5-5` → `claude-fable-5-1` → `opus` (owner decision,
-  2026-10-13): the pinned Opus 5.5 id heads it, Fable 5.1 is the
-  fall-through, and the `opus` alias is the always-resolving tail. The setup
-  interview seeds the Claude Code `--model` preference with that head.
+  GPT-6 Cyber (2026-11-05, Daybreak Red only) is the second case, onboarded
+  as an exact contract because its price, access, and endpoints differ from
+  its base, GPT-6 Astra. When the vendor names the base but documents no
+  ladder for the sibling, inherit the base's ladder and calibration and say
+  so in the record (`effort_ladder_source`). Price it only from a published
+  list price; GPT-5.6 Cyber and GPT-6 Rosalind publish one but no ladder,
+  so they get a price row and the family block, without a contract. A
+  provider row answers False for every family it omits, so when no vendor
+  page says whether a surface serves a gated model, leave the row out rather
+  than refuse an approved account on a guess; GPT-5.6 Cyber and GPT-6 Rosalind
+  have none for that reason. A probe
+  refusal from a subscription route proves nothing about gating when an
+  unknown id gets the same wording; probe a made-up id beside it.
+- The Claude vendor order inside any chain is Opus 5.5 → Fable (owner
+  decision, 2026-10-13, then for Fable 5.1), which reverses the 2026-09-06
+  Fable → Opus order. The Hermes lane and the Maestro lane are different
+  surfaces and both follow it, with two explicit exceptions. The Hermes-lane
+  `ultrabrain` chain is Fable 5.2 → GPT-6.2 Astra → Opus 5.5 (GPT-6.2
+  Astra in GPT-6 Astra's slot since 2026-11-18). It was GPT-6
+  Astra alone, so the Claude entries give a user without OpenAI access a
+  frontier fallback; putting Fable ahead of Astra is the owner's choice
+  (2026-11-09, for Fable 5.1; Fable 5.2 took the head on 2026-11-10). The
+  Hermes-lane `visual-engineering` chain is Fable 5.2 → Opus 5.5 → Gemini 4
+  Argon → Kimi K3.1 Pro, all at `high` (owner decision, 2026-11-10). Each
+  exception covers its own category only. The Maestro lane's Claude Code frontier chain
+  is `claude-opus-5-5` → `claude-fable-5-2` → `opus` (owner decision,
+  2026-10-13, with Fable 5.2 in the Fable slot since 2026-11-10): the
+  pinned Opus 5.5 id heads it, Fable 5.2 is the fall-through, and the
+  `opus` alias is the always-resolving tail. A pinned id can need a newer
+  client than the alias does: a Claude Code OAuth route refused
+  `claude-fable-5-2` below v2.1.290 (observed 2026-11-10), so record such a
+  floor in the contract's `surface_notes.claude_code`. The setup interview
+  seeds the Claude Code `--model` preference with that head.
 - Know whether a slot names a pinned id or a vendor-tracking alias before
   deciding it needs an edit. The Hermes lane names pinned ids
   (`claude-opus-5-5`), so a generation bump is a repo change, and since
@@ -458,7 +530,7 @@ Files that move together (grep the old id to find every site):
 | Hermes-lane editorial chains | `src/coding/model_recommendations.py` |
 | Plugin mirror of those chains + approximate price table | `src/plugin_bundle/omh/hermes_delegation.py` (parity test in `tests/test_plugin_hermes_delegation.py`) |
 | Maestro-lane built-in table + executor option rows | `src/coding/model_routing.py` (`BUILTIN_CATEGORY_MODELS`, `EXECUTOR_MODEL_OPTIONS`) |
-| `model-setup` skill text naming the chains verbatim | `src/skills/catalog_definitions.py` → regenerate `skills/omh-model-setup/SKILL.md` and `docs/WORKFLOWS.md` |
+| `model-setup` skill text naming the chains verbatim | `src/skills/catalog_definitions.py` → regenerate `skills/omh-model-setup/SKILL.md` (`uv run python tools/render_skill_pack.py --write`) and `docs/WORKFLOWS.md`, and re-derive `tests/fixtures/agent_skills_hermes_digests.json` (sorted keys) in the same commit; `test_hermes_projection_byte_stable` names the bodies that moved |
 | Skill body budget note | `src/maintenance/release.py`, only when `release drift` or the body-budget tests report one: `FULL_PROFILE_SKILL_BODY_CHAR_LIMIT` or `FULL_PROFILE_SKILL_BODY_REPEATED_CHAR_LIMIT` (ceilings with headroom; re-derive from the producer by the policy written there and add the `old -> new` line) |
 | Hand-maintained public chain tables | `site/index.html`, `site/docs/model-routing/index.html` (`tests/test_model_recommendations.py` reads both and checks alias order inside each category row). The READMEs carry no chain table; they link to `docs/INSTALLATION.md#guided-model-setup` |
 | Generated public chain table | `docs/INSTALLATION.md` is not hand-edited: its marked region renders from `SHIPPED_MODEL_RECOMMENDATIONS` through `src/catalogs/model_chain_table.py`. Run `uv run python -m omh.cli docs chain-table` and add the new alias to `MODEL_DISPLAY_LABELS` there — the renderer raises with the key to add when it is missing |
@@ -467,7 +539,7 @@ Files that move together (grep the old id to find every site):
 | Placement and retirement records | `RECOMMENDATION_DECISIONS` (move the slot tuples to the new id) and `RETIREMENT_DECISIONS` (one row per superseded id, with successor, scope, and `decision_date`) in `src/coding/model_portfolio_qualification.py`; `tests/test_model_portfolio_qualification.py` checks every full retiree is out of both lanes, recognition-only, and priced |
 | Claude always-thinking guard | `_ALWAYS_THINKING_CLAUDE_PREFIXES` in `src/plugin_bundle/omh/tools/delegate_route_tool.py` — add the id when the vendor documents that thinking cannot be disabled, so `omh_delegate_route` refuses a no-thinking effort instead of sending a request the API rejects |
 | Benchmark arms | `benchmarks/live-model-tools/v1/manifest.json` — the old generation's arm, where one exists, stays as the baseline of the §8 pair and the new id's arm lands with the measurement PR; a line with no arm (GPT-5.6 Luna) gets both arms in that PR |
-| Last-resort prose | the shared-final-order sentences in `docs/INSTALLATION.md` and `docs/ARCHITECTURE.md` name the `last_resort.any` models by display label; `tests/test_model_recommendations.py` derives the expected order and fails when either sentence goes stale |
+| Last-resort prose | the shared-final-order sentences in `docs/INSTALLATION.md`, `docs/ARCHITECTURE.md`, `site/docs/model-routing/index.html`, and the `model-setup` skill source name the `last_resort.any` models by display label; `tests/test_model_recommendations.py` derives the expected order and fails when any of them goes stale |
 | Contract audit doc paths | `_MODEL_DOCS` in `src/coding/model_contract_coverage.py` |
 | CLI help examples | `src/commands/coding.py` |
 
@@ -480,8 +552,9 @@ vendor publishes no separate tier rate may carry the base model's documented
 list price, never an invented discount, with a comment naming the base source
 and saying the tier rate is unpublished; `glm-5.3-ultrafast` and
 `deepseek-v4.1-flash-ultrafast` take this shape, and `kimi-k3-ultrafast`
-moved to it on 2026-10-01 along with the corrected K3 base rate. The older
-halved `glm-5.2-ultrafast` row predates this rule. A new price
+moved to it on 2026-10-01 along with the corrected K3 base rate;
+`glm-5.2-ultrafast` left its older halved ballpark for this shape on
+2026-10-28, when the GLM-5.2 base rate was corrected. A new price
 row also widens what `omh model-chains interview` offers, since it proposes a
 member's `-ultrafast` variant only when that id is priced. For an explicitly declared alias,
 an exact user `model-prices.json` row wins first, then a base-contract row may
@@ -503,7 +576,7 @@ alias that is genuinely served somewhere else than the default.
 
 ```sh
 omh model-chains show
-omh model-chains set architect "claude-fable-5-1:xhigh, claude-fable-5:xhigh, ..."
+omh model-chains set architect "claude-fable-5-2:xhigh, claude-fable-5-1:xhigh, ..."
 ```
 
 `dispatch-models.json` (the Claude Code profile's `--model`) is gated on the
@@ -532,17 +605,22 @@ base id.
 ```sh
 PYTHONPATH=tests uv run python -m unittest discover -s tests
 uv run python -m compileall -q src tests
-uv run --group lint ruff check src tests
+uv run --group lint ruff check src tests tools packaging
 uv run python -m omh.cli coding model-contract-audit --inventory <fixture.json> --json
 uv run python -m omh.cli docs workflows --check
 uv run python -m omh.cli docs roles --check
+uv run python -m omh.cli docs claims --check --json
 uv run python -m omh.cli docs capability-families --check
 uv run python -m omh.cli docs ulw-inventory --check
 uv run python -m omh.cli docs ulw-site --check
 uv run python -m omh.cli docs chain-table --check
+uv run python -m omh.cli docs agent-skills --check
+uv run python -m omh.cli docs navigation --check
+uv run python -m omh.cli docs skill-shortlist --check
+uv run python -m omh.cli docs skill-sources --check
+uv run python tools/render_skill_pack.py --check
 uv run python -m omh.cli release drift
-uv run --group lint ruff check src tests
-git diff --check
+git diff --check origin/main...HEAD
 ```
 
 ## 8. Close with measurement

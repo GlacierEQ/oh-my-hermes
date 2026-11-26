@@ -11,12 +11,15 @@ stdio entry, and one whose `hermes_cli` has no attach API. The real
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import builtins
 import json
 import os
 from pathlib import Path
 import sys
 import textwrap
+import threading
 import types
 import unittest
 from unittest.mock import patch
@@ -24,6 +27,7 @@ from unittest.mock import patch
 from _module_patch import patch_modules
 from _test_temp_root import make_test_tempdir
 from five_issue_process_fixture import fixture_system_environment
+from omh.tui import gateway_contract as contract
 from omh.tui.attach import gateway_attach as attach
 from omh.tui.attach.gateway_attach import TO_CLIENT, TO_OWNER, Adapter, LocalImage
 from omh.tui.gateway import GATEWAY_SCRIPT, GatewayClient, GatewayUnavailable, ServerRequest, gateway_spawn
@@ -239,6 +243,55 @@ class SessionTranslationTests(AdapterCase):
         self.assertEqual(answer, _answer(6, {}))
         self.assertNotIn(SID, adapter.sessions)
 
+    def test_a_lazy_resume_is_refused_here_and_moves_nothing(self) -> None:
+        # The owner refuses `lazy`, and a plain resume would mount the child read-only and move `current`: the
+        # subagent session view's watch is answered with a refusal it falls back on to `session.transcript`.
+        adapter = self.adapter()
+        self.opened(adapter)
+        actions = adapter.from_client(_call(8, "session.resume", {"session_id": "child-1", "lazy": True, "cols": 80}))
+        self.assertEqual(actions, [(TO_CLIENT, {"jsonrpc": "2.0", "id": 8, "error": {
+            "code": attach.REFUSED, "message": attach.LAZY_WATCH_UNSUPPORTED,
+            "data": {"reason": "lazy_watch_unsupported"}}})])
+        self.assertEqual((adapter.current, list(adapter.sessions), adapter.calls), (SID, [SID], {}))
+        self.assertEqual((attach.REFUSED, attach.LAZY_WATCH_UNSUPPORTED),
+                         (contract.RESUME_LAZY_REFUSED, contract.LAZY_WATCH_UNSUPPORTED))
+        # Negative: a resume without `lazy` still goes to the owner and still moves `current` once answered.
+        [(target, resume)] = adapter.from_client(_call(9, "session.resume", {"session_id": "local-other"}))
+        self.assertEqual((target, resume["params"]), (TO_OWNER, {"session_id": "local-other", "display_projection": True}))
+        adapter.from_owner(_answer(9, {"session_id": "local-other", "messages": [], "subscription_id": "sub-2"}))
+        self.assertEqual(adapter.current, "local-other")
+
+    def test_a_subagent_transcript_read_passes_through_as_sent(self) -> None:
+        adapter = self.adapter()
+        self.opened(adapter)
+        params = {"session_id": SID, "subagent_id": "sa-1", "order": "oldest", "limit": 200, "cursor": "c0"}
+        call = _call(10, "session.transcript", params)
+        self.assertEqual(adapter.from_client(call), [(TO_OWNER, call)])
+        rows = {"session_id": SID, "rows": [{"role": "user", "text": "brief"}], "next_cursor": "c1", "reset": False,
+                "running": True, "available": True, "child_session_id": "child-1"}
+        self.assertEqual(adapter.from_owner(_answer(10, rows)), [(TO_CLIENT, _answer(10, rows))])
+        self.assertEqual((adapter.current, adapter.calls), (SID, {}))  # a read: not a view, nothing moves
+        # Negative: a resume is translated (display rows asked), so it is not taken for a pass-through read.
+        [(_, resume)] = adapter.from_client(_call(11, "session.resume", {"session_id": SID}))
+        self.assertIn("display_projection", resume["params"])
+
+    def test_closing_a_watch_session_detaches_only_it(self) -> None:
+        adapter = self.adapter()
+        self.opened(adapter)
+        adapter.from_client(_call(2, "session.resume", {"session_id": "child-1"}))
+        adapter.from_owner(_answer(2, {"session_id": "child-1", "messages": [], "subscription_id": "sub-c"}))
+        adapter.current = SID  # the view reopened main; the child's view is still held here
+        [(_, detach)] = adapter.from_client(_call(3, "session.close", {"session_id": "child-1"}))
+        self.assertEqual(detach["params"], {"session_id": "child-1", "subscription_id": "sub-c",
+                                            "end_reason": attach.CLOSE_END_REASON})
+        adapter.from_owner(_answer(3, {"session_id": "child-1", "subscription_id": "sub-c", "detached": True}))
+        self.assertEqual((adapter.current, list(adapter.sessions)), (SID, [SID]))
+        self.assertEqual(adapter.sessions[SID].subscription_id, "sub-1")
+        # Negative: a watch this connection never held (the refused lazy resume) is answered here, main untouched.
+        self.assertEqual(adapter.from_client(_call(4, "session.close", {"session_id": "child-2"})),
+                         [(TO_CLIENT, _answer(4, {}))])
+        self.assertEqual((adapter.current, list(adapter.sessions)), (SID, [SID]))
+
     def test_a_closed_session_withdraws_its_open_prompts(self) -> None:
         # Detached, the owner sends this connection no `.settled` for that session: a prompt left open here would
         # wait behind the next session's, and a decline sent for it would stop that session's turn.
@@ -278,6 +331,17 @@ class SessionTranslationTests(AdapterCase):
         self.assertEqual(adapter.from_owner(delta), [(TO_CLIENT, delta)])  # only the lifecycle events are fenced
         self.assertEqual(adapter.sessions[SID].generation, 4)  # an older event never moves it back
 
+    def test_a_usage_frame_is_never_fenced(self) -> None:
+        # The info line's context gauge reads `session.usage` (`gateway/session_usage.py::usage_frame`: the nested
+        # status-bar view beside the session counters). It is no lifecycle event, so even one stamped with an older
+        # generation reaches the TUI whole.
+        adapter = self.adapter()
+        self.opened(adapter, generation=4, authority_epoch=2)
+        nested = {"output": 900, "calls": 3, "context_used": 74_000, "context_max": 200_000, "context_percent": 37}
+        usage = _event("session.usage", {"usage": nested, "last_prompt_tokens": 74_000, "context_length": 200_000},
+                       execution_generation=3, authority_epoch=2)
+        self.assertEqual(adapter.from_owner(usage), [(TO_CLIENT, usage)])
+
     def test_a_prompt_gets_an_input_id(self) -> None:
         adapter = self.adapter()
         self.opened(adapter)
@@ -285,13 +349,80 @@ class SessionTranslationTests(AdapterCase):
         self.assertEqual(submit["params"], {"session_id": SID, "text": "hi", "queued": True, "input_id": "id-2"})
 
     def test_a_steer_carries_the_running_generation_and_is_rejected_without_one(self) -> None:
+        # The send-now key's `session.redirect` as much as the fallback `session.steer`: Hermes bf0203a794's owner
+        # takes both as `CanonicalCorrectionParams` (`contracts/canonical_sessions.py`), generation required.
+        for method in ("session.redirect", "session.steer"):
+            with self.subTest(method=method):
+                adapter = self.adapter()
+                self.assertEqual(adapter.from_client(_call(8, method, {"session_id": SID, "text": "go"})),
+                                 [(TO_CLIENT, _answer(8, {"status": "rejected"}))])
+                self.opened(adapter, generation=3)
+                adapter.from_owner(_event("message.delta", {"text": "x"}, execution_generation=4))
+                [(_, steer)] = adapter.from_client(_call(9, method, {"session_id": SID, "text": "go"}))
+                self.assertEqual(steer["method"], method)
+                self.assertEqual(steer["params"], {"session_id": SID, "text": "go", "execution_generation": 4})
+
+    def test_an_interrupt_carries_the_generation_of_the_turn_it_stops(self) -> None:
+        # Hermes bf0203a794 refuses `session.interrupt` without the running generation (`session_authority.py`
+        # `interrupt`: `stale_generation`), so a stop sent as the stdio entry takes it never stopped the turn.
         adapter = self.adapter()
-        self.assertEqual(adapter.from_client(_call(8, "session.steer", {"session_id": SID, "text": "go"})),
-                         [(TO_CLIENT, _answer(8, {"status": "rejected"}))])
         self.opened(adapter, generation=3)
-        adapter.from_owner(_event("message.delta", {"text": "x"}, execution_generation=4))
-        [(_, steer)] = adapter.from_client(_call(9, "session.steer", {"session_id": SID, "text": "go"}))
-        self.assertEqual(steer["params"], {"session_id": SID, "text": "go", "execution_generation": 4})
+        adapter.from_owner(_event("message.start", {}, execution_generation=4))
+        interrupt = self.own_call(adapter.from_client(_call(9, "session.interrupt", {"session_id": SID})),
+                                  "session.interrupt")
+        self.assertEqual(interrupt["params"], {"session_id": SID, "execution_generation": 4})
+        handle = {"ref": {"session_id": SID}, "execution_generation": 4, "execution_state": "running"}
+        self.assertEqual(adapter.from_owner(_answer(interrupt["id"], handle)), [(TO_CLIENT, _answer(9, handle))])
+        self.assertFalse(adapter.waiting())
+
+    def test_a_stale_interrupt_is_read_afresh_and_sent_once_more(self) -> None:
+        adapter = self.adapter()
+        self.opened(adapter, generation=3)
+        first = self.own_call(adapter.from_client(_call(9, "session.interrupt", {"session_id": SID})),
+                              "session.interrupt")
+        read = self.own_call(adapter.from_owner(_error(first["id"], "stale_generation")), "session.resume")
+        self.assertEqual(read["params"], {"session_id": SID})
+        again = self.own_call(adapter.from_owner(_answer(read["id"], {
+            "session_id": SID, "subscription_id": "sub-1", "running": True, "execution_generation": 5})),
+            "session.interrupt")
+        self.assertEqual(again["params"], {"session_id": SID, "execution_generation": 5})
+        self.assertEqual(adapter.sessions[SID].generation, 5)
+        # Refused a second time, the stop is the TUI's refusal: one retry, never a loop.
+        [(target, refusal)] = adapter.from_owner(_error(again["id"], "stale_generation"))
+        self.assertEqual((target, refusal["id"], refusal["error"]["message"]), (TO_CLIENT, 9, "stale_generation"))
+        self.assertFalse(adapter.waiting())
+
+    def test_an_interrupt_whose_read_finds_no_turn_running_stops_nothing(self) -> None:
+        adapter = self.adapter()
+        self.opened(adapter, generation=3)
+        first = self.own_call(adapter.from_client(_call(9, "session.interrupt", {"session_id": SID})),
+                              "session.interrupt")
+        read = self.own_call(adapter.from_owner(_error(first["id"], "stale_generation")), "session.resume")
+        actions = adapter.from_owner(_answer(read["id"], {"session_id": SID, "running": False,
+                                                          "execution_generation": 4}))
+        self.assertEqual(actions, [(TO_CLIENT, _answer(9, {"session_id": SID, "execution_generation": 4,
+                                                            "running": False}))])
+        # Any other refusal is the TUI's at once, and nothing is read.
+        other = self.own_call(adapter.from_client(_call(10, "session.interrupt", {"session_id": SID})),
+                              "session.interrupt")
+        [(target, refusal)] = adapter.from_owner(_error(other["id"], "forbidden"))
+        self.assertEqual((target, refusal["id"]), (TO_CLIENT, 10))
+
+    def test_an_interrupt_with_no_generation_known_reads_one_first(self) -> None:
+        adapter = self.adapter()
+        read = self.own_call(adapter.from_client(_call(9, "session.interrupt", {"session_id": SID})),
+                             "session.resume")
+        interrupt = self.own_call(adapter.from_owner(_answer(read["id"], {
+            "session_id": SID, "subscription_id": "sub-2", "running": True, "execution_generation": 2})),
+            "session.interrupt")
+        self.assertEqual(interrupt["params"], {"session_id": SID, "execution_generation": 2})
+        [(target, refusal)] = adapter.from_owner(_error(interrupt["id"], "stale_generation"))
+        self.assertEqual((target, refusal["id"]), (TO_CLIENT, 9))  # the read was its one retry
+        unread = self.own_call(adapter.from_client(_call(10, "session.interrupt", {"session_id": "local-gone"})),
+                               "session.resume")
+        [(target, refusal)] = adapter.from_owner(_error(unread["id"], "not_found"))
+        self.assertEqual((target, refusal["id"], refusal["error"]["code"]), (TO_CLIENT, 10, attach.REFUSED))
+        self.assertIn("not_found", refusal["error"]["message"])
 
     def test_shell_exec_runs_in_the_session_last_opened(self) -> None:
         adapter = self.adapter()
@@ -302,12 +433,21 @@ class SessionTranslationTests(AdapterCase):
     def test_session_list_is_the_live_listing_then_the_stored_one(self) -> None:
         adapter = self.adapter()
         live = self.own_call(adapter.from_client(_call(11, "session.list", {"limit": 3})), "session.list")
-        self.assertEqual(live["params"], {"limit": 3})
+        self.assertEqual(live["params"], {"limit": 200})
         stored = self.own_call(adapter.from_owner(_answer(live["id"], {"sessions": [{"id": "a"}, {"id": "b"}]})),
                                "session.list")
-        self.assertEqual(stored["params"], {"limit": 3, "scope": "stored"})
+        self.assertEqual(stored["params"], {"limit": 200, "scope": "stored"})
         [(_, answer)] = adapter.from_owner(_answer(stored["id"], {"sessions": [{"id": "b"}, {"id": "c"}, {"id": "d"}]}))
         self.assertEqual(answer, _answer(11, {"sessions": [{"id": "a"}, {"id": "b"}, {"id": "c"}]}))
+
+    def test_a_title_lookup_is_one_call_answered_as_the_owner_answers_it(self) -> None:
+        # The owner looks a title up over its whole store, and refuses `title` with a `scope` (invalid_params).
+        adapter = self.adapter()
+        [(target, lookup)] = adapter.from_client(_call(13, "session.list", {"title": "Release notes"}))
+        self.assertEqual(target, TO_OWNER)
+        self.assertEqual(lookup["params"], {"title": "Release notes"})
+        found = {"sessions": [{"id": "a", "resolved_id": "a", "title": "Release notes"}], "scope": "stored"}
+        self.assertEqual(adapter.from_owner(_answer(lookup["id"], found)), [(TO_CLIENT, _answer(13, found))])
 
     def test_other_calls_and_events_pass_through_unchanged(self) -> None:
         adapter = self.adapter()
@@ -388,6 +528,210 @@ class RewindTests(AdapterCase):
         self.assertEqual(refusal["error"]["code"], attach.REFUSED)
         self.assertNotIn(refusal["error"]["code"], (attach.PARAM_REJECTED, -32601))
         self.assertIn("target user message is gone", refusal["error"]["message"])
+
+
+class ModelSwitchTests(AdapterCase):
+    """`config.set model` is the owner's `session.mutate model` (Ink's `/model` on a shared gateway), answered as the
+    stdio entry answers it."""
+
+    def switch(self, value: str = "claude-opus-5-5 --provider claude-proxy --session") -> tuple[Adapter, dict]:
+        adapter = self.adapter()
+        self.opened(adapter)
+        read = self.own_call(adapter.from_client(_call(21, "config.set", {
+            "key": "model", "value": value, "session_id": SID})), "session.resume")
+        self.assertEqual(read["params"], {"session_id": SID})
+        mutate = self.own_call(adapter.from_owner(_answer(read["id"], {
+            "session_id": SID, "subscription_id": "sub-1", "revision": 9, "execution_generation": 5})),
+            "session.mutate")
+        return adapter, mutate
+
+    def test_a_switch_reads_the_revision_and_mutates_the_model_with_its_provider(self) -> None:
+        adapter, mutate = self.switch()
+        self.assertEqual(mutate["params"], {
+            "session_id": SID, "request_id": "id-2", "expected_revision": 9, "expected_generation": 5,
+            "operation": "model", "payload": {"model": "claude-opus-5-5", "provider": "claude-proxy"}})
+        [(target, answer)] = adapter.from_owner(_answer(mutate["id"], {
+            "session_id": SID, "operation": "model", "model": "claude-opus-5-5", "execution_generation": 6}))
+        self.assertEqual((target, answer), (TO_CLIENT, _answer(21, {
+            "key": "model", "value": "claude-opus-5-5", "scope": "session", "deferred": False})))
+        self.assertEqual(adapter.sessions[SID].generation, 6)
+        self.assertFalse(adapter.waiting())
+
+    def test_the_answer_names_the_provider_the_owner_committed(self) -> None:
+        adapter, mutate = self.switch("sonnet --session")
+        [(_, answer)] = adapter.from_owner(_answer(mutate["id"], {
+            "session_id": SID, "operation": "model", "model": "claude-sonnet-4-6", "provider": "anthropic",
+            "execution_generation": 6}))
+        self.assertEqual(answer["result"], {
+            "key": "model", "value": "claude-sonnet-4-6", "provider": "anthropic", "scope": "session",
+            "deferred": False})
+
+    def test_a_pick_while_a_turn_runs_is_deferred_and_a_guarded_one_is_not_made(self) -> None:
+        adapter, mutate = self.switch("claude-opus-5-5 --session")
+        self.assertEqual(mutate["params"]["payload"], {"model": "claude-opus-5-5"})
+        [(_, answer)] = adapter.from_owner(_answer(mutate["id"], {"status": "deferred", "model": "claude-opus-5-5"}))
+        self.assertEqual(answer["result"]["deferred"], True)
+        adapter, mutate = self.switch()
+        [(_, answer)] = adapter.from_owner(_answer(mutate["id"], {
+            "status": "confirmation_required", "confirm_required": True, "confirm": "token",
+            "confirm_message": "Opus costs 5x.", "target_model": "claude-opus-5-5"}))
+        self.assertEqual(answer["result"], {
+            "key": "model", "value": "", "confirm_required": True, "confirm_message": "Opus costs 5x."})
+
+    def test_switch_anyway_carries_the_owners_token_once(self) -> None:
+        adapter, mutate = self.switch()
+        adapter.from_owner(_answer(mutate["id"], {
+            "status": "confirmation_required", "confirm_required": True, "confirm": "tok-1", "confirm_message": "x"}))
+        value = "claude-opus-5-5 --provider claude-proxy --session"
+        read = self.own_call(adapter.from_client(_call(24, "config.set", {
+            "key": "model", "value": value, "session_id": SID, "confirm_expensive_model": True})), "session.resume")
+        again = self.own_call(adapter.from_owner(_answer(read["id"], {"revision": 9, "execution_generation": 5})),
+                              "session.mutate")
+        self.assertEqual(again["params"]["payload"],
+                         {"model": "claude-opus-5-5", "provider": "claude-proxy", "confirm": "tok-1"})
+        read = self.own_call(adapter.from_client(_call(25, "config.set", {
+            "key": "model", "value": value, "session_id": SID, "confirm_expensive_model": True})), "session.resume")
+        third = self.own_call(adapter.from_owner(_answer(read["id"], {"revision": 9, "execution_generation": 5})),
+                              "session.mutate")
+        self.assertNotIn("confirm", third["params"]["payload"])  # used once: the owner then asks again
+
+    def test_a_refusal_is_the_owners_own_with_its_reason(self) -> None:
+        adapter, mutate = self.switch()
+        [(target, refusal)] = adapter.from_owner(_error(mutate["id"], "model_resolution_failed"))
+        self.assertEqual((target, refusal["id"]), (TO_CLIENT, 21))
+        self.assertEqual(refusal["error"]["data"]["reason"], "model_resolution_failed")
+
+    def test_a_flag_the_owner_does_not_take_is_refused_before_anything_is_sent(self) -> None:
+        adapter = self.adapter()
+        self.opened(adapter)
+        for value in ("x --global", "x --once", "x --refresh", "--provider p", "x --provider"):
+            with self.subTest(value=value):
+                [(target, refusal)] = adapter.from_client(_call(22, "config.set", {
+                    "key": "model", "value": value, "session_id": SID}))
+                self.assertEqual((target, refusal["error"]["data"]["reason"]), (TO_CLIENT, "unsupported_model_options"))
+        self.assertFalse(adapter.waiting())
+        self.assertEqual(attach.model_payload("x --tui-session --reasoning HIGH"), {"model": "x", "reasoning": "high"})
+
+    def test_any_other_config_set_passes_through(self) -> None:
+        adapter = self.adapter()
+        frame = _call(23, "config.set", {"key": "yolo", "value": "on", "session_id": SID})
+        self.assertEqual(adapter.from_client(frame), [(TO_OWNER, frame)])
+        self.assertFalse(adapter.waiting())
+
+
+class PickerEditTests(AdapterCase):
+    """The session picker's `session.title` and `session.delete`: the owner's revision-fenced `session.mutate rename`
+    and `delete`, read and sent as Ink's `mutateCanonical` and `useSessionDelete.ts` send them."""
+
+    STORED = "20261012_090000_aaaaaa"
+
+    def read(self, adapter: Adapter, method: str, params: dict) -> dict:
+        read = self.own_call(adapter.from_client(_call(31, method, params)), "session.resume")
+        self.assertEqual(read["params"], {"session_id": self.STORED})
+        return read
+
+    def test_a_rename_reads_the_revision_and_mutates_at_it_with_no_generation(self) -> None:
+        adapter = self.adapter()
+        read = self.read(adapter, "session.title", {"session_id": self.STORED, "title": "Router split"})
+        mutate = self.own_call(adapter.from_owner(_answer(read["id"], {
+            "session_id": self.STORED, "subscription_id": "sub-9", "revision": 4, "execution_generation": 2})),
+            "session.mutate")
+        self.assertEqual(mutate["params"], {"session_id": self.STORED, "request_id": "id-1", "expected_revision": 4,
+                                            "operation": "rename", "payload": {"title": "Router split"}})
+        actions = adapter.from_owner(_answer(mutate["id"], {"title": "Router split", "revision": 5}))
+        [(_, detach), (target, answer)] = actions
+        # The read attached this connection: the view goes back, plainly, with no end reason.
+        self.assertEqual((detach["method"], detach["params"]),
+                         ("session.detach", {"session_id": self.STORED, "subscription_id": "sub-9"}))
+        self.assertEqual((target, answer), (TO_CLIENT, _answer(31, {"pending": False, "title": "Router split"})))
+        adapter.from_owner(_answer(detach["id"], {"detached": True}))
+        self.assertFalse(adapter.waiting())
+
+    def test_a_delete_reads_then_mutates_at_the_revision_and_generation(self) -> None:
+        adapter = self.adapter()
+        read = self.read(adapter, "session.delete", {"session_id": self.STORED})
+        mutate = self.own_call(adapter.from_owner(_answer(read["id"], {
+            "session_id": self.STORED, "subscription_id": "sub-9", "revision": 4, "execution_generation": 2})),
+            "session.mutate")
+        self.assertEqual(mutate["params"], {"session_id": self.STORED, "request_id": "id-1", "expected_revision": 4,
+                                            "expected_generation": 2, "operation": "delete", "payload": {}})
+        [(target, answer)] = adapter.from_owner(_answer(mutate["id"], {"deleted": True}))
+        self.assertEqual((target, answer), (TO_CLIENT, _answer(31, {"deleted": self.STORED})))  # stdio's shape
+        self.assertNotIn(self.STORED, adapter.sessions)
+        self.assertFalse(adapter.waiting())
+
+    def test_a_refused_delete_is_the_owners_refusal_and_hands_the_read_view_back(self) -> None:
+        adapter = self.adapter()
+        read = self.read(adapter, "session.delete", {"session_id": self.STORED})
+        mutate = self.own_call(adapter.from_owner(_answer(read["id"], {
+            "session_id": self.STORED, "subscription_id": "sub-9", "revision": 4, "execution_generation": 2})),
+            "session.mutate")
+        [(_, detach), (target, refusal)] = adapter.from_owner(_error(mutate["id"], "stale_revision"))
+        self.assertEqual(detach["params"], {"session_id": self.STORED, "subscription_id": "sub-9"})
+        self.assertEqual((target, refusal["id"], refusal["error"]["data"]["reason"]), (TO_CLIENT, 31, "stale_revision"))
+
+    def test_a_session_this_connection_already_views_keeps_its_view(self) -> None:
+        adapter = self.adapter()
+        self.opened(adapter)
+        read = self.own_call(adapter.from_client(_call(32, "session.title", {"session_id": SID, "title": "Mine"})),
+                             "session.resume")
+        mutate = self.own_call(adapter.from_owner(_answer(read["id"], {
+            "session_id": SID, "subscription_id": "sub-1", "revision": 8, "execution_generation": 3})), "session.mutate")
+        [(target, answer)] = adapter.from_owner(_answer(mutate["id"], {"title": "Mine"}))  # no detach
+        self.assertEqual((target, answer), (TO_CLIENT, _answer(32, {"pending": False, "title": "Mine"})))
+        self.assertEqual(adapter.sessions[SID].subscription_id, "sub-1")
+
+    def test_an_edit_answered_after_the_session_was_opened_does_not_detach_the_opened_view(self) -> None:
+        # The person opens the row while its edit waits: the owner reuses the read's subscription for the resume, so
+        # handing that subscription back would cut the opened session's events. A refused edit hands back nothing too.
+        # The review's input: viewing SID, rename stored B, Enter opens B, then the rename is answered.
+        for method, params, answered in (
+            ("session.title", {"session_id": self.STORED, "title": "Renamed"},
+             _answer("", {"title": "Renamed", "revision": 5})),
+            ("session.title", {"session_id": self.STORED, "title": "Renamed"}, _error("", "stale_revision")),
+            ("session.delete", {"session_id": self.STORED}, _error("", "stale_revision")),
+        ):
+            with self.subTest(method=method, refused="error" in answered):
+                adapter = self.adapter()
+                self.opened(adapter)
+                read = self.read(adapter, method, params)
+                mutate = self.own_call(adapter.from_owner(_answer(read["id"], {
+                    "session_id": self.STORED, "subscription_id": "sub-B", "revision": 4, "execution_generation": 2})),
+                    "session.mutate")
+                [(_, opened)] = adapter.from_client(_call(32, "session.resume", {"session_id": self.STORED}))
+                adapter.from_owner(_answer(opened["id"], {"session_id": self.STORED, "subscription_id": "sub-B",
+                                                          "revision": 4, "execution_generation": 2, "messages": []}))
+                actions = adapter.from_owner({**answered, "id": mutate["id"]})
+                self.assertEqual([target for target, _frame in actions], [TO_CLIENT])  # no detach
+                self.assertEqual((adapter.current, adapter.sessions[self.STORED].subscription_id),
+                                 (self.STORED, "sub-B"))
+                self.assertFalse(adapter.waiting())
+
+    def test_an_edit_answered_after_another_session_was_opened_still_hands_the_read_view_back(self) -> None:
+        # Negative: the intervening open is of a different session, so the read's subscription is still disposable.
+        adapter = self.adapter()
+        read = self.read(adapter, "session.title", {"session_id": self.STORED, "title": "Renamed"})
+        mutate = self.own_call(adapter.from_owner(_answer(read["id"], {
+            "session_id": self.STORED, "subscription_id": "sub-B", "revision": 4, "execution_generation": 2})),
+            "session.mutate")
+        self.opened(adapter)
+        [(_, detach), (target, _answer_frame)] = adapter.from_owner(_answer(mutate["id"], {"title": "Renamed"}))
+        self.assertEqual((detach["method"], detach["params"], target),
+                         ("session.detach", {"session_id": self.STORED, "subscription_id": "sub-B"}, TO_CLIENT))
+        self.assertEqual((adapter.current, adapter.sessions[SID].subscription_id), (SID, "sub-1"))
+
+    def test_a_failed_read_is_answered_as_the_owner_refused_it_and_nothing_is_mutated(self) -> None:
+        adapter = self.adapter()
+        read = self.read(adapter, "session.delete", {"session_id": self.STORED})
+        [(target, refusal)] = adapter.from_owner(_error(read["id"], "session_not_found"))
+        self.assertEqual((target, refusal["id"], refusal["error"]["data"]["reason"]), (TO_CLIENT, 31, "session_not_found"))
+        self.assertFalse(adapter.waiting())
+
+    def test_a_title_read_passes_through_unchanged(self) -> None:
+        adapter = self.adapter()
+        frame = _call(33, "session.title", {"session_id": SID})
+        self.assertEqual(adapter.from_client(frame), [(TO_OWNER, frame)])
+        self.assertFalse(adapter.waiting())
 
 
 class SharedPromptTests(AdapterCase):
@@ -518,6 +862,48 @@ class ImageTests(AdapterCase):
         [(_, submit)] = adapter.from_client(_call(25, "prompt.submit", {"session_id": SID, "text": "x"}))
         self.assertNotIn("attachments", submit["params"])
 
+    def test_the_bytes_the_tui_keeps_are_staged_queued_and_detached_by_the_path_answered(self) -> None:
+        adapter = self.adapter()
+        self.opened(adapter)
+        sent = {"session_id": SID, "filename": "shot.png", "content_base64": base64.b64encode(PNG).decode("ascii")}
+        answer = self.stage(adapter, adapter.from_client(_call(40, "image.attach_bytes", sent)))
+        self.assertEqual(answer, _answer(40, {"attached": True, "path": "/hermes/cache/images/upload_1.png",
+                                              "name": "shot.png", "count": 1}))
+        [(_, submit)] = adapter.from_client(_call(41, "prompt.submit", {"session_id": SID, "text": "x"}))
+        self.assertEqual(submit["params"]["attachments"],
+                         [{"path": "/hermes/cache/images/upload_1.png", "mime": "image/png"}])
+        self.stage(adapter, adapter.from_client(_call(42, "image.attach_bytes", sent)),
+                   staged="/hermes/cache/images/upload_2.png")
+        [(_, answer)] = adapter.from_client(_call(43, "image.detach", {
+            "session_id": SID, "path": "/hermes/cache/images/upload_2.png"}))
+        self.assertEqual(answer, _answer(43, {"detached": True, "count": 0}))
+        [(_, submit)] = adapter.from_client(_call(44, "prompt.submit", {"session_id": SID, "text": "y"}))
+        self.assertNotIn("attachments", submit["params"])
+
+    def test_a_staged_path_with_no_mime_answered_is_typed_by_the_suffix_the_owner_gave_it(self) -> None:
+        adapter = self.adapter()
+        self.opened(adapter)
+        sent = {"session_id": SID, "filename": "photo.jpg", "content_base64": base64.b64encode(PNG).decode("ascii")}
+        call = self.own_call(adapter.from_client(_call(48, "image.attach_bytes", sent)), "image.attach_bytes")
+        adapter.from_owner(_answer(call["id"], {"attached": True, "path": "/hermes/cache/images/upload_3.jpg"}))
+        [(_, submit)] = adapter.from_client(_call(49, "prompt.submit", {"session_id": SID, "text": "x"}))
+        self.assertEqual(submit["params"]["attachments"], [{"path": "/hermes/cache/images/upload_3.jpg",
+                                                            "mime": "image/jpeg"}])
+
+    def test_empty_bytes_are_refused_and_bytes_the_owner_refuses_say_why(self) -> None:
+        adapter = self.adapter()
+        self.opened(adapter)
+        [(target, refusal)] = adapter.from_client(_call(45, "image.attach_bytes", {
+            "session_id": SID, "filename": "x.png", "content_base64": ""}))
+        self.assertEqual((target, refusal["error"]["code"]), (TO_CLIENT, attach.NOT_FOUND))
+        call = self.own_call(adapter.from_client(_call(46, "image.attach_bytes", {
+            "session_id": SID, "filename": "x.png", "content_base64": "bm90IGFuIGltYWdl"})), "image.attach_bytes")
+        self.assertEqual(call["params"]["content_base64"], "bm90IGFuIGltYWdl")  # as the TUI sent it
+        [(target, refusal)] = adapter.from_owner(_error(call["id"], "unsupported image extension"))
+        self.assertEqual((target, refusal["error"]["code"]), (TO_CLIENT, attach.REFUSED))
+        [(_, submit)] = adapter.from_client(_call(47, "prompt.submit", {"session_id": SID, "text": "x"}))
+        self.assertNotIn("attachments", submit["params"])
+
     def test_an_image_not_found_is_refused_with_its_reason(self) -> None:
         adapter = self.adapter()
         self.opened(adapter)
@@ -555,6 +941,258 @@ class ImageTests(AdapterCase):
         self.assertEqual(attach.image_mime(b"GIF89a.."), "image/gif")
         self.assertEqual(attach.image_mime(b"RIFF\0\0\0\0WEBPVP8 "), "image/webp")
         self.assertIsNone(attach.image_mime(b"BM\0\0"))  # a bitmap: the owner refuses it
+
+
+SLASH_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "tui_gateway" / "canonical_slash_verbs.json"
+UNSUPPORTED = {"code": 4001, "message": "unsupported_command", "data": {"reason": "unsupported_command"}}
+
+
+class SlashVerbTests(AdapterCase):
+    """A command the owner's `slash.exec` refuses on a shared gateway (`unsupported_command`) and serves through a verb
+    of its own (Ink's way on a shared gateway) is answered through that verb, in `slash.exec`'s shape."""
+
+    def refused(self, adapter: Adapter, command: str) -> dict:
+        """`command` sent and the owner's `slash.exec` refusal answered: the child's next frame, with `to_client` set
+        when it answers the TUI rather than calling the owner."""
+        sent = self.own_call(adapter.from_client(_call(50, "slash.exec", {"command": command, "session_id": SID})),
+                             "slash.exec")
+        self.assertEqual(sent["params"], {"command": command, "session_id": SID})
+        [(target, frame)] = adapter.from_owner({"jsonrpc": "2.0", "id": sent["id"], "error": UNSUPPORTED})
+        return frame if target == TO_OWNER else {"to_client": frame}
+
+    def answered(self, adapter: Adapter, frame: dict, result: dict) -> dict:
+        [(target, answer)] = adapter.from_owner(_answer(frame["id"], result))
+        self.assertEqual((target, answer["id"]), (TO_CLIENT, 50))
+        self.assertFalse(adapter.waiting())
+        return answer["result"]
+
+    def read(self, adapter: Adapter, frame: dict, rows: list[dict], *, running: bool = False) -> dict:
+        """The owner's `session.resume` answered: the child's next frame, as `refused` gives it."""
+        self.assertEqual((frame["method"], frame["params"]), ("session.resume", {"session_id": SID}))
+        [(target, frame)] = adapter.from_owner(_answer(frame["id"], {
+            "session_id": SID, "subscription_id": "sub-1", "revision": 9, "execution_generation": 5,
+            "running": running, "messages": rows}))
+        return frame if target == TO_OWNER else {"to_client": frame}
+
+    @staticmethod
+    def rows(*contents: object) -> list[dict]:
+        """A transcript of one turn per content: the person's row, then the reply's."""
+        rows: list[dict] = []
+        for number, content in enumerate(contents):
+            rows += [{"role": "user", "row_id": 10 * number + 1, "content": content},
+                     {"role": "assistant", "row_id": 10 * number + 2, "content": "ok"}]
+        return rows
+
+    def test_the_recorded_shared_gateway_answers_each_command_as_recorded(self) -> None:
+        # Recorded from a real Hermes bf0203a794 (v0.22.5) shared gateway through this child: each owner call the
+        # child made is replayed with the owner's own answer. The child must make the same calls with the same
+        # parameters (the owner took each one) and give the TUI the same answer.
+        fixture = json.loads(SLASH_FIXTURE.read_text(encoding="utf-8"))
+        self.assertEqual(fixture["fixture"]["hermes"], "bf0203a794 (v0.22.5)")
+        for scenario in fixture["scenarios"]:
+            with self.subTest(command=scenario["command"]):
+                adapter = self.adapter()
+                session = scenario["owner"][0]["params"]["session_id"]
+                actions = adapter.from_client(_call(60, "slash.exec", {"command": scenario["command"],
+                                                                        "session_id": session}))
+                for step in scenario["owner"]:
+                    [(target, frame)] = actions
+                    self.assertEqual(target, TO_OWNER)
+                    params = dict(frame["params"])
+                    if frame["method"] == "session.mutate":
+                        params["request_id"] = "<request_id>"
+                    self.assertEqual((frame["method"], params), (step["method"], step["params"]))
+                    actions = adapter.from_owner({"jsonrpc": "2.0", "id": frame["id"], **step["reply"]})
+                [(target, answer)] = actions
+                self.assertEqual((target, answer["id"]), (TO_CLIENT, 60))
+                self.assertEqual({key: answer[key] for key in ("result", "error") if key in answer}, scenario["answer"])
+                self.assertFalse(adapter.waiting())
+        verbs = {attach.SLASH_VERBS.get(scenario["command"].split()[0]) for scenario in fixture["scenarios"]}
+        self.assertEqual(set(attach.SLASH_VERBS.values()) - verbs, {"tools"})  # its listing is too long to keep
+
+    def test_any_other_command_goes_as_sent_and_is_not_translated(self) -> None:
+        adapter = self.adapter()
+        for command in ("status", "usage", "goal ship it", "/compressor", ""):
+            with self.subTest(command=command):
+                frame = _call(51, "slash.exec", {"command": command, "session_id": SID})
+                self.assertEqual(adapter.from_client(frame), [(TO_OWNER, frame)])
+                self.assertFalse(adapter.waiting())
+
+    def test_an_owner_that_runs_the_command_itself_answers_it_and_nothing_else_is_sent(self) -> None:
+        for reply in ({"result": {"type": "exec", "output": "Compressed."}},
+                      {"error": {"code": 4001, "message": "session_busy", "data": {"reason": "session_busy"}}}):
+            with self.subTest(reply=reply):
+                adapter = self.adapter()
+                sent = self.own_call(adapter.from_client(_call(52, "slash.exec", {
+                    "command": "Compact", "session_id": SID})), "slash.exec")
+                [(target, answer)] = adapter.from_owner({"jsonrpc": "2.0", "id": sent["id"], **reply})
+                self.assertEqual((target, answer), (TO_CLIENT, {"jsonrpc": "2.0", "id": 52, **reply}))
+                self.assertFalse(adapter.waiting())
+
+    def test_compress_sends_its_argument_raw_and_reports_a_noop_without_a_tick(self) -> None:
+        adapter = self.adapter()
+        mutate = self.read(adapter, self.refused(adapter, "compact here 3"), [])
+        self.assertEqual(mutate["params"], {
+            "session_id": SID, "request_id": "id-1", "expected_revision": 9, "expected_generation": 5,
+            "operation": "compress", "payload": {"focus": "here 3"}})
+        result = self.answered(adapter, mutate, {"status": "noop", "summary": {
+            "headline": "No changes from compression: 6 messages", "token_line": "Approx request size: ~9 tokens"}})
+        self.assertEqual(result, {"type": "exec", "output":
+                                  "No changes from compression: 6 messages\n  Approx request size: ~9 tokens"})
+        adapter = self.adapter()
+        mutate = self.read(adapter, self.refused(adapter, "compress"), [])
+        self.assertEqual(mutate["params"]["payload"], {})
+
+    def test_undo_n_rewinds_to_the_nth_newest_turn_of_yours_and_prefills_it(self) -> None:
+        adapter = self.adapter()
+        rows = [*self.rows("one", "two", "three"), {"role": "user", "row_id": 40, "content": "[CONTEXT SUMMARY]: x"},
+                {"role": "user", "row_id": 41, "content": "shown", "display_kind": "notice"},
+                {"role": "user", "row_id": 42, "content": "gone", "archived": True}]
+        mutate = self.read(adapter, self.refused(adapter, "undo 2"), rows)
+        self.assertEqual((mutate["params"]["operation"], mutate["params"]["payload"]),
+                         ("rewind", {"target_message_id": 11}))
+        result = self.answered(adapter, mutate, {"rewound_count": 4, "target_message": {"content": "two"}})
+        self.assertEqual(result, {"type": "prefill", "message": "two", "notice":
+                                  "↶ Undid 2 turns (4 messages). Edit and resubmit, or send a new message."})
+
+    def test_a_turn_back_with_nothing_to_take_or_a_bad_count_edits_nothing(self) -> None:
+        image_turn = [{"type": "input_image", "image_url": "data:"}, {"type": "text", "text": "x"}]
+        for command, rows, said in (("undo", [], "Nothing to undo"), ("undo x", None, "/undo takes a number"),
+                                    ("retry", self.rows(image_turn), "/retry cannot send that turn again")):
+            with self.subTest(command=command):
+                adapter = self.adapter()
+                frame = self.refused(adapter, command)
+                if rows is not None:
+                    frame = self.read(adapter, frame, rows)
+                self.assertIn(said, frame["to_client"]["result"]["output"])
+                self.assertFalse(adapter.waiting())
+
+    def test_retry_sends_the_turn_it_took_back_again(self) -> None:
+        adapter = self.adapter()
+        mutate = self.read(adapter, self.refused(adapter, "retry"), self.rows("one", "two"))
+        self.assertEqual(mutate["params"]["payload"], {"target_message_id": 11})
+        result = self.answered(adapter, mutate, {"rewound_count": 2, "target_message": {"content": [
+            {"type": "input_text", "text": "two"}]}})
+        self.assertEqual(result, {"type": "send", "message": "two"})
+
+    def test_retry_text_is_only_what_has_a_text_replay(self) -> None:
+        self.assertEqual(attach.retry_text("again"), "again")
+        self.assertEqual(attach.retry_text([{"type": "text", "text": "a"}, "b"]), "ab")
+        self.assertEqual(attach.retry_text("   "), "")
+        for content in ([{"type": "input_image", "image_url": "x"}], [{"type": "text", "text": "a", "cache": 1}], None):
+            with self.subTest(content=content):
+                self.assertIsNone(attach.retry_text(content))
+
+    def test_branch_names_the_new_session_for_the_tui_to_open(self) -> None:
+        adapter = self.adapter()
+        mutate = self.read(adapter, self.refused(adapter, "fork side quest"), [])
+        self.assertEqual(mutate["params"]["payload"], {"title": "side quest"})
+        result = self.answered(adapter, mutate, {"operation": "branch", "branched_session_id": "local-child"})
+        self.assertEqual(result["branched_session_id"], "local-child")
+
+    def test_an_idle_stop_stops_the_sessions_processes_and_interrupts_nothing(self) -> None:
+        adapter = self.adapter()
+        stop = self.read(adapter, self.refused(adapter, "stop"), [])
+        self.assertEqual((stop["method"], stop["params"]), ("process.stop", {"session_id": SID}))
+        result = self.answered(adapter, stop, {"killed": 1, "delegations": 2})
+        self.assertEqual(result["output"], "Stopped 1 background process.\nInterrupted 2 background delegations.")
+
+    def test_a_stop_whose_interrupt_found_the_turn_settled_says_it_interrupted_nothing(self) -> None:
+        for reply, said in (({"execution_state": "idle", "execution_generation": 5}, False),
+                            ({"execution_state": "running", "execution_generation": 6}, False),
+                            ({"execution_state": "running", "execution_generation": 5}, True)):
+            with self.subTest(reply=reply):
+                adapter = self.adapter()
+                interrupt = self.read(adapter, self.refused(adapter, "stop"), [], running=True)
+                self.assertEqual((interrupt["method"], interrupt["params"]),
+                                 ("session.interrupt", {"session_id": SID, "execution_generation": 5}))
+                [(_, stop)] = adapter.from_owner(_answer(interrupt["id"], reply))
+                output = self.answered(adapter, stop, {"killed": 0, "delegations": 0})["output"]
+                self.assertEqual(output.startswith("Interrupted the running turn."), said)
+
+    def test_a_stop_whose_read_failed_still_stops_the_sessions_processes(self) -> None:
+        adapter = self.adapter()
+        read = self.refused(adapter, "stop")
+        [(target, stop)] = adapter.from_owner({"jsonrpc": "2.0", "id": read["id"],
+                                               "error": {"code": 4001, "message": "not_found"}})
+        self.assertEqual((target, stop["method"], stop["params"]), (TO_OWNER, "process.stop", {"session_id": SID}))
+        self.assertEqual(self.answered(adapter, stop, {"killed": 2})["output"], "Stopped 2 background processes.")
+
+    def test_bg_and_btw_start_a_side_agent_and_bare_say_how(self) -> None:
+        for command, method in (("background run the tests", "prompt.background"), ("btw why?", "prompt.btw")):
+            with self.subTest(command=command):
+                adapter = self.adapter()
+                frame = self.refused(adapter, command)
+                self.assertEqual((frame["method"], frame["params"]),
+                                 (method, {"session_id": SID, "text": command.split(None, 1)[1]}))
+                self.assertIn("t_1", self.answered(adapter, frame, {"task_id": "t_1"})["output"])
+        adapter = self.adapter()
+        usage = self.refused(adapter, "bg")["to_client"]
+        self.assertTrue(usage["result"]["output"].startswith("usage: /bg <prompt>"))
+        self.assertFalse(adapter.waiting())
+
+    def test_rollback_restore_takes_a_file_or_all_and_reports_what_it_kept(self) -> None:
+        for command, params in (("rollback 2 src/app.py", {"hash": "2", "file_path": "src/app.py"}),
+                                ("rollback 2 --all", {"hash": "2", "all": True}),
+                                # Ink and Hermes: `--all` only widens a whole-tree restore; with a file it is no path.
+                                ("rollback 2 src/app.py --all", {"hash": "2", "file_path": "src/app.py"}),
+                                ("rollback abc123", {"hash": "abc123"})):
+            with self.subTest(command=command):
+                adapter = self.adapter()
+                frame = self.refused(adapter, command)
+                self.assertEqual((frame["method"], frame["params"]),
+                                 ("rollback.restore", {"session_id": SID, **params}))
+        result = self.answered(adapter, frame, {"success": True, "restored_to": "abc123",
+                                                "skipped_user_edits": [f"f{n}" for n in range(7)],
+                                                "history_removed": 2})
+        self.assertEqual(result["output"].splitlines(), [
+            "↶ Restored the workspace: abc123", "Kept your own edits to f0, f1, f2, f3, f4 and 2 more.",
+            "The last turn went with it (2 messages)."])
+        adapter = self.adapter()
+        listed = self.answered(adapter, self.refused(adapter, "rollback ls"), {"enabled": True, "checkpoints": [
+            {"hash": "0123456789abcdef", "timestamp": "2026-10-28 09:00", "message": "before edit"}]})
+        self.assertEqual(listed["output"].splitlines()[0], "1. 0123456789  2026-10-28 09:00 · before edit")
+
+    def test_reload_mcp_reloads_only_when_confirmed(self) -> None:
+        for command, params in (("reload-mcp", {"session_id": SID}),
+                                ("reload_mcp now", {"session_id": SID, "confirm": True})):
+            with self.subTest(command=command):
+                adapter = self.adapter()
+                frame = self.refused(adapter, command)
+                self.assertEqual((frame["method"], frame["params"]), ("reload.mcp", params))
+
+    def test_tools_lists_this_sessions_tools_and_refuses_a_change_in_words(self) -> None:
+        adapter = self.adapter()
+        frame = self.refused(adapter, "tools")
+        self.assertEqual((frame["method"], frame["params"]), ("tools.show", {"session_id": SID}))
+        # The shape of Hermes bf0203a794's `tools.show` (`gateway/session_ancillary.py` show_tools).
+        result = self.answered(adapter, frame, {"total": 2, "sections": [
+            {"name": "file", "tools": [{"name": "read_file", "description": "Read a file."}]},
+            {"name": "empty", "tools": []},
+            {"name": "web", "tools": [{"name": "web_search", "description": ""}]}]})
+        self.assertEqual(result["output"], "[file]\n  read_file - Read a file.\n[web]\n  web_search\nTotal: 2 tools")
+        adapter = self.adapter()
+        said = self.refused(adapter, "tools disable web")["to_client"]
+        self.assertIn("cannot change this session's tools", said["result"]["output"])
+        self.assertFalse(adapter.waiting())
+
+    def test_bare_plugins_lists_what_the_gateway_loaded(self) -> None:
+        adapter = self.adapter()
+        frame = self.refused(adapter, "plugins")
+        self.assertEqual((frame["method"], frame["params"]), ("plugins.list", {}))
+        # The shape of Hermes bf0203a794's `plugins.list` (`gateway/session_discovery.py` list_plugins).
+        result = self.answered(adapter, frame, {"plugins": [
+            {"name": "omh", "key": "omh", "version": "4.0.2", "enabled": True, "tools": 9, "hooks": 1, "commands": 0,
+             "error": ""},
+            {"name": "disk-cleanup", "key": "disk-cleanup", "version": "2.0.0", "enabled": False, "tools": 0,
+             "hooks": 0, "commands": 0, "error": "not enabled"}], "toolsets": [], "portable_mcp_servers": []})
+        self.assertEqual(result["output"].splitlines(), [
+            "omh 4.0.2 (enabled; 9 tools, 1 hook, 0 commands)",
+            "disk-cleanup 2.0.0 (disabled; 0 tools, 0 hooks, 0 commands) — error: not enabled"])
+
+    def test_config_lines_join_nested_keys(self) -> None:
+        self.assertEqual(attach.config_lines({"display": {"compact": True, "skin": "x"}, "voice": {}, "n": 1}),
+                         ['display.compact: true', 'display.skin: "x"', "voice: {}", "n: 1"])
 
 
 # ── the script, run as gateway_spawn runs it ──
@@ -602,6 +1240,16 @@ class _Socket:
                             "command": "rm -rf /tmp/x", "description": "delete", "choices": ["once", "deny"]}}})
         elif method == "approval.respond":
             answer({"status": "resolved"})
+        elif method == "session.interrupt" and params.get("execution_generation") != 3:
+            # The owner moved on to generation 3 without telling this view: a stop for any other is refused.
+            self.inbox.put_nowait({"jsonrpc": "2.0", "id": rid, "error": {
+                "code": 4001, "message": "stale_generation", "data": {"reason": "stale_generation"}}})
+        elif method == "session.interrupt":
+            answer({"ref": {"profile_id": "p", "session_id": "local-1"}, "instance_id": "i", "authority_epoch": 1,
+                    "revision": 1, "execution_generation": 3, "execution_state": "running"})
+        elif method == "session.resume":
+            answer({"session_id": "local-1", "stored_session_id": "local-1", "subscription_id": "sub-1",
+                    "execution_generation": 3, "running": True, "messages": [], "info": {}})
         elif method == "session.detach":
             answer({"session_id": "local-1", "subscription_id": "sub-1", "detached": True})
 
@@ -609,14 +1257,25 @@ class _Socket:
         return self
 
     async def __anext__(self):
+        if os.environ.get("FAKE_OWNER_GOES_AWAY"):  # a restart: the owner closes with going-away (1001)
+            self.close_code = 1001
+            raise StopAsyncIteration
+        if os.environ.get("FAKE_OWNER_HANGS_UP"):  # the owner's side ends before it is ready
+            raise StopAsyncIteration
         return json.dumps(await self.inbox.get())
 
 
 class connect:
     def __init__(self, url, **options):
-        _log({"connect": url, "subprotocols": options.get("subprotocols"), "proxy": options.get("proxy", "unset")})
+        _log({"connect": url, "subprotocols": options.get("subprotocols"), "proxy": options.get("proxy", "unset"),
+              "ping_interval": options.get("ping_interval", "unset")})
 
     async def __aenter__(self):
+        if os.environ.get("FAKE_OWNER_DOWN"):
+            raise ConnectionRefusedError(61, "Connect call failed")
+        if os.environ.get("FAKE_OWNER_GARBLED"):
+            from websockets.exceptions import InvalidMessage
+            raise InvalidMessage("did not receive a valid HTTP response")
         if os.environ.get("FAKE_OWNER_REFUSES"):
             from websockets.exceptions import WebSocketException
             raise WebSocketException("server rejected WebSocket connection: HTTP 403")
@@ -636,7 +1295,8 @@ def ensure_gateway_runtime(home, timeout, idle_exit):
     left = sorted(name for name in ("HERMES_MODEL", "HERMES_CWD", "HERMES_TUI_CLIENT_ENV") if name in os.environ)
     with (Path(os.environ["HERMES_HOME"]) / "owner.jsonl").open("a") as log:
         log.write(json.dumps({"ensure": str(home), "idle_exit": idle_exit, "launch_env_left": left}) + "\\n")
-    return SimpleNamespace(state="ready", reason_code=None, detail=None,
+    state, _, reason = os.environ.get("FAKE_RUNTIME_STATE", "ready").partition(":")
+    return SimpleNamespace(state=state, reason_code=reason or None, detail=None,
                            endpoint=SimpleNamespace(profile_id="p", instance_id="i", api_origin="http://127.0.0.1:1"))
 
 
@@ -663,12 +1323,36 @@ class _Peer:
         self.request = json.loads(data)
 
     def makefile(self, mode):
+        import os
+        if os.environ.get("FAKE_CONTROL_SILENT"):  # the socket closes without an answer
+            return io.BytesIO(b"")
         grant = {"ok": True, "id": 1, "result": {"profile_id": "p", "instance_id": "i", "ticket": "t0k"}}
         return io.BytesIO(json.dumps(grant).encode() + b"\\n")
 
 
 def connect_private(control, timeout):
+    import os
+    if os.environ.get("FAKE_CONTROL_REFUSES"):
+        raise ConnectionRefusedError(61, "Connection refused")
+    if os.environ.get("FAKE_CONTROL_DENIED"):
+        raise PermissionError(13, "Permission denied")
     return _Peer()
+'''
+
+FAKE_ATTACH = '''
+"""Hermes' `attach_gateway` (the Windows grant): the same ensure, then a ticket minted Hermes' own way."""
+from types import SimpleNamespace
+
+from hermes_cli.gateway_runtime import attachable, ensure_gateway_runtime
+
+
+class TicketUnavailable(RuntimeError):
+    pass
+
+
+def attach_gateway(home, *, start, timeout):
+    receipt = ensure_gateway_runtime(home, timeout=timeout, idle_exit=True)
+    return SimpleNamespace(receipt=receipt, ticket="t0k" if attachable(receipt) else None)
 '''
 
 FAKE_CLIENT = '''
@@ -680,15 +1364,19 @@ def gateway_ws_target(endpoint, ticket):
 '''
 
 FAKE_STDIO_ENTRY = '''
-import json, sys
+import json, os, sys
+from pathlib import Path
 
 
 def main():
+    log = Path(os.environ["HERMES_HOME"]) / "stdio.jsonl"
     sys.stdout.write(json.dumps({"jsonrpc": "2.0", "method": "event",
                                  "params": {"type": "gateway.ready", "payload": {"stdio": True}}}) + "\\n")
     sys.stdout.flush()
     for line in sys.stdin:
         frame = json.loads(line)
+        with log.open("a") as out:
+            out.write(json.dumps(frame) + "\\n")
         sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": frame["id"], "result": {"stdio": frame["method"]}}) + "\\n")
         sys.stdout.flush()
     return 7
@@ -731,12 +1419,23 @@ class ScriptTests(unittest.TestCase):
                          ["__init__.py", "gateway_attach.py"])
 
     def test_a_hermes_with_only_the_stdio_entry_runs_it_in_the_child(self) -> None:
-        _home, environ = self.hermes({})
+        home, environ = self.hermes({})
         client = self.client(environ)
         ready = client.start(ready_timeout=10)
         self.assertEqual(ready.payload, {"stdio": True})
         self.assertEqual(client.call("session.create", {"cols": 80}), {"stdio": "session.create"})
+        self.assertEqual(client.call("session.interrupt", {"session_id": "s1"}), {"stdio": "session.interrupt"})
+        self.assertEqual(client.call("session.title", {"session_id": "s1", "title": "T"}), {"stdio": "session.title"})
+        self.assertEqual(client.call("session.delete", {"session_id": "s2"}), {"stdio": "session.delete"})
         self.assertEqual(client.close(grace=5), 7)  # the entry's own exit code
+        # Over stdio nothing is translated: the stop, the rename and the delete go as the TUI sent them, with no
+        # generation, no read and no `session.mutate`.
+        log = [json.loads(line) for line in (home / "stdio.jsonl").read_text().splitlines()]
+        sent = ("session.interrupt", "session.resume", "session.title", "session.delete", "session.mutate")
+        self.assertEqual([(frame["method"], frame["params"]) for frame in log if frame["method"] in sent],
+                         [("session.interrupt", {"session_id": "s1"}),
+                          ("session.title", {"session_id": "s1", "title": "T"}),
+                          ("session.delete", {"session_id": "s2"})])
 
     def test_a_hermes_cli_without_the_attach_api_still_runs_the_stdio_entry(self) -> None:
         _home, environ = self.hermes({"hermes_cli/__init__.py": "", "hermes_cli/gateway_client.py": FAKE_CLIENT,
@@ -749,11 +1448,13 @@ class ScriptTests(unittest.TestCase):
         "hermes_cli/gateway_client.py": FAKE_CLIENT,
         "hermes_cli/gateway_runtime.py": FAKE_RUNTIME,
         "hermes_cli/gateway_runtime_discovery.py": FAKE_DISCOVERY,
+        "hermes_cli/gateway_runtime_attach.py": FAKE_ATTACH,
         "hermes_constants.py": "import os\nfrom pathlib import Path\n\ndef get_hermes_home():\n"
                                "    return Path(os.environ['HERMES_HOME'])\n",
         "websockets/__init__.py": "", "websockets/asyncio/__init__.py": "",
         "websockets/asyncio/client.py": FAKE_OWNER,
-        "websockets/exceptions.py": "class WebSocketException(Exception):\n    pass\n",
+        "websockets/exceptions.py": "class WebSocketException(Exception):\n    pass\n\n\n"
+                                    "class InvalidMessage(WebSocketException):\n    pass\n",
     }
 
     def test_a_refused_upgrade_ends_with_the_childs_own_line_and_no_traceback(self) -> None:
@@ -765,6 +1466,82 @@ class ScriptTests(unittest.TestCase):
         self.assertIn("omh-attach: could not reach Hermes' gateway: server rejected WebSocket connection: HTTP 403",
                       tail)
         self.assertFalse([line for line in tail if "Traceback" in line], tail)
+
+    def test_a_gateway_that_is_not_answering_yet_exits_not_ready_so_the_tui_waits(self) -> None:
+        # A restart: Hermes' verdict says starting or draining, or the control socket or the WebSocket refuses.
+        for env, said in (
+            ({"FAKE_RUNTIME_STATE": "starting:deadline"}, "omh-attach: gateway starting: deadline"),
+            ({"FAKE_RUNTIME_STATE": "draining:replaced"}, "omh-attach: gateway draining: replaced"),
+            ({"FAKE_RUNTIME_STATE": "inaccessible:control_timeout"}, "omh-attach: gateway inaccessible: control_timeout"),
+            ({"FAKE_CONTROL_REFUSES": "1"}, "omh-attach: [Errno 61] Connection refused"),
+            ({"FAKE_OWNER_DOWN": "1"}, "omh-attach: could not reach Hermes' gateway: [Errno 61] Connect call failed"),
+            ({"FAKE_CONTROL_SILENT": "1"}, "omh-attach: Hermes' gateway closed its control socket without answering"),
+            ({"FAKE_OWNER_GOES_AWAY": "1"}, "omh-attach: the connection to Hermes' gateway ended (close code 1001)"),
+        ):
+            if attach.WINDOWS and any(name.startswith("FAKE_CONTROL_") for name in env):
+                continue  # the control-socket mint is POSIX's; Windows mints through Hermes' `attach_gateway`
+            with self.subTest(env=env):
+                _home, environ = self.hermes(self.ATTACH_API, env=env)
+                with self.assertRaises(GatewayUnavailable) as raised:
+                    self.client(environ).start(ready_timeout=10)
+                self.assertTrue(raised.exception.not_ready, raised.exception)
+                self.assertEqual(raised.exception.returncode, attach.NOT_READY_EXIT)
+                self.assertIn(said, raised.exception.stderr_tail)
+
+    def test_a_gateway_that_refuses_this_client_is_not_waited_for(self) -> None:
+        # A verdict that will not change by waiting, a refused upgrade and a denied socket stay the child's ordinary
+        # failure. So does any other WebSocket client error, a garbled handshake included: telling `InvalidMessage`
+        # apart needs a name INVARIANT 2's closed list for this script does not hold.
+        for env in ({"FAKE_RUNTIME_STATE": "incompatible:runtime_protocol"}, {"FAKE_OWNER_REFUSES": "1"},
+                    {"FAKE_CONTROL_DENIED": "1"}, {"FAKE_OWNER_GARBLED": "1"}):
+            if attach.WINDOWS and any(name.startswith("FAKE_CONTROL_") for name in env):
+                continue  # the control-socket mint is POSIX's; Windows mints through Hermes' `attach_gateway`
+            with self.subTest(env=env):
+                _home, environ = self.hermes(self.ATTACH_API, env=env)
+                with self.assertRaises(GatewayUnavailable) as raised:
+                    self.client(environ).start(ready_timeout=10)
+                self.assertFalse(raised.exception.not_ready)
+                self.assertEqual(raised.exception.returncode, 1)
+
+    def test_an_owner_that_hangs_up_while_stdin_is_still_open_ends_the_child_with_its_own_code(self) -> None:
+        # The TUI holds the child's stdin open, so the stdin reader is still blocked in its read when the relay ends.
+        # Reading through `sys.stdin.buffer` there aborted the child at finalization (-6 on POSIX, #2327).
+        _home, environ = self.hermes(self.ATTACH_API, env={"FAKE_OWNER_HANGS_UP": "1"})
+        client = self.client(environ)
+        with self.assertRaises(GatewayUnavailable) as raised:
+            client.start(ready_timeout=10)
+        self.assertEqual(str(raised.exception), "the gateway exited with code 1 before gateway.ready")
+        tail = raised.exception.stderr_tail
+        self.assertIn("omh-attach: the connection to Hermes' gateway ended (close code None)", tail)
+        self.assertFalse([line for line in tail if "Fatal Python error" in line], tail)
+
+    def test_the_stdin_reader_delivers_one_line_per_newline_and_a_last_unended_line(self) -> None:
+        reading, writing = os.pipe()
+        long_line = b'{"text": "' + b"x" * (attach.STDIN_READ_BYTES * 2 + 7) + b'"}'
+        sent = b'{"a": 1}\n\n' + long_line + b'\n{"last": true}'  # more than a pipe holds: written as it is read
+
+        def write() -> None:
+            with open(writing, "wb") as stream:
+                stream.write(sent)
+
+        writer = threading.Thread(target=write, daemon=True)
+        writer.start()
+
+        async def lines() -> list[bytes | None]:
+            queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+            with patch.object(sys, "stdin", types.SimpleNamespace(fileno=lambda: reading)):
+                attach._start_stdin_reader(asyncio.get_running_loop(), queue)
+            read = [await asyncio.wait_for(queue.get(), 10)]
+            while read[-1] is not None:
+                read.append(await asyncio.wait_for(queue.get(), 10))
+            return read
+
+        try:
+            read = asyncio.run(lines())
+        finally:
+            writer.join(10)
+            os.close(reading)
+        self.assertEqual(read, [b'{"a": 1}', b"", long_line, b'{"last": true}', None])
 
     def test_a_hermes_with_the_attach_api_is_attached_to_and_translated(self) -> None:
         home, environ = self.hermes(self.ATTACH_API,
@@ -780,6 +1557,8 @@ class ScriptTests(unittest.TestCase):
         self.assertEqual((request.id, request.method, request.params["command"]),
                          ("omh-approval-p1", "approval", "rm -rf /tmp/x"))
         client.respond(request.id, {"result": {"choice": "deny"}})
+        stopped = client.call("session.interrupt", {"session_id": "local-1"})
+        self.assertEqual((stopped["execution_generation"], stopped["execution_state"]), (3, "running"))
         client.call("session.close", {"session_id": "local-1"})
         self.assertEqual(client.close(grace=5), 0)  # the person left: a normal exit, no respawn
 
@@ -787,7 +1566,8 @@ class ScriptTests(unittest.TestCase):
         ensure = next(entry for entry in log if "ensure" in entry)
         self.assertEqual(ensure, {"ensure": str(home.resolve()), "idle_exit": True, "launch_env_left": []})
         connect = next(entry for entry in log if "connect" in entry)
-        self.assertEqual(connect, {"connect": "ws://127.0.0.1:1/api/ws", "proxy": None,
+        # No keepalive ping (Hermes' loopback policy): a gateway busy for 40 s must not drop a turn that still runs.
+        self.assertEqual(connect, {"connect": "ws://127.0.0.1:1/api/ws", "proxy": None, "ping_interval": None,
                                    "subprotocols": ["hermes-gateway-v1", "hermes-gateway-ticket.t0k"]})
         sent = {entry["method"]: entry["params"] for entry in log if "method" in entry}
         self.assertEqual(sent["session.create"], {"cwd": "/tui/cwd", "model": "gpt-x", "source": "tui",
@@ -797,6 +1577,15 @@ class ScriptTests(unittest.TestCase):
                                                     "prompt_id": "p1", "choice": "deny"})
         self.assertEqual(sent["session.detach"], {"session_id": "local-1", "subscription_id": "sub-1",
                                                   "end_reason": "tui_close"})
+        # The stop went at the generation the submit receipt named, was refused as stale, read afresh, and sent
+        # once more at the owner's.
+        stops = [(entry["method"], entry["params"]) for entry in log
+                 if entry.get("method") in ("session.interrupt", "session.resume")]
+        self.assertEqual(stops, [
+            ("session.interrupt", {"session_id": "local-1", "execution_generation": 2}),
+            ("session.resume", {"session_id": "local-1"}),
+            ("session.interrupt", {"session_id": "local-1", "execution_generation": 3}),
+        ])
 
     def _next_request(self, client: GatewayClient) -> ServerRequest:
         for _ in range(50):
@@ -804,6 +1593,148 @@ class ScriptTests(unittest.TestCase):
                 if isinstance(item, ServerRequest):
                     return item
         self.fail(f"no server request arrived; stderr: {client.stderr_tail()}")
+
+
+class GrantTests(unittest.TestCase):
+    """`attach_api().grant()` with Hermes stubbed: the POSIX control-socket mint, and Windows' `attach_gateway`."""
+
+    class TicketUnavailable(RuntimeError):
+        """Hermes' own: attachable, then no ticket; `reason` is bounded (`hermes_cli/gateway_runtime_attach.py`)."""
+
+        def __init__(self, reason: str) -> None:
+            super().__init__(f"ticket_unavailable: {reason}")
+            self.reason = reason
+
+    def _hermes(self, calls: list[str], *, receipt: object, attached: object) -> dict[str, types.ModuleType]:
+        def module(name: str, **attributes: object) -> types.ModuleType:
+            made = types.ModuleType(name)
+            made.__dict__.update(attributes)
+            return made
+
+        def connect_private(*_args: object) -> object:
+            calls.append("connect_private")
+            raise AttributeError("module 'os' has no attribute 'getuid'")
+
+        def attach_gateway(home: Path, *, start: bool, timeout: float) -> object:
+            calls.append(f"attach_gateway start={start} timeout={timeout:g}")
+            if isinstance(attached, BaseException):
+                raise attached
+            return attached
+
+        def ensure_gateway_runtime(*_args: object, **_kwargs: object) -> object:
+            calls.append("ensure_gateway_runtime")
+            return receipt
+
+        return {
+            "hermes_cli": module("hermes_cli", __path__=[]),
+            "hermes_cli.gateway_client": module(
+                "hermes_cli.gateway_client", GATEWAY_WS_PROTOCOL="hermes-gateway-v1",
+                gateway_ws_target=lambda endpoint, ticket: (f"ws://{endpoint.host}/api/ws",
+                                                            ("hermes-gateway-v1", f"hermes-gateway-ticket.{ticket}"))),
+            "hermes_cli.gateway_runtime": module(
+                "hermes_cli.gateway_runtime", attachable=lambda found: getattr(found, "endpoint", None) is not None,
+                control_home_for=lambda home, _endpoint: home, ensure_gateway_runtime=ensure_gateway_runtime),
+            "hermes_cli.gateway_runtime_discovery": module(
+                "hermes_cli.gateway_runtime_discovery", connect_private=connect_private),
+            "hermes_cli.gateway_runtime_attach": module(
+                "hermes_cli.gateway_runtime_attach", TicketUnavailable=self.TicketUnavailable,
+                attach_gateway=attach_gateway),
+            "hermes_constants": module("hermes_constants", get_hermes_home=lambda: Path("hermes-home")),
+            "websockets": module("websockets", __path__=[]),
+            "websockets.asyncio": module("websockets.asyncio", __path__=[]),
+            "websockets.asyncio.client": module("websockets.asyncio.client", connect=object()),
+            "websockets.exceptions": module("websockets.exceptions", WebSocketException=type("E", (Exception,), {})),
+        }
+
+    def _grant(self, *, windows: bool, receipt: object = None, attached: object = None,
+               hermes_attach: bool = True) -> tuple[list[str], object]:
+        calls: list[str] = []
+        modules = self._hermes(calls, receipt=receipt, attached=attached)
+        if not hermes_attach:  # Hermes 0.22.x: the attach API, but no `gateway_runtime_attach` (it ships in 0.23.1)
+            modules["hermes_cli.gateway_runtime_attach"] = None
+        with patch_modules(modules), patch.object(attach, "WINDOWS", windows):
+            api = attach.attach_api()
+            assert api is not None
+            try:
+                return calls, api.grant()
+            except Exception as error:  # noqa: BLE001 - the verdict is what the test reads
+                return calls, error
+
+    def test_windows_attaches_through_hermes_attach_gateway_not_the_unix_control_socket(self) -> None:
+        endpoint = types.SimpleNamespace(host="127.0.0.1:9", profile_id="default", instance_id="i1")
+        attached = types.SimpleNamespace(receipt=types.SimpleNamespace(endpoint=endpoint), ticket="t0k")
+        calls, granted = self._grant(windows=True, attached=attached)
+        self.assertEqual(granted, ("ws://127.0.0.1:9/api/ws", ["hermes-gateway-v1", "hermes-gateway-ticket.t0k"]))
+        self.assertEqual(calls, [f"attach_gateway start=True timeout={attach.ENSURE_TIMEOUT_SECONDS:g}"])
+
+    def test_windows_keeps_the_not_ready_and_refused_verdicts(self) -> None:
+        starting = types.SimpleNamespace(state="starting", reason_code=None, detail=None)
+        _calls, error = self._grant(windows=True, attached=types.SimpleNamespace(receipt=starting, ticket=None))
+        self.assertIsInstance(error, attach.GatewayNotReady)
+        refused = types.SimpleNamespace(state="inaccessible", reason_code="ticket_unavailable", detail=None)
+        _calls, error = self._grant(windows=True, attached=types.SimpleNamespace(receipt=refused, ticket=None))
+        self.assertIs(type(error), RuntimeError)
+        self.assertEqual(str(error), "gateway inaccessible: ticket_unavailable")
+
+    def test_windows_hermes_without_its_own_attach_gives_a_verdict_not_a_traceback(self) -> None:
+        # `main()` reports RuntimeError as one line and exits 1; a ModuleNotFoundError escaped it as a traceback.
+        calls, error = self._grant(windows=True, hermes_attach=False)
+        self.assertIs(type(error), RuntimeError)
+        self.assertIn("this Hermes cannot attach on Windows", str(error))
+        self.assertEqual(calls, [])
+
+    def test_windows_waits_for_a_control_pipe_that_is_not_answering_yet(self) -> None:
+        for reason in sorted(attach.NOT_READY_TICKET_REASONS):
+            with self.subTest(reason=reason):
+                _calls, error = self._grant(windows=True, attached=self.TicketUnavailable(reason))
+                self.assertIsInstance(error, attach.GatewayNotReady)
+                self.assertIn(f"ticket_unavailable: {reason}", str(error))
+
+    def test_windows_does_not_wait_for_a_refused_or_garbled_grant(self) -> None:
+        for reason in ("PermissionError", "invalid_control_response", "GatewayClientError"):
+            with self.subTest(reason=reason):
+                _calls, error = self._grant(windows=True, attached=self.TicketUnavailable(reason))
+                self.assertIs(type(error), self.TicketUnavailable)
+                self.assertNotIsInstance(error, attach.GatewayNotReady)
+
+    def test_the_not_ready_ticket_reasons_are_the_not_ready_socket_errors(self) -> None:
+        # Hermes names the OSError class it caught; every one `NOT_READY_OS_ERRORS` catches on POSIX is waited for.
+        names = {name for name, kind in vars(builtins).items()
+                 if isinstance(kind, type) and issubclass(kind, attach.NOT_READY_OS_ERRORS)}
+        self.assertEqual(attach.NOT_READY_TICKET_REASONS, names)
+
+    def test_posix_still_mints_over_the_control_socket(self) -> None:
+        endpoint = types.SimpleNamespace(host="127.0.0.1:9", profile_id="default", instance_id="i1")
+        calls, error = self._grant(windows=False, receipt=types.SimpleNamespace(endpoint=endpoint))
+        self.assertEqual(calls, ["ensure_gateway_runtime", "connect_private"])
+        self.assertIsInstance(error, AttributeError)
+
+
+class FramesTests(unittest.TestCase):
+    """`_frames` splits WebSocket messages on LF only, never on Unicode line separators inside JSON strings."""
+
+    def test_unicode_line_separators_inside_json_strings_stay_one_frame(self) -> None:
+        # Valid RFC 8259 JSON strings may hold literal U+2028, U+2029, or U+0085 when serialized with
+        # `ensure_ascii=False`; `str.splitlines()` broke them into unparseable fragments (#3221).
+        message = "before\u2028line-sep\u2029para-sep\u0085next-line"
+        frame = _answer(2, {"session_id": SID, "messages": [{"role": "assistant", "text": message}]})
+        raw = json.dumps(frame, ensure_ascii=False)
+        for wire in (raw, f"{raw}\n", f"{raw}\r\n"):
+            with self.subTest(suffix=repr(wire[len(raw):])):
+                self.assertEqual(list(attach._frames(wire)), [frame])
+
+    def test_lf_and_crlf_delimited_frames_split_cleanly_and_skip_blank_lines(self) -> None:
+        first = _event("message.delta", {"text": "part\u2028one"})
+        second = _event("message.complete", {"text": "part\u2029two"})
+        wire = (
+            f"  {json.dumps(first, ensure_ascii=False)} \r\n"
+            "\r\n"
+            " \t \n"
+            f"{json.dumps(second, ensure_ascii=False)}\n"
+            "[1, 2]\n"
+            "not json\r\n"
+        )
+        self.assertEqual(list(attach._frames(wire)), [first, second, "[1, 2]", "not json"])
 
 
 if __name__ == "__main__":

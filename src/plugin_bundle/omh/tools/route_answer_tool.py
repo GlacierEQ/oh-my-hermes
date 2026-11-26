@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any
 
+from ..capability_off import disabled_skill_families
 from ..host_observation import (
     OBSERVATION_SCHEMA,
     attach_public_observation,
@@ -145,7 +146,7 @@ _DEFAULT_SOURCE = "hermes"
 
 def omh_route_answer_handler(args: dict[str, Any], **kwargs) -> str:
     if error := runtime_paths.tool_home_error(args):
-        return json.dumps(error, sort_keys=True)
+        return json.dumps(error, ensure_ascii=False, sort_keys=True)
     observation = observe_plugin_tool_call(
         "omh_route_answer", _without_message(args), _without_message(kwargs)
     )
@@ -395,10 +396,13 @@ def _verify_digest(args: dict[str, Any]) -> tuple[bool, str, bool, dict[str, Any
         # invisible to the install. `loop_bridge` catches the pair for the
         # same reason.
         return False, "unavailable_without_package_backend", False, None
+    # The question was built with this home's turned-off families taken out,
+    # so it is re-derived the same way or its digest can never match.
+    disabled = disabled_skill_families(runtime_paths.plugin_home(args.get("omh_home"))) or None
     found = False
     for limit in range(1, MAX_CANDIDATES + 1):
         try:
-            route = route_chat_message(message, source=source, limit=limit)
+            route = route_chat_message(message, source=source, limit=limit, disabled_skills=disabled)
         except (ValueError, KeyError):
             # An unsupported source or a message the router refuses is the
             # caller's input, not a verdict about the digest.
@@ -432,4 +436,4 @@ def _result(
         payload["error"] = error
     if digest_verification:
         payload["digest_verification"] = digest_verification
-    return json.dumps(attach_public_observation(payload, observation), sort_keys=True)
+    return json.dumps(attach_public_observation(payload, observation), ensure_ascii=False, sort_keys=True)

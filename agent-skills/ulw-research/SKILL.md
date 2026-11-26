@@ -1,6 +1,6 @@
 ---
 name: "ulw-research"
-description: "[omh] Deep dive before a decision: deep research engine - grounding for specs and decisions: study open-source reference implementations with pinned refs, gather live web evidence with citation discipline, verify contested claims, and distill a decision-grounding dossier that planning consumes; for a decision brief use research-brief, for upstream guidance use web-research. Use when the user says: research plan, literature review, research literature, review recent papers, deep research, deep-research, exhaustive research, saturation research."
+description: "[omh] Deep dive before a decision: deep research engine - grounding…"
 license: MIT
 metadata:
   hermes:
@@ -17,7 +17,7 @@ This is an OMH `research` workflow skill, projected for Agent Skills hosts (Clau
 
 ## Why This Exists
 
-`research` exists to make the host a careful research engine: it routes research demands to source-backed evidence gathering - from live web citations to studied reference implementations - verifies contested claims, and distills decision-grounding output so planning starts from evidence instead of guesses.
+Read `references/details.md` first.
 
 ## First Steps
 
@@ -25,35 +25,15 @@ This is an OMH `research` workflow skill, projected for Agent Skills hosts (Clau
 
 ## Do Not Use When
 
-- The user asks for a full plan-to-PR delivery cycle; use `ulw-work` (its `delivery_boundary` capability) or a planning workflow after research instead.
-- The request is purely local repo inspection with no external, current, citation, or source-comparison need.
-- The study target is this repository itself rather than external references; use `omh-codebase-onboarding`.
-- The user needs coding execution, review, CI, or merge evidence rather than research synthesis.
-- The requested output is a typed candidate list or acquisition status without factual synthesis; use `omh-source-finder`.
-- The user needs a market, customer, or pricing decision brief with evidence-versus-inference treatment; use `omh-research-brief`.
-- The user asks for recurring monitoring, a source inbox, or Scout/Analyst/Briefer operations.
-- One cited retrieval round settles the question and no reference implementation needs reading; use `omh-web-research`.
+Read `references/details.md` first.
 
 ## Examples
 
-Good example:
-
-- Prompt: 딥리서치로 다른 오픈소스 구현들을 깊게 보고 스펙 잡기 전에 근거를 만들어줘.
-- Expected behavior: Run the Hermes research lane at depth: decompose axes, study the most relevant reference implementations with pinned refs, verify contested claims, then distill a decision-grounding dossier for the planning step.
-- Why: The user explicitly asked for deep pre-spec grounding built on other open-source implementations.
-
-Bad example:
-
-- Prompt: 이 레포 코드 구조만 파악해줘.
-- Expected behavior: Route to `codebase-onboarding` because the study target is this repository, not external sources or reference implementations.
-- Why: Local repo orientation needs no external evidence gathering or claim verification.
+Read `references/details.md` first.
 
 ## Completion Checklist
 
-- The research question, source boundaries, recency assumptions, and confidence level are named.
-- Observed sources, inference, synthesis, and unresolved retrieval gaps are separated.
-- Follow-up planning or handoff uses the research summary without calling it execution evidence.
-- When a human briefing was written, the citation check is reported from an observed ledger verify run that cited at least one source, or as `not_observed`; it never stands in for the contested-claim gate.
+Read `references/details.md` first.
 
 ## Recovery Notes
 
@@ -62,7 +42,7 @@ Bad example:
 - If no archive access exists or the capture provider's paid authority is exhausted, record a temporal retrieval gap with no network action and keep the as-of claim in the annex; never substitute the current page for it.
 - If the evidence stays thin or contested, lower the stated confidence and keep the unresolved claims in the annex rather than flattening them.
 - If leads keep expanding past the declared budget, stop, record open leads in the dossier, and ask whether to extend the budget.
-- If enough evidence already exists and the real request is planning, hand off to ralplan with the recorded dossier.
+- If enough evidence already exists and the real request is planning, hand off to `ulw-plan` with the recorded dossier.
 - If the audience answer arrives after retrieval started, keep the evidence and re-render rather than re-running: the dossier feeds both branches.
 
 
@@ -71,7 +51,7 @@ Bad example:
 
 Use for research before planning, deciding, or handoff - from current web evidence and citations to exhaustive grounding with studied reference implementations and verified contested claims.
 
-    Strong routing signals: `research plan`, `literature review`, `research literature`, `review recent papers`, `deep research`, `deep-research`, `exhaustive research`, `saturation research`, `pre-spec research`, `research before spec`, `research before planning`, `reference implementation`, `reference implementations`, `reference implementation study`, `prior art`, `prior art research`, `study existing implementations`, `comparable implementations`, `compare open source implementations`, `decision-grounding research`, `autoresearch-goal`, `research goal`, `durable research`, `critic research`, `ディープリサーチ`, `深く調査`, `出典付きで調査`, `OSS実装を調査`, `조사`, `근거`, `고객 피드백`, `문헌 검토`, `논문들 검토`, `딥리서치`, `딥 리서치`, `심층 리서치`, `레퍼런스 구현`, `오픈소스 깊게 참고`, `深度调研`, `深入调研`, `带出处的调研`, `调研开源实现`, `lakukan riset mendalam`, `teliti implementasi referensi open source`, `buat tinjauan literatur`, `bandingkan implementasi OSS sebelum menyusun spesifikasi`, `bantu riset teknis secara menyeluruh`, `verifikasi klaim teknis dari berbagai sumber`, `tiến hành nghiên cứu chuyên sâu`, `nghiên cứu các triển khai mã nguồn mở tham khảo`, `lập tổng quan tài liệu`, `so sánh các triển khai OSS trước khi xây dựng đặc tả`, `giúp nghiên cứu kỹ thuật toàn diện`, `kiểm chứng các tuyên bố kỹ thuật từ nhiều nguồn`
+    Strong routing signals: `research plan`, `literature review`, `research literature`, `review recent papers`; all of them in `references/details.md`.
 
 ## Catalog Metadata
 
@@ -82,7 +62,7 @@ Reasoning demand: `standard`
 
 Quality bar:
 
-- Ask for the research question, source boundaries, freshness, jurisdiction, and version assumptions before retrieval.
+- Ask for the research question, source boundaries, freshness, jurisdiction, and version assumptions before retrieval. When another workflow or a lane that cannot ask called you, take audience = coding agent, skip the format and language questions, use the caller's stated question and depth, take the open web and the caller's repository as source boundaries, current freshness, and no stated jurisdiction or version, and record each defaulted input in the dossier `scope` as `defaulted: <why>`; ask only when a human is in the loop.
 - Ask who the output is for before retrieval and never infer it: a human reader gets a briefing document, a coding agent gets the dense handoff of findings, exact symbols, and file paths. The answer changes what the run records, not only how it is written up.
 - On the human branch ask the output format (markdown, a print-ready page, or both) and the output language before writing, then hold the document to `references/briefing-format.md` - noun-phrase titles carrying a role label from its closed vocabulary, cause before effect, terms defined at first use, figures drawn in code blocks, and the fixed chapter-and-appendix structure.
 - Keep the coding-agent branch dense: findings, exact symbols, file paths, and the plan-feed block, with no narrative framing and no briefing structure.
@@ -90,10 +70,10 @@ Quality bar:
 - Revise the search plan when new evidence exposes a gap or contradiction instead of stopping at the first pass.
 - Record contested claims with two independent original groups/domains, primary support and an observed counter-search, or keep them unresolved; use `references/evidence-records.md` for records. Agent/operator validation: `python -m omh.workflows.research_dossier <json-file>`.
 - Separate direct evidence, citation links, retrieval dates, inference, confidence, and residual uncertainty.
-- When Hermes' bundled `grounded-citations` skill is available, load it and register each source in its ledger when it is retrieved (`scripts/sources.py add`). Keep the run's ledger in a file of its own, passed as `--ledger <path>` before the subcommand on every call: the default ledger is shared by the whole profile, and another run's reset rebinds its ids. Use parent-only serialized writes: lanes return observed source entries and quote refs; the parent registers URLs, attaches quotes, and remaps lane ids before drafting. Lanes never write the shared ledger. When a human briefing is written, report the citation check from a run, or as `not_observed`: the exit status of `sources.py verify <draft>` is the observed check - `0` is a pass and any other status is not - and `verify --evidence` also fails a draft whose cited source carries no verbatim quote. An exit `0` whose `info: stats:` line reads `0 distinct source(s) cited` checked nothing and is reported as `not_observed`. It is a citation check, not fact verification, and it never stands in for the contested-claim gate. Without the skill, keep each source's URL and retrieval date in the research notes and report the citation check as `not_observed`.
+- When Hermes' bundled `grounded-citations` skill is available, load it and register each source in its ledger when it is retrieved (`scripts/sources.py add`). Keep the run's ledger in a file of its own, passed as `--ledger <path>` before the subcommand on every call: the default ledger is shared by the whole profile, and another run's reset rebinds its ids. Use parent-only serialized writes: lanes return observed source entries and quote refs; the parent registers URLs, attaches quotes, and remaps lane ids before drafting. Lanes never write the shared ledger. When a human briefing is written, report the citation check from a run, or as `not_observed`: the exit status of `sources.py verify <draft>` is the observed check - `0` is a pass and any other status is not - and `verify --evidence` also fails a draft whose cited source carries no verbatim quote. An exit `0` whose `info: stats:` line reads `0 distinct source(s) cited` checked nothing and is reported as `not_observed`. It is a citation check, not fact verification, and it never stands in for the contested-claim gate. After that verify, run `omh research receipts verify --citations <ledger> --draft <draft>` and report its fetched coverage from the run, or as `not_observed`; a receipt proves only that the page was opened in this session tree, never that it supports the claim. Without the skill, keep each source's URL and retrieval date in the research notes and report the citation check as `not_observed`.
 - Name retrieval gaps when Hermes or the wrapper cannot access the web.
 - For AI or usability research, separate target-user/task assumptions, measured or reported usability dimensions, and generalizability limits from the evidence.
-- Decompose the question into orthogonal research axes and disambiguate named entities before any deep reading.
+- Decompose the question into orthogonal research axes and disambiguate named entities before any deep reading. Before answering from a source, confirm it studies the exact entity the question names; a different name is a different entity unless a source says they are the same, so a source on a related one is a lead, not an answer.
 - Fan out one lane per research axis when delegation is available; merge returned leads between waves, with parent-only shared citation writes. Otherwise run lanes sequentially under the same contract.
 - Study reference implementations directly: read the core modules of the most relevant open-source repos, pin the exact version or commit, and record mechanism, tradeoffs, and license per reference.
 - Track axes, coverage, novel evidence and open leads in `research_progress/v1`; budget exhaustion or interruption stays partial, never saturation.
@@ -108,17 +88,7 @@ Quality bar:
 
 Required inputs:
 
-- research question
-- output audience - a human reader or a coding agent - asked before retrieval and never inferred
-- output format when the reader is human - markdown, a print-ready page, or both
-- output language when the reader is human - declared, never inferred from the request
-- target user/task if usability matters
-- usability/quality dimension if applicable
-- source boundaries
-- candidate reference implementations or repos when relevant
-- declared depth or wave budget when exhaustive grounding is requested - never inferred from phrasing
-- freshness, jurisdiction, or version constraints
-- requested as-of date or interval when the question is point-in-time
+Read `references/details.md` first.
 
 Expected outputs:
 
@@ -136,7 +106,7 @@ Expected outputs:
 
 Artifact expectations:
 
-- research notes with source URLs, retrieval dates, source-quality notes, and per-reference mechanism, tradeoff, license, and pinned-ref notes when the wrapper captures them
+Read `references/details.md` first.
 
 Safety rules:
 

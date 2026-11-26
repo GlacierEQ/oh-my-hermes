@@ -39,6 +39,10 @@ When several exist, keep one source and point the others at it, so two files can
 4. **Pitfalls**: each entry names the symptom, the cause, and what it cost, so a reader can tell a scar from a preference.
 5. **Conventions** the code cannot show: branch names, commit trailers, the language of the text.
 
+**Size.** Hermes truncates a project context file past 20,000 characters by default (the cap rises with the model's context window): it keeps the first 70% and the last 20% and drops the middle, warning in the log and the chat status line and leaving a marker that says the middle was omitted. After writing, tell the owner in your reply (not in the file) whether the file is under 20,000 characters. If it is over, keep Build and test and Gates first, shorten the pitfalls, and move long reference text into a linked document.
+
+**Overlap.** If a hand-written section outside the region already states a command or fact the region would, do not repeat it: list the overlap in `instruction_file_inventory/v1` and ask the owner whether the region links to it or the hand-written text moves in. Two copies of one command can disagree.
+
 ## 4. What never goes in
 
 | Tempting line | Why it drifts | Write instead |
@@ -47,6 +51,7 @@ When several exist, keep one source and point the others at it, so two files can
 | "the router is at line 212 of `chat.py`" | any edit above it moves it | the symbol name |
 | "we have 134 skills" | the catalog grows | the command or file that counts them |
 | a restatement of what a function does | the code already says it, and the two diverge | nothing |
+| "run the tests before committing", "use clear names" | routine how-to an agent decides anyway, paid for in every session | nothing, unless the project depends on a specific workflow; then that workflow |
 | a secret, a token, or a private hostname | the file is read by every agent and often published | the name of the variable that holds it |
 
 The injected copy of an instruction file is a snapshot of the session start. A long session re-reads the file from the default branch before relying on it.

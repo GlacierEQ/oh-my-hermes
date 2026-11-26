@@ -15,61 +15,25 @@ metadata:
 
 # Live Incident Response
 
-This is a Hermes-native `live-incident-response` workflow skill.
+Required: what is broken right now, and the user-visible behavior that shows it, blast radius: which customers, tenants, or regions, and since when, who is available for commander, operations, communications, and scribe, the signal that decides recovery, and the value that counts as healthy, mitigation state so far: nothing tried, tried and failed, or in place. Output: live_incident_record/v1, declared severity: the level, the observation that set it, and when it last changed, role assignment naming a person per role, or recording the role unfilled, append-only timeline: one entry per observation, action, or decision, each timestamped and attributed, mitigation entries marked temporary or permanent, each with what removes it, recovery verification: the signal, its healthy value, the observed value, and who observed it, customer notice draft plus the prepared paging and status-page requests, kept apart from observed sends.
 
 ## Why This Exists
 
-`live-incident-response` exists because an incident that is still open had no owner. `support-operations` sent an active incident to `reliability-review`, and `reliability-review` reviews incident notes after the fact, so the one skill that saw the request handed it to a postmortem while the outage was still running.
+`live-incident-response` exists because an incident that is still open had no owner. `omh-support-operations` sent an active incident to `omh-reliability-review`, and `omh-reliability-review` reviews incident notes after the fact, so the one skill that saw the request handed it to a postmortem while the outage was still running.
 
-## Do Not Use When
-
-- The incident is over and the request is the postmortem, the SLO or error-budget consequence, or remediation follow-up; use `omh-reliability-review`.
-- The request is one customer's support case needing a reply, a severity opinion, and an escalation path, with no incident declared; use `omh-support-operations`.
-- The request is a release being rolled out and watched -- deploy checklist, health signals, rollback criteria -- and nothing has been declared broken; use `omh-deploy-and-monitor`.
-- The request is to send the page, publish the status-page update, or deliver the customer notice; use `omh-apps`, which records a send as observed only on a returned result.
-- The request asks whether a release is ready across rollout, rollback, and observability, before anything broke; use `omh-production-audit`.
-
-## Examples
-
-Good example:
-
-- Prompt: we have a production outage right now, declare severity and assign an incident commander
-- Expected behavior: Prepare live_incident_record/v1: ask for the user-visible symptom and blast radius, declare the severity with the observation that set it, name the commander and the remaining roles, open the append-only timeline, and state which signal decides recovery.
-- Why: The incident is open, so severity and command are live state rather than findings to review later.
-
-Bad example:
-
-- Prompt: live-incident-response write up the postmortem for last week's outage and what it cost the error budget
-- Expected behavior: Route to `reliability-review`: a closed incident is reviewed, never commanded.
-- Why: Severity, roles, and a running timeline have no subject once the incident is over.
-
-## Completion Checklist
-
-- Severity is declared, carries the observation that set it, and every change appended rather than overwrote the previous level.
-- One commander is named; operations, communications, and scribe each name a person or read unfilled.
-- Every timeline entry is timestamped, attributed, and typed, and no earlier entry was edited.
-- Each mitigation reads temporary or permanent, and a temporary one names what removes it.
-- Recovery cites the named signal, its healthy value, the observed value, and the observer, never the mitigation alone.
-- Paging, status-page, and customer-send entries read prepared unless a connector result was observed.
-
-## Recovery Notes
-
-- If nobody is named commander, ask for one before anything else; an incident without a commander produces opinions instead of decisions.
-- If the recovery signal is not stated, ask which signal and which value counts as healthy before calling anything recovered.
-- If the incident turns out to be closed, hand the postmortem to `reliability-review` and leave this record as the timeline it reads.
-- If a connector call fails or returns nothing, keep the send prepared and name the channel that is unconfirmed instead of assuming delivery.
+Contract: `references/full-contract.md` (examples, sibling boundaries, full artifact details).
 
 ## Workflow Lane
 
-- Current lane: **Automation and status** (`achievements`, `workspace-audit`, `production-audit`, `live-incident-response`, `automation-blueprint`, `github-event-ops`, `github-issue-intake`, `buzz`, `+40 more`) - schedules, status, health, and ops review.
-- If intent belongs to another lane, hand back to `oh-my-hermes` or name the adjacent workflow.
+- Current lane: **Automation and status** - schedules, status, health, and ops review.
+- If intent belongs to another lane, hand back to `omh-routing` or name the adjacent workflow.
 - Shared product, routing, compatibility, and evidence rules: `skill_view(name='omh-routing', file_path='references/skill-common-rail.md')`.
 
 ## When to Use
 
 Use when an incident is open right now and the user needs it commanded: severity declared as live state, a commander and the other roles assigned, an append-only timeline kept, a temporary mitigation recorded as temporary, recovery verified against a named signal, and the customer notice drafted. The incident is still running; once it is closed the work is a review.
 
-    Strong routing signals: `live-incident-response`, `live incident response`, `incident response`, `active incident`, `ongoing incident`, `open incident`, `incident open`, `incident commander`, `incident command`, `incident bridge`, `incident channel`, `incident timeline`, `incident roles`, `declare severity`, `declare an incident`, `declare the incident`, `sev1`, `sev2`, `sev3`, `production outage`, `production is down`, `the site is down`, `service is down`, `we have an outage`, `outage right now`, `war room`, `stop the bleeding`, `temporary mitigation`, `page the on-call`, `page on-call`, `who is the incident commander`, `assign an incident commander`, `verify recovery`
+    Strong routing signals: `live-incident-response`, `live incident response`, `incident response`, `active incident`, `ongoing incident`, `open incident`, `incident open`, `incident commander`, `incident command`, `incident bridge`, `incident channel`, `incident timeline`, `incident roles`, `declare severity`, `declare an incident`, `declare the incident`, `sev1`, `sev2`, `sev3`, `production outage`, `production is down`, `the site is down`, `service is down`, `we have an outage`, `outage right now`, `war room`, `stop the bleeding`, `temporary mitigation`, `page the on-call`, `page on-call`, `who is the incident commander`, `assign an incident commander`, `verify recovery`, `прод упал`, `инцидент на проде`, `продакшн не работает`
 
 ## Catalog Metadata
 
@@ -92,14 +56,6 @@ Handoff policy:
 
 Keep severity, role assignment, the timeline, mitigation records, and recovery verification in Hermes. Paging, status-page updates, and customer sends are `omh-apps` requests recorded as observed only when the connector returns a result; rollbacks, code changes, and infrastructure operations are executor or operator work and reach the timeline as observations, never as claims.
 
-Required inputs:
-
-- what is broken right now, and the user-visible behavior that shows it
-- blast radius: which customers, tenants, or regions, and since when
-- who is available for commander, operations, communications, and scribe
-- the signal that decides recovery, and the value that counts as healthy
-- mitigation state so far: nothing tried, tried and failed, or in place
-
 Expert clarification questions:
 - `who is available for commander, operations, communications, and scribe`
   - English: Who is the incident commander right now, and who else is available to take operations, communications, and scribe?
@@ -108,28 +64,29 @@ Expert clarification questions:
   - English: Which signal decides that this is recovered, and what value does it have to reach?
   - Korean: 어떤 신호로 복구를 판정하며, 그 값이 얼마가 되어야 정상인가요?
 
-Expected outputs:
-
-- live_incident_record/v1
-- declared severity: the level, the observation that set it, and when it last changed
-- role assignment naming a person per role, or recording the role unfilled
-- append-only timeline: one entry per observation, action, or decision, each timestamped and attributed
-- mitigation entries marked temporary or permanent, each with what removes it
-- recovery verification: the signal, its healthy value, the observed value, and who observed it
-- customer notice draft plus the prepared paging and status-page requests, kept apart from observed sends
-
-Artifact expectations:
-
-- live_incident_record/v1 with severity, roles, timeline, mitigations, recovery verification, and a communication ledger
-- every communication entry reads prepared or observed and never both; a correction appends an entry and never edits one
-
 Safety rules:
 
 - Never rewrite or delete a timeline entry. A correction is a new entry naming the entry it corrects, because the timeline is what the review reads afterwards.
-- Do not claim a page was sent, a status page was updated, or a customer was notified; those are `connector-operator` requests, observed only when the connector returns a result.
+- Do not claim a page was sent, a status page was updated, or a customer was notified; those are `omh-apps` requests, observed only when the connector returns a result.
 - Do not call the incident recovered because a mitigation was applied; recovery needs the named signal observed at its healthy value, with the observer recorded.
 - Never leave a temporary mitigation unmarked; record what it changed and what removes it, or it becomes permanent because nobody wrote it down.
 - Never print customer records, credentials, tokens, or connection strings pulled into the timeline as evidence.
+
+## Completion Checklist
+
+- Severity is declared, carries the observation that set it, and every change appended rather than overwrote the previous level.
+- One commander is named; operations, communications, and scribe each name a person (the assistant, when one human holds the rest) or read unfilled.
+- Every timeline entry is timestamped, attributed, and typed, and no earlier entry was edited.
+- Each mitigation reads temporary or permanent, and a temporary one names what removes it.
+- Recovery cites the named signal, its healthy value, the observed value, and the observer, never the mitigation alone.
+- Paging, status-page, and customer-send entries read prepared unless a connector result was observed.
+
+## Recovery Notes
+
+- If nobody is named commander, ask for one before anything else; an incident without a commander produces opinions instead of decisions. With one human, that person is commander and operations.
+- If the recovery signal is not stated, ask which signal and which value counts as healthy before calling anything recovered.
+- If the incident turns out to be closed, hand the postmortem to `omh-reliability-review` and leave this record as the timeline it reads.
+- If a connector call fails or returns nothing, keep the send prepared and name the channel that is unconfirmed instead of assuming delivery.
 
 ## Runtime Evidence
 
@@ -137,7 +94,7 @@ Record observed delegation results; otherwise return `not_available` or `not_obs
 Prepared OMH routing is not execution, review, CI, merge-readiness, or merge evidence.
 - Treat wrapper memory/context summaries as advisory local context, not proof of opaque Hermes memory reads or changes.
 Preserve workflow intent and stop conditions; verify before claiming completion.
-Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only; OMH's record terms (surface, lane, wrapper, handoff, evidence boundary, not_observed) stay in records and tool calls, never in the sentence the user reads unless they ask about one; and when a real unresolved user decision or a useful briefing discussion remains, offer one specific, content-linked question. Completed work needs no question; omit unrelated non-action footers and generic offers to continue.
+Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only. When the requested output is delivered, put any open points inside the result and end with no question or offer; only when the person asked to choose or decide and that choice is still theirs, end with one specific question about it, not a list, a generic offer, or a footer; the shared rail's Reply Language And Host Voice and Turn Ending sections hold the full rule.
 
 Use Hermes-native subagent/delegation features when available: native subagents -> Hermes delegation when available, otherwise sequential lanes.
 

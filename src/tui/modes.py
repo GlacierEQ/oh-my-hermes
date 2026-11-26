@@ -14,10 +14,16 @@ TUI's own flag, apart from what accept shows: a prompt typed while it is on
 goes as `/plan <text>`. When Hermes has approvals off on its own (an off it
 confirmed did not end them, or they were off without the TUI turning them
 on), accept stays shown and Shift+Tab turns only plan on and off, sending
-nothing.
+nothing. `/yolo` sends the same calls, and leaves plan as it is.
+While a yolo call is out, Shift+Tab presses are counted, not dropped: the info
+line shows the mode they lead to at once, dimmed with `…`, and once the call is
+answered the TUI goes to that mode, so two quick presses from normal end in
+plan, never on accept all with approvals off. A call that confirms nothing
+drops the presses after it.
 Ctrl+T and `/effort <level>` set the session's reasoning effort the same way
 (`config.set` with the session id); the level shown is the one Hermes
-confirmed or reports in `session.info`.
+confirmed or reports in `session.info`, and the level asked for shows dimmed
+with `…` until Hermes answers.
 
 The info line under the composer is drawn here too (`info_line`), since its
 left side starts with the mode's label and the agent count starts after it.
@@ -42,27 +48,32 @@ from .width import cell_width, line_width, truncate_line
 # says it too, and `app` imports this module.
 NO_SESSION_NOTICE = "No session is open yet; try again in a moment."
 
-# The info line under the composer. Its left side is the mode's label, the agent count and the keys that matter now;
-# its right side is what `App._info_right` gives (model, context, effort), cut down first when the line is narrow.
-IDLE_HINT = "? for shortcuts"
+# The info line under the composer. Its left side is the badge, the branch, the background-process row, the mode's
+# label, the agent count and the keys that matter now (none in the normal mode between turns: the launch card names
+# `?`); its right side is what `App._info_right` gives (title, model, context, effort), cut down first when the line is
+# narrow (`info_line`).
 # After accept's or plan's label: what Shift+Tab does next. `{cycle}` is CYCLE_WORDS while the key walks normal, accept
 # all and plan; while Hermes has approvals off on its own it turns plan on and off and nothing else (`HERMES_OWN_CYCLE`).
 MODE_HINTS = (" (⇧⇥ {cycle})", "")
 CYCLE_WORDS = "to cycle"
 HERMES_OWN_CYCLE = {MODE_ACCEPT: "plan", MODE_ACCEPT_PLAN: "plan off"}
 EFFORT_KEY = "ctrl+t effort"  # the right side's effort while Hermes has reported none
-STEER_KEY_HINT = "ctrl+enter steer"  # only once the terminal has sent a key in a CSI u or modifyOtherKeys report
-STEER_COMMAND_HINT = "/steer <text> steers"
-QUEUED_KEY_HINT = "↑ edit queued"
 ACCEPT_LABEL = "⏵⏵ accept all on"
 PLAN_LABEL = "⏸ plan mode on"
+# The label of a mode Shift+Tab presses lead to while a yolo call is out: the mode's own words, dimmed, with this
+# after them. Normal has no label, so the way there from accept says approvals come back on.
+PENDING_MARK = "…"
 SHELL_LABEL = "! shell (not sent to the model)"
 # Each label's shorter forms, for a line where what the next key does would not fit beside the full words.
 ACCEPT_LABELS = (ACCEPT_LABEL, "⏵⏵ accept", "⏵⏵")
 PLAN_LABELS = (PLAN_LABEL, "⏸ plan", "⏸")
 SHELL_LABELS = (SHELL_LABEL, "! shell", "!")
+PENDING_NORMAL_LABELS = ("⏵⏵ accept all off", "⏵⏵ off", "⏵⏵")
+# Where each Shift+Tab press goes from a mode, for presses made while a yolo call is out.
+NEXT_MODE = {MODE_NORMAL: MODE_ACCEPT, MODE_ACCEPT: MODE_PLAN, MODE_ACCEPT_PLAN: MODE_PLAN, MODE_PLAN: MODE_NORMAL}
 SHELL_HINT = " · enter runs it in Hermes' shell, 30 s at most"
 INFO_GAP = 3  # the fewest blank cells between the left side and the right side
+BADGE_GAP = 2  # the blank cells between the badge, at the left end, and what follows it
 LABEL_SEPARATOR = " · "  # between the mode's label, the agent count and the hint on the info line
 INFO_SEPARATOR = " · "  # between the right side's fields
 
@@ -78,8 +89,21 @@ ACCEPT_REFUSED_NOTICE = (
     "Hermes did not turn approvals off for this session alone ({}). "
     "Accept all stays off, and the OMH TUI asked Hermes to switch it back off."
 )
+YOLO_UNANSWERED_NOTICE = (
+    "Hermes has not answered the approvals switch in {seconds:g} s, so approvals may be off: accept is shown, "
+    "and Shift+Tab asks Hermes to turn them back on."
+)
 ACCEPT_STUCK_NOTICE = "Hermes did not confirm that this session asks for approvals again ({}). Accept all may still be on."
 # Said once per session, the first time Shift+Tab meets approvals Hermes turned off on its own.
+# What a typed `/yolo` says under its echo once Hermes confirms it; Shift+Tab says nothing, its label is the answer.
+YOLO_ON_NOTICE = (
+    "Approvals off for this session: Hermes runs tools without asking (accept all). "
+    "/yolo or Shift+Tab turns them back on."
+)
+YOLO_OFF_NOTICE = "Approvals back on for this session: Hermes asks before it runs a tool."
+YOLO_ALREADY_NOTICE = "Approvals are already {state} for this session."
+YOLO_USAGE_NOTICE = "/yolo takes on, off or nothing (it then switches): /yolo {arg} changes nothing."
+YOLO_WAIT_NOTICE = "Hermes has not answered the last approvals switch yet; run /yolo again once it has."
 HERMES_APPROVALS_NOTICE = (
     "Hermes itself has approvals off for this session: its approvals.mode is off, it was started with --yolo, "
     "or /yolo turned them off. Accept all stays shown, and Shift+Tab now turns plan mode on and off "
@@ -100,13 +124,25 @@ EFFORT_CYCLE = ("low", "medium", "high", "xhigh", "max")
 # own default or none at all (Hermes 6c61c3e27d `_session_info`: "" = provider default). No level Ctrl+T steps from.
 EFFORT_DEFAULT = "default"
 EFFORT_REFUSED_NOTICE = "Hermes did not set the reasoning effort to {} ({}); it stays as shown."
+EFFORT_SET_NOTICE = "Reasoning effort {} for this session."  # under a typed `/effort <level>`; Ctrl+T says nothing
+# The same, when Hermes said its route clamps the level (`reasoning_effort_wire`): the level that really goes out.
+EFFORT_SENDS_NOTICE = "Reasoning effort {} for this session; this route sends {}."
 
 
-def mode_label(mode: str, theme: Theme, form: int = 0) -> Line:
+def mode_label(mode: str, theme: Theme, form: int = 0, pending: bool = False) -> Line:
     """The mode's own words on the info line: accept and plan have them, both when both are on, normal has none.
 
     `form` picks a shorter form (`ACCEPT_LABELS`, `PLAN_LABELS`, `SHELL_LABELS`): 1 the short words, 2 the glyph.
+    `pending`: Shift+Tab presses lead to `mode` and a yolo call is still out, so it is dimmed and marked
+    `PENDING_MARK`; a pending normal says approvals come back on (`PENDING_NORMAL_LABELS`).
     """
+    if pending:
+        words = {MODE_ACCEPT: ACCEPT_LABELS, MODE_PLAN: PLAN_LABELS, MODE_NORMAL: PENDING_NORMAL_LABELS}
+        if mode == MODE_ACCEPT_PLAN:
+            text = f"{ACCEPT_LABELS[form]}{LABEL_SEPARATOR}{PLAN_LABELS[form]}"
+        else:
+            text = words.get(mode, ("",) * len(ACCEPT_LABELS))[form]
+        return (Span(text + PENDING_MARK, theme.muted),) if text else ()
     accept: Line = (Span(ACCEPT_LABELS[form], replace(theme.mode_accept, bold=True)),)
     plan: Line = (Span(PLAN_LABELS[form], replace(theme.mode_plan, bold=True)),)
     if mode == MODE_ACCEPT_PLAN:
@@ -116,9 +152,21 @@ def mode_label(mode: str, theme: Theme, form: int = 0) -> Line:
     return {MODE_ACCEPT: accept, MODE_PLAN: plan}.get(mode, ())
 
 
-def chip_column(mode: str, theme: Theme) -> int:
+def editing_label(editing: str, mode: str, theme: Theme, form: int = 0, pending: bool = False) -> Line:
+    """The mode's label (`mode_label`), after vim mode's editing mode (`INSERT` or `NORMAL`, "" with vim mode off).
+
+    The editing mode (including NORMAL · SPC while its leader is armed) stays whole as the mode label shortens.
+    """
+    own = mode_label(mode, theme, form, pending)
+    if not editing:
+        return own
+    word: Line = (Span(editing, replace(theme.text, bold=True)),)
+    return (*word, Span(LABEL_SEPARATOR, theme.hint), *own) if own else word
+
+
+def chip_column(mode: str, theme: Theme, editing: str = "", pending: bool = False) -> int:
     """The info line cell the agent count starts on: after the mode's label and a separator, or the line's first."""
-    label = mode_label(mode, theme)
+    label = editing_label(editing, mode, theme, pending=pending)
     return line_width(label) + cell_width(LABEL_SEPARATOR) if label else 0
 
 
@@ -154,7 +202,7 @@ def model_forms(model: str) -> tuple[str, ...]:
 
     A form equal to the one before it is left out, and so is an empty one;
     the third is left out too when what is left starts with a digit, a bare
-    version (`glm-5.3`, `gemini-3.1-pro`).
+    version (`glm-5.3`, `gemini-4-argon`).
     """
     segment = model.rsplit("/", 1)[-1]
     head, dash, rest = segment.partition("-")
@@ -165,23 +213,20 @@ def model_forms(model: str) -> tuple[str, ...]:
     return tuple(forms)
 
 
-def default_hints(mode: str, busy: bool, cycle: str, drafting: bool = False) -> tuple[str, ...]:
-    """The info line's own words when nothing else is said: where Shift+Tab goes from accept or plan, or the idle hint,
-    which is said only while `?` would open the list, between turns with nothing typed (`drafting` False).
+def default_hints(mode: str, cycle: str) -> tuple[str, ...]:
+    """The info line's own words when nothing else is said: where Shift+Tab goes from accept or plan; none in the
+    normal mode (the launch card names `?`, which still opens the list).
 
     Longest first; the last of accept's and plan's is empty, so a narrow line drops it whole.
     """
     if mode in (MODE_ACCEPT, MODE_PLAN, MODE_ACCEPT_PLAN):
         return tuple(form.format(cycle=cycle or CYCLE_WORDS) for form in MODE_HINTS)
-    return (IDLE_HINT,) if mode == MODE_NORMAL and not busy and not drafting else ()
+    return ()
 
 
 def info_line(
     *,
     mode: str,
-    busy: bool,
-    queued: int,
-    keyboard_protocol: bool,
     width: int,
     theme: Theme,
     right: Sequence[Line] = (),
@@ -189,43 +234,70 @@ def info_line(
     say: str | tuple[str, ...] = "",
     say_style: Style | None = None,
     cycle: str = "",
-    drafting: bool = False,
+    badge: Sequence[Line] = (),
+    branch: Sequence[Line] = (),
+    background: Sequence[Line] = (),
+    right_spare: int = 0,
+    editing: str = "",
+    notice: Sequence[Line] = (),
+    pending: bool = False,
 ) -> Line:
-    """The line under the composer: the mode's label (accept, plan, a shell line), the agent count, the keys that
-    matter now, and on the right the first of `right` (forms, longest first) that leaves room for the left side whole.
+    """The one line under the composer. Its left side is `badge` (`[⚚ OMH Native]`), `branch` (the git branch),
+    `background` (the background-process row: `background.running_forms`), the mode's label (accept, plan, a shell
+    line), the agent count and the keys that matter now, `BADGE_GAP` cells between the first four; its right side is
+    the first of `right` (the title, the model, the context, the effort) that leaves room for the left side whole.
+    `badge`, `branch`, `background` and `right` are forms, longest first. `notice` is the update notice's forms,
+    longest first (`v4.0.5 available · omh update`, then `↑ v4.0.5`), said `BADGE_GAP` cells after the badge's first
+    form, the one with the version: the longest only while the rest of the line is whole, the shortest for as long as
+    the version is shown.
+
+    What gives way, in order: the update notice's long form, first, since
+    it is the least live of it all (owner, 2026-11-02), leaving its short
+    form; then the first `right_spare` of the right side's forms (the
+    session's title), then the background-process row (through its forms,
+    then whole), then the rest of the right side (through its forms, then
+    whole), then the badge's version and the notice's short form together
+    (`badge`'s second form), then the branch's name (`branch`'s shorter
+    forms), then
+    the badge (to `[⚚ OMH]`, then `⚚`, then none),
+    then the branch; the label, the agent count and what the next key
+    does (a question's or a picker's way out) keep their words until all
+    of those are gone, and only then shorten. So the row goes before the
+    model, the context and the effort shorten, and a terminal too narrow
+    for those shows none of it.
 
     `chip` is the count of the agents in the view under the line while there
-    are any, drawn from cell `chip_column(mode, theme)` on. `say`, when given, is what the next key
+    are any, after the label. `say`, when given, is what the next key
     will do (a rewind waiting to be sent, Esc's second press, a question's
     keys) and stands in for the hint, in `say_style`; given as forms, longest
-    first. The right side shrinks first: it is the longest of `right` beside
-    which the label, the count and the hint's longest form fit. When none
-    leaves room the left side shortens alone: the first `say` form that fits
-    whole is said, so a narrow line keeps the point rather than the start of
-    the long one, and when none fits beside the label's words the label takes
-    its short words, then its glyph alone, before the last form is cut; any
-    other hint takes its longest form that fits, else its last, cut at the
-    edge, after a label that takes its short words, then its glyph alone,
-    when its own words do not fit. The right side then takes the longest of `right` that fits in what
-    the shortened left side leaves. During a turn the hint names the steer
-    keys, not Esc: the working row offers the interrupt. The label always survives,
-    in some form, and the count after it. Accept and plan say where Shift+Tab
-    goes next (`cycle`; CYCLE_WORDS when not given). `drafting` (the composer
-    holds text) takes the idle hint away.
+    first. The first `say` form that fits whole is said, so a narrow line
+    keeps the point rather than the start of the long one, and when none fits
+    beside the label's words the label takes its short words, then its glyph
+    alone, before the last form is cut; any other hint takes its longest form
+    that fits, else its last, cut at the edge, after a label that takes its
+    short words, then its glyph alone, when its own words do not fit. During
+    a turn the line names no key for the turn: the working row offers the
+    interrupt, and the queue's own row the send-now key. The label always
+    survives, in some form, and the count after it. Accept and plan say where
+    Shift+Tab goes next (`cycle`; CYCLE_WORDS when not given). In the normal
+    mode between turns the left side is the badge and the branch alone.
+
+    `editing` is vim mode's editing mode (`INSERT`, `NORMAL`; "" with vim mode
+    off), said first in the label (`editing_label`), so it lasts as long as
+    the label does and never shortens; in the normal mode it is the label.
+    `pending`: `mode` is where Shift+Tab presses lead while a yolo call is
+    out, drawn dimmed with `PENDING_MARK` (`mode_label`).
     """
     forms = (say,) if isinstance(say, str) else say
     if any(forms):
         hints = tuple(forms)
     elif mode == MODE_SHELL:
         hints = (SHELL_HINT,)
-    elif mode == MODE_NORMAL and busy:
-        keys = [STEER_KEY_HINT if keyboard_protocol else STEER_COMMAND_HINT]
-        hints = (" · ".join(keys + ([QUEUED_KEY_HINT] if queued else [])),)
     else:
-        hints = default_hints(mode, busy, cycle, drafting)
+        hints = default_hints(mode, cycle)
 
     def label_of(form: int) -> Line:
-        own = mode_label(mode, theme, form)
+        own = editing_label(editing, mode, theme, form, pending)
         return (*own, Span(LABEL_SEPARATOR, theme.hint), *chip) if chip and own else chip or own
 
     def placed(texts: Sequence[str], label: Line) -> list[str]:
@@ -236,27 +308,60 @@ def info_line(
             return [LABEL_SEPARATOR + text.removeprefix(LABEL_SEPARATOR).strip() if text else "" for text in texts]
         return list(texts)
 
-    longest = line_width(label_of(0)) + (cell_width(placed(hints, label_of(0))[0]) if hints else 0)
-    shown_right: Line = next((form for form in right if form and longest + INFO_GAP + line_width(form) <= width), ())
-    room = width - (line_width(shown_right) + INFO_GAP if shown_right else 0)
+    whole = line_width(label_of(0)) + (cell_width(placed(hints, label_of(0))[0]) if hints else 0)
+
+    def lead(*parts: Line) -> Line:
+        """The badge, branch and background forms shown, `BADGE_GAP` cells after each but a last one nothing follows."""
+        shown = [part for part in parts if part]
+        gap = Span(" " * BADGE_GAP)
+        joined: Line = ()
+        for index, part in enumerate(shown):
+            joined += (*part, *((gap,) if index < len(shown) - 1 or whole else ()))
+        return joined
+
+    def fits(left: int, side: Line) -> bool:
+        return left + (INFO_GAP + line_width(side) if side else 0) <= width
+
+    badges, branches, rows = list(badge) or [()], list(branch) or [()], list(background) or [()]
+    sides = [*(form for form in right if form), ()]
+    spare = min(right_spare, len(sides) - 1)
+    # The notice's long form only while everything else is whole: it is the first thing to go. Its short form stays
+    # beside the version, and goes with it.
+    said = [form for form in notice if form] if badges[0] else []
+    noticed = (*badges[0], Span(" " * BADGE_GAP), *said[0]) if said else ()
+    versioned = (*badges[0], Span(" " * BADGE_GAP), *said[-1]) if len(said) > 1 else badges[0]
+    tries = [(noticed, branches[0], rows[0], sides[0])] if noticed else []
+    tries += [(versioned, branches[0], rows[0], side) for side in sides[: spare + 1]]
+    tries += [(versioned, branches[0], form, sides[spare]) for form in [*rows[1:], ()]]
+    tries += [(versioned, branches[0], (), side) for side in sides[spare + 1 :]]
+    unversioned = badges[1] if len(badges) > 1 else badges[0]  # the version goes before the branch name is cut
+    tries += [(unversioned, form, (), ()) for form in branches]
+    tries += [(form, branches[-1], (), ()) for form in [*badges[2:], ()]]
+    tries += [((), (), (), ())]
+    shown_badge, shown_branch, shown_row, shown_right = next(
+        (tried for tried in tries if fits(line_width(lead(*tried[:3])) + whole, tried[3])), tries[-1]
+    )
+    front = lead(shown_badge, shown_branch, shown_row)
+    room = width - (line_width(shown_right) + INFO_GAP if shown_right else 0) - line_width(front)
     label = label_of(0)
     hint = ""
     if any(forms):
         for form in range(len(ACCEPT_LABELS)):
             label = label_of(form)
             said = placed(hints, label)
-            fits = [text for text in said if cell_width(text) <= room - line_width(label)]
-            if fits or not mode_label(mode, theme, form):
+            fitting = [text for text in said if cell_width(text) <= room - line_width(label)]
+            if fitting or not mode_label(mode, theme, form, pending):
                 break  # what the next key does outranks the label's words, which shorten while nothing fits
-        hint = fits[0] if fits else said[-1]
+        hint = fitting[0] if fitting else said[-1]
     elif hints:
         label = next((label_of(form) for form in range(len(ACCEPT_LABELS)) if line_width(label_of(form)) <= room),
                      label_of(len(ACCEPT_LABELS) - 1))
         said = placed(hints, label)
         hint = next((text for text in said if cell_width(text) <= max(room - line_width(label), 0)), said[-1])
-    left = truncate_line(label, room) + truncate_line((Span(hint, say_style or theme.hint),), max(room - line_width(label), 0))
+    rest = truncate_line(label, room) + truncate_line((Span(hint, say_style or theme.hint),), max(room - line_width(label), 0))
+    left = truncate_line((*front, *rest), width)
     if not shown_right:
-        shown_right = next((form for form in right if form and line_width(left) + INFO_GAP + line_width(form) <= width), ())
+        shown_right = next((side for side in right if side and fits(line_width(left), side)), ())
     if not shown_right:
         return left
     return (*left, Span(" " * (width - line_width(left) - line_width(shown_right))), *shown_right)
@@ -301,6 +406,17 @@ class ModesMixin:
         return MODE_PLAN if self.plan_mode else MODE_NORMAL
 
     @property
+    def mode_pending(self) -> str:
+        """The mode Shift+Tab presses (or a typed /yolo) lead to while a yolo call is out; "" while none is."""
+        return (self.mode_target or self.mode_asked) if self.mode_request_open else ""
+
+    @property
+    def effort_shown(self) -> str:
+        """The effort the info line names: the level the route sends when Hermes said it clamps the session's effort
+        (`ultra` on a route that sends `max` reads `max`), else the effort itself."""
+        return self.effort_sent if self.effort_sent and self.effort_sent_for == self.effort else self.effort
+
+    @property
     def approvals_off_by_hermes(self) -> bool:
         """Whether approvals are off on Hermes' own, not by the TUI's Shift+Tab: the key then turns plan on and off."""
         return self.approvals_off and not self.yolo_by_tui
@@ -326,6 +442,9 @@ class ModesMixin:
         if isinstance(effort, str):
             self.effort = effort or EFFORT_DEFAULT
             self.effort_said = True
+            wire = info.get(contract.SESSION_INFO_REASONING_EFFORT_WIRE)
+            clamped = isinstance(wire, str) and wire in contract.REASONING_LEVELS and wire != effort
+            self.effort_sent, self.effort_sent_for = (wire, effort) if clamped else ("", "")
         yolo = info.get(contract.SESSION_INFO_YOLO)
         if not isinstance(yolo, bool):
             return
@@ -354,10 +473,13 @@ class ModesMixin:
 
         Approvals Hermes turned off on its own are not the TUI's to turn back
         on: then accept stays shown and the key turns plan on and off, with
-        nothing sent.
+        nothing sent. A press while a yolo call is out steps on from where the
+        presses before it lead (`mode_target`), applied once the call is
+        answered (`_settle_mode_target`).
         """
         if self.mode_request_open:
-            return  # one change at a time: the mode shown is the last one Hermes confirmed
+            self.mode_target = NEXT_MODE.get(self.mode_target or self.mode_asked, MODE_NORMAL)
+            return
         if self.approvals_off_by_hermes:
             self.plan_mode = not self.plan_mode
             self._say_hermes_approvals()
@@ -373,41 +495,69 @@ class ModesMixin:
             self.hermes_approvals_said = True
             self.transcript.add_notice(HERMES_APPROVALS_NOTICE, NOTICE_WARN)
 
-    def _set_yolo(self, on: bool) -> None:
+    def _yolo_command(self, arg: str) -> None:
+        """`/yolo [on|off]`: this session's approvals off or back on, through Shift+Tab's call (`_set_yolo`); alone, it
+        switches. Plan stays as it is, and the outcome is said under the echo."""
+        word = arg.strip().lower()
+        if word not in ("", YOLO_ON, YOLO_OFF):
+            self.transcript.add_notice(YOLO_USAGE_NOTICE.format(arg=arg.strip()), NOTICE_WARN)
+            return
+        if self.mode_request_open:
+            self.transcript.add_notice(YOLO_WAIT_NOTICE, NOTICE_WARN)
+            return
+        on = not self.approvals_off if not word else word == YOLO_ON
+        if on == self.approvals_off:
+            self.transcript.add_notice(YOLO_ALREADY_NOTICE.format(state="off" if on else "on"))
+            return
+        self._set_yolo(on, plan=self.plan_mode, said=True)
+
+    def _set_yolo(self, on: bool, plan: bool = True, said: bool = False) -> None:
         """Ask Hermes to turn this session's approvals off (`on`) or back on; accept, or plan, once it confirms.
 
-        The only caller is Shift+Tab. The call always names the session and
+        Shift+Tab and `/yolo` call it. The call always names the session and
         an explicit value: without a session Hermes would set the switch for
         the whole gateway process, and a blank value toggles whatever it finds.
+        `plan` is the plan flag once an off is confirmed (Shift+Tab's way from
+        accept is plan); `said`: a typed `/yolo`, whose outcome is said.
         """
         if not self.sid:
             self.transcript.add_notice(NO_SESSION_NOTICE, NOTICE_WARN)
             return
         sid = self.sid
         self.mode_request_open = True
+        if on:
+            self.mode_asked = MODE_ACCEPT_PLAN if self.plan_mode else MODE_ACCEPT
+        else:
+            self.mode_asked = MODE_PLAN if plan else MODE_NORMAL
         self.yolo_reported = self.yolo_confirmed_at = None
         self._request(
             "config.set",
             {"key": "yolo", "session_id": sid, "value": YOLO_ON if on else YOLO_OFF},
-            lambda result: self._on_yolo_answer(sid, on, yolo_answer_problem(result, on)),
+            lambda result: self._on_yolo_answer(sid, on, yolo_answer_problem(result, on), plan, said),
             lambda error: self._on_yolo_answer(
-                sid, on, f"{error.get('code')}: {as_text(error.get('message')) or 'refused'}"
+                sid, on, f"{error.get('code')}: {as_text(error.get('message')) or 'refused'}", plan, said
             ),
+            on_expiry=lambda seconds: self._on_yolo_unanswered(sid, seconds),
         )
 
-    def _on_yolo_answer(self, sid: str, on: bool, problem: str) -> bool:
+    def _on_yolo_answer(self, sid: str, on: bool, problem: str, plan: bool = True, said: bool = False) -> bool:
         """Hermes answered a yolo call; `problem` says why the answer confirms nothing ("" when it does).
 
-        A confirmed off moves on to plan. When Hermes still reports approvals
-        off after it, they are Hermes' own: accept stays shown beside plan.
+        A confirmed off moves on to plan (`plan`). When Hermes still reports
+        approvals off after it, they are Hermes' own: accept stays shown
+        beside plan. Shift+Tab presses made meanwhile then lead on from here
+        (`_settle_mode_target`); one that confirms nothing drops them.
         """
         if sid != self.sid:
             return True  # that session was left meanwhile, and its switch with it
         self.mode_request_open = False
+        if problem:
+            self.mode_target = None
         if problem and on:
             # Whatever Hermes did, it was not "this session only": show accept off and ask for it explicitly.
             self.approvals_off = False
             self.mode_request_open = True  # the switch-back is a yolo call out too: possibly on until it is answered
+            self.mode_asked = self.mode
             self.transcript.add_notice(ACCEPT_REFUSED_NOTICE.format(problem), NOTICE_ERROR)
             self._request(
                 "config.set",
@@ -416,17 +566,49 @@ class ModesMixin:
                 lambda error: self._on_switched_back(
                     sid, f"{error.get('code')}: {as_text(error.get('message')) or 'refused'}"
                 ),
+                on_expiry=lambda seconds: self._on_yolo_unanswered(sid, seconds),
             )
         elif problem:
             self.transcript.add_notice(ACCEPT_STUCK_NOTICE.format(problem), NOTICE_ERROR)  # accept stays shown
         elif on:
             self.approvals_off = self.yolo_by_tui = True
             self.yolo_confirmed_at = self.clock()
+            if said:
+                self.transcript.add_notice(YOLO_ON_NOTICE, NOTICE_WARN)
         else:
-            self.yolo_by_tui, self.plan_mode, self.approvals_off = False, True, bool(self.yolo_reported)
-            if self.approvals_off:
+            self.yolo_by_tui, self.plan_mode, self.approvals_off = False, plan, bool(self.yolo_reported)
+            if self.approvals_off and said:
+                self.hermes_approvals_said = True
+                self.transcript.add_notice(HERMES_APPROVALS_NOTICE, NOTICE_WARN)
+            elif self.approvals_off:
                 self._say_hermes_approvals()
+            elif said:
+                self.transcript.add_notice(YOLO_OFF_NOTICE)
+        self._settle_mode_target()
         return True
+
+    def _settle_mode_target(self) -> None:
+        """No yolo call is out any more: go to the mode the Shift+Tab presses made meanwhile lead to, if any.
+
+        Plan is the TUI's own flag and is set at once; approvals off or back
+        on is one more yolo call, whose own answer settles presses made
+        during it the same way.
+        """
+        target, self.mode_target = self.mode_target, None
+        if target is None or self.mode_request_open or target == self.mode:
+            return
+        plan = target in (MODE_PLAN, MODE_ACCEPT_PLAN)
+        if self.approvals_off_by_hermes:
+            self.plan_mode = plan  # Hermes' own approvals: the key turns plan on and off and sends nothing
+            return
+        off = target in (MODE_ACCEPT, MODE_ACCEPT_PLAN)
+        if off == self.approvals_off:
+            self.plan_mode = plan
+        elif off:
+            self.plan_mode = plan
+            self._set_yolo(True)
+        else:
+            self._set_yolo(False, plan=plan)
 
     def _on_switched_back(self, sid: str, problem: str) -> bool:
         """The explicit off after an on Hermes did not confirm; `problem` says why this answer confirms nothing either.
@@ -437,15 +619,35 @@ class ModesMixin:
         normal shown with them off would hide that Hermes asks nothing.
         An answer for a session already left changes nothing and says
         nothing: leaving it counted the switch-back as possibly on and sent
-        an off of its own, whose answer reports for it.
+        an off of its own, whose answer reports for it. Shift+Tab presses made
+        while it was out (shown dimmed) are applied once it is confirmed, and
+        dropped when it is not.
         """
         if sid != self.sid:
             return True
         self.mode_request_open = False
         if problem:
+            self.mode_target = None  # approvals may be off: presses made meanwhile are not acted on
             self.transcript.add_notice(SWITCH_BACK_FAILED_NOTICE.format(problem), NOTICE_ERROR)
             self.approvals_off = self.yolo_by_tui = True
+        else:
+            self._settle_mode_target()  # presses made while it was out, shown dimmed, lead on from here
         return True
+
+    def _on_yolo_unanswered(self, sid: str, seconds: float) -> None:
+        """A yolo call (on, off or the switch-back) Hermes did not answer in `seconds`; its late answer is not read.
+
+        As for a switch-back that confirms nothing (`_on_switched_back`),
+        approvals may be off, so accept is shown as the TUI's own: Shift+Tab
+        then sends an explicit off, and leaving the session sends one. For a
+        session already left nothing changes: leaving it sent an off of its own.
+        """
+        if sid != self.sid:
+            return
+        self.mode_request_open = False
+        self.mode_target = None
+        self.approvals_off = self.yolo_by_tui = True
+        self.transcript.add_notice(YOLO_UNANSWERED_NOTICE.format(seconds=seconds), NOTICE_WARN)
 
     # ── reasoning effort ──
 
@@ -464,7 +666,7 @@ class ModesMixin:
         level = arg.strip().lower()
         levels = ", ".join(contract.REASONING_LEVELS)
         if level in contract.REASONING_LEVELS:
-            self._set_effort(level)
+            self._set_effort(level, said=True)
         elif level:
             self.transcript.add_notice(f"No reasoning effort named {arg}. Levels: {levels}.", NOTICE_WARN)
         else:
@@ -472,25 +674,37 @@ class ModesMixin:
                 now = "Hermes sets no reasoning effort for this session, so the provider's default applies."
             else:
                 now = f"Reasoning effort {self.effort}." if self.effort else "Hermes reports no reasoning effort."
+                if self.effort_shown != self.effort:
+                    now = f"Reasoning effort {self.effort}; this route sends {self.effort_shown}."
             self.transcript.add_notice(f"{now} /effort <level> sets it for this session. Levels: {levels}.")
 
-    def _set_effort(self, level: str) -> None:
-        """Ask Hermes for `level` in this session; the info line changes once Hermes confirms it."""
+    def _set_effort(self, level: str, said: bool = False) -> None:
+        """Ask Hermes for `level` in this session; the info line shows it dimmed until Hermes confirms it, and a typed
+        command (`said`) says the outcome under its echo."""
         if not self.sid:
             self.transcript.add_notice(NO_SESSION_NOTICE, NOTICE_WARN)
             return
         sid = self.sid
         self.effort_asked = level
+        echo = self.transcript.command
         self._request(
             "config.set",
             {"key": "reasoning", "session_id": sid, "value": level},
-            lambda result: self._on_effort_answer(sid, level, result.get("value")),
+            lambda result: self._on_effort_answer(sid, level, result.get("value"), said=said),
             lambda error: self._on_effort_answer(
                 sid, level, None, f"{error.get('code')}: {as_text(error.get('message')) or 'refused'}"
             ),
+            on_expiry=lambda seconds: self._on_effort_unanswered(sid, level, echo, seconds),
         )
 
-    def _on_effort_answer(self, sid: str, level: str, value: object, refusal: str = "") -> bool:
+    def _on_effort_unanswered(self, sid: str, level: str, echo: object, seconds: float) -> None:
+        """An effort call Hermes did not answer: the level stops showing as asked for (the line shows the one Hermes
+        last confirmed), and the notice is any unanswered call's."""
+        if sid == self.sid and self.effort_asked == level:
+            self.effort_asked = ""
+        self._say_unanswered(echo, "config.set", seconds)
+
+    def _on_effort_answer(self, sid: str, level: str, value: object, refusal: str = "", said: bool = False) -> bool:
         """Hermes answered an effort call: its `value` is the level it set, or `refusal` says why it set none."""
         if sid != self.sid:
             return True  # that session was left meanwhile
@@ -502,6 +716,11 @@ class ModesMixin:
             self.transcript.add_notice(EFFORT_REFUSED_NOTICE.format(level, refusal), NOTICE_WARN)
         else:
             self.effort, self.effort_said = level, True
+            if said:  # Hermes' session.info for the change comes before its answer, so the route's word is known
+                sent = self.effort_shown
+                self.transcript.add_notice(
+                    EFFORT_SENDS_NOTICE.format(level, sent) if sent != level else EFFORT_SET_NOTICE.format(level)
+                )
         return True
 
     def _turn_off_yolo_set_here(self, sid: str) -> None:

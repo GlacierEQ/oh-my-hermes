@@ -20,12 +20,14 @@ from ..goal_ledger import (
     slop_cleanup_arm_needed,
 )
 from ..hashutil import sha256_text
-from ..local_store import ensure_dir, read_json_object, utc_now
+from ..coding.executors import canonical_executor_profile
+from ..local_store import ensure_dir, read_runtime_record, utc_now
 from ..system.record_revision import DuplicateMutationReplay, guarded_record_update, revision_field_errors
 from ..loopability import LOOPABILITY_ASSESSMENT_SCHEMA, assess_loopability, validate_loopability_assessment
 from ..paths import OmhPaths
 from ..system.security_posture import resolve_security_posture, strict_override
 from .goal_quality_coaching import UPSTREAM_GOAL_DEFAULT_MAX_TURNS
+from .loop_command import LOOP_COMMAND_RE, OMH_LOOP_COMMAND_RE, explicit_loop_invocation_signal
 from ..coding.executor_capability_snapshots import JsonValue
 from .loop_driver_contract import driver_status, select_driver, validate_driver_cycle, validate_driver_history
 from .loop_driver_updates import observe_external_driver
@@ -464,8 +466,6 @@ LOOP_EXECUTOR_OPTIONS = (
 )
 LOOP_EXECUTOR_OPTION_IDS = tuple(str(option["id"]) for option in LOOP_EXECUTOR_OPTIONS)
 STORAGE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-LOOP_COMMAND_RE = re.compile(r"^(?:\./|/|\$)?loop(?:\s|$)")
-OMH_LOOP_COMMAND_RE = re.compile(r"^omh\s+(?:loop|루프)(?:\s|$)")
 
 LOOP_CORE_ROLES = (
     {
@@ -753,12 +753,14 @@ def _started_loopability_assessment(assessment: dict[str, Any], goal_reframe: st
 
 
 def read_loop_cycle(paths: OmhPaths, loop_id: str) -> dict[str, Any]:
-    data = read_json_object(loop_cycle_path(paths, loop_id))
+    data = read_runtime_record(loop_cycle_path(paths, loop_id))
     if data is None:
         raise FileNotFoundError(loop_cycle_path(paths, loop_id))
     validation = validate_loop_cycle(data)
     if not validation["ok"]:
         raise ValueError("; ".join(validation["errors"]))
+    if isinstance(data.get("runtime"), dict):
+        data["runtime"].setdefault("replans", 0)
     return data
 
 
@@ -767,7 +769,7 @@ def list_loop_cycles(paths: OmhPaths) -> list[dict[str, Any]]:
         return []
     cycles: list[dict[str, Any]] = []
     for loop_json in sorted(paths.loops_dir.glob("*/cycle.json")):
-        data = read_json_object(loop_json)
+        data = read_runtime_record(loop_json)
         if isinstance(data, dict):
             cycles.append(data)
     return cycles
@@ -863,17 +865,6 @@ def _loop_role_pipeline() -> list[dict[str, Any]]:
 
 def _explicit_loop_invocation(goal_summary: str) -> bool:
     return explicit_loop_invocation_signal(goal_summary)
-
-
-def explicit_loop_invocation_signal(goal_summary: str) -> bool:
-    normalized = goal_summary.strip().casefold()
-    if not normalized:
-        return False
-    if LOOP_COMMAND_RE.match(normalized):
-        return True
-    if OMH_LOOP_COMMAND_RE.match(normalized):
-        return True
-    return False
 
 
 def _loop_invocation_payload(goal_summary: str) -> str:
@@ -1040,7 +1031,7 @@ def update_loop_permission(
 ) -> dict[str, Any]:
     requested_allow = _valid_actions(allow_actions or [])
     requested_forbid = _valid_actions(forbid_actions or [])
-    requested_executors = _safe_list(allowed_executors or [], limit=120)
+    requested_executors = [canonical_executor_profile(item) for item in _safe_list(allowed_executors or [], limit=120)]
     arm = {"goal_id": ""}
 
     def mutate(cycle: dict[str, Any]) -> dict[str, Any]:
@@ -1051,7 +1042,7 @@ def update_loop_permission(
         existing_forbidden = _string_set(current.get("forbidden_actions", []))
         forbidden = sorted(existing_forbidden | requested_forbid)
         allowed = sorted((existing_allowed | requested_allow) - set(forbidden))
-        existing_executors = _string_set(current.get("allowed_executors", []))
+        existing_executors = {canonical_executor_profile(item) for item in _string_set(current.get("allowed_executors", []))}
         cycle["authority_envelope"] = build_authority_envelope(
             permission_profile="custom",
             allowed_executors=sorted(existing_executors | set(requested_executors)),
@@ -1148,7 +1139,7 @@ def assess_loop_stop_ladder(
         _stop_rung_explicit_cancel(goal_linked, goal_status),
         _stop_rung_rate_limit(executor_profile, limit_signal),
         _stop_rung_auth_failure(executor_profile, planned_action, auth_signal),
-        _stop_rung_no_progress(goal_linked, no_progress_ticks, no_progress_cap),
+        _stop_rung_no_progress(goal_linked, no_progress_ticks, no_progress_cap, int(runtime["replans"])),
     ]
 
     rungs: list[dict[str, Any]] = []
@@ -1181,7 +1172,11 @@ def assess_loop_stop_ladder(
         "executor_profile": executor_profile,
         "planned_action": str(planned_action),
         "detail": detail,
-        "next_action": _LOOP_STOP_NEXT_ACTIONS.get(stop_reason, ""),
+        "next_action": (
+            "replan_stuck_loop_once"
+            if stop_reason == "no_progress_cap" and runtime["replans"] == 0
+            else _LOOP_STOP_NEXT_ACTIONS.get(stop_reason, "")
+        ),
         "ledger_entry_count": ledger_entry_count if goal_linked else previous_count,
         "no_progress_ticks": no_progress_ticks,
         "no_progress_cap": no_progress_cap,
@@ -1253,7 +1248,10 @@ def _stop_rung_auth_failure(
 
 
 def _stop_rung_no_progress(
-    goal_linked: bool, no_progress_ticks: int, no_progress_cap: int = LOOP_NO_PROGRESS_TICK_CAP
+    goal_linked: bool,
+    no_progress_ticks: int,
+    no_progress_cap: int = LOOP_NO_PROGRESS_TICK_CAP,
+    replans: int = 0,
 ) -> tuple[str, str]:
     if not goal_linked:
         return ("not_applicable", "Without a linked goal ledger there are no records to key progress to.")
@@ -1261,7 +1259,12 @@ def _stop_rung_no_progress(
         return (
             "fired",
             f"{no_progress_ticks} consecutive ticks wrote no new goal-ledger record "
-            f"(cap {no_progress_cap}).",
+            f"(cap {no_progress_cap})."
+            + (
+                " Re-plan once from the goal ledger and the recorded failures, choose a different "
+                "approach, and continue."
+                if replans == 0 else ""
+            ),
         )
     return (
         "clear",
@@ -1403,8 +1406,10 @@ def tick_loop_runtime(
         ladder = read_loop_stop_ladder(
             paths, cycle, planned_action=str(plan["planned_action"]), home=home
         )
+        runtime = _runtime_state(cycle.get("runtime"))
+        if int(ladder["ledger_entry_count"]) > int(runtime["ledger_entry_count"]):
+            runtime["replans"] = 0
         if ladder["stop"]:
-            runtime = _runtime_state(cycle.get("runtime"))
             runtime["ledger_entry_count"] = int(ladder["ledger_entry_count"])
             runtime["no_progress_ticks"] = int(ladder["no_progress_ticks"])
             runtime["last_stop_reason"] = str(ladder["stop_reason"])
@@ -1412,6 +1417,9 @@ def tick_loop_runtime(
             runtime["stop_ladder"] = ladder
             if ladder["stop_reason"] == "no_progress_cap":
                 runtime["stuck_marker"] = _loop_stuck_marker(ladder)
+                if ladder["next_action"] == "replan_stuck_loop_once":
+                    runtime["replans"] += 1
+                    runtime["no_progress_ticks"] = 0
             cycle["runtime"] = runtime
             cycle["next_action"] = str(ladder["next_action"])
             cycle["updated_at"] = utc_now()
@@ -1430,7 +1438,6 @@ def tick_loop_runtime(
             workflow_pattern=workflow_pattern,
             note=note,
         )
-        runtime = _runtime_state(cycle.get("runtime"))
         runtime["heartbeat_count"] = int(runtime.get("heartbeat_count", 0)) + 1
         runtime["last_tick_at"] = queue_item["created_at"]
         runtime["last_trigger"] = queue_item["trigger"]
@@ -2562,7 +2569,8 @@ def build_authority_envelope(
     allowed.update(_valid_actions(allow_actions or []))
     allowed.difference_update(explicitly_forbidden)
     blocked = sorted(set(LOOP_ACTIONS) - allowed)
-    executors = _safe_list(allowed_executors or [], limit=120)
+    # A profile id an older release used is stored as the current one.
+    executors = list(dict.fromkeys(canonical_executor_profile(item) for item in _safe_list(allowed_executors or [], limit=120)))
     return {
         "permission_profile": permission_profile,
         "allowed_actions": sorted(allowed),
@@ -3184,6 +3192,8 @@ def _runtime_state(value: object | None = None) -> dict[str, Any]:
         # keys the cap to records written rather than ticks attempted.
         "ledger_entry_count": _non_negative_count(runtime.get("ledger_entry_count")),
         "no_progress_ticks": _non_negative_count(runtime.get("no_progress_ticks")),
+        # One re-plan per stalled window; a new ledger record rearms it.
+        "replans": _non_negative_count(runtime.get("replans")),
         "last_stop_reason": str(runtime.get("last_stop_reason", "") or "none"),
         "last_stop_at": str(runtime.get("last_stop_at", "")),
         "queue": queue,
@@ -3750,6 +3760,7 @@ def _runtime_summary(cycle: dict[str, Any]) -> dict[str, Any]:
         "observed_queue_count": sum(1 for item in queue if item.get("status") == "observed" and item.get("observed") is True),
         "last_stop_reason": runtime["last_stop_reason"],
         "no_progress_ticks": runtime["no_progress_ticks"],
+        "replans": runtime["replans"],
         "no_progress_cap": LOOP_NO_PROGRESS_TICK_CAP,
         "claim_boundary": _runtime_claim_boundary(),
     }
@@ -4534,7 +4545,7 @@ def _validate_runtime(runtime: object) -> list[str]:
         return ["runtime must be an object"]
     if runtime.get("schema_version") != LOOP_RUNTIME_SCHEMA:
         errors.append(f"runtime.schema_version must be {LOOP_RUNTIME_SCHEMA}")
-    for key in ("heartbeat_count", "ledger_entry_count", "no_progress_ticks"):
+    for key in ("heartbeat_count", "ledger_entry_count", "no_progress_ticks", "replans"):
         count = runtime.get(key)
         if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count < 0):
             errors.append(f"runtime.{key} must be a non-negative integer")

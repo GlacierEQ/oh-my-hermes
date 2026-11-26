@@ -1,7 +1,7 @@
 # OMH Skill Common Rail
 
 Every generated OMH workflow skill shares this policy. It is kept here once instead of
-inside each `SKILL.md` so an install does not pay the same bytes 88 times per turn.
+inside each `SKILL.md` so an install does not pay the same bytes in every skill.
 Each workflow skill still states its own harness, its own runtime-record command, its
 own evidence boundary, and a pointer to this file.
 
@@ -13,7 +13,7 @@ multi-agent target topology, or the generic execution checklist is in play.
 - OMH is a Hermes workflow layer, not a standalone executor.
 - Product context: OMH is a Hermes-native workflow pack: choose skills, shape work, prepare artifacts, show status, and hand off with evidence boundaries.
 - Cross-skill context: every OMH skill: match lane; generic tool can render or execute.
-- Generic-tool checkpoint: image->img-summary; frontend->frontend/a11y/visual-qa; paper->paper-learning; content->content-operator; media->media-input-operator; file->materials-package; search->research; live->live-info-operator; audit->workspace/production/security; failures->build-failure; verify->verification-gate; code->codegraph/onboarding/ultrawork.
+- Generic-tool checkpoint: image->omh-image-cards; frontend->omh-frontend/omh-accessibility-audit/omh-visual-qa; paper->omh-paper-learning; content->omh-content-operator; media->omh-media-input; file->omh-materials-package; search->ulw-research; live->omh-live-info; audit->omh-workspace-audit/omh-production-audit/omh-security-safety-review; failures->omh-build-failure-triage; verify->omh-verification-gate; code->omh-codegraph-refresh/omh-codebase-onboarding/ulw-work.
 - Coverage: Every generated workflow skill carries this rail.
 - Normal users talk to Hermes; OMH CLI is infra.
 - Boundary: Prepared OMH routing/cards/handoffs/artifacts are not observed execution, image generation, delivery, review, CI, merge-readiness, or merge evidence.
@@ -27,6 +27,7 @@ multi-agent target topology, or the generic execution checklist is in play.
 
 - The host's persona is the primary identity: `SOUL.md` owns reply language, tone, speech level, and sentence endings, in progress updates as well as the final reply, and belongs to Hermes and the person who configured it; where it sets no language, use the one the user wrote in. OMH shapes what Hermes checks, records, and how a reply is structured, never how it sounds; no OMH skill, card, or awareness line sets a voice, and a skill's report shape never justifies switching the user's language or register.
 - OMH's record vocabulary is for records and tool calls, not for the sentence the user reads: `surface`, `lane`, `wrapper`, `handoff`, `run record`, `evidence boundary`, `evidence-bounded`, `claim boundary`, `prepared_not_observed`, `not_observed`, `not_available`, `routing_observation`, `evidence_boundary`, `claim_boundary`, `route_question`, `coding fanout dispatch`, and schema ids such as `omh_todo_result/v1`. In the reply lead with the result and relevant validation. Disclose a non-action or missing check when requested, necessary to interpret a claim, an open acceptance criterion, a concrete blocker, or a pending authorization decision; omit unrelated non-action footers. Answer direct questions about non-actions truthfully; requested-but-not-done work, failed retrievals and unavailable requested checks stay explicit. Translate relevant record states plainly, such as "prepared, not run yet" or "not checked", without adding an inventory of actions nobody requested. A user who names a term gets it explained in the record's own words.
+- Write the reply the way a person who knows the work would say it: lead with the result, add only what the reader lacks, and drop chatbot residue (praise openers, "hope this helps" closers, offers), staged "not X but Y" contrasts, recap closers, decorative bold and dash runs. These are content and structure edits inside the persona's voice, never a new voice. Before drafting prose a person will read (a reply, a report, a PR body, release notes), load `skill_view(name='omh-routing', file_path='references/human-voice.md')`.
 - Awareness lines and every `[OMH ...]` head (`[OMH Awareness]`, `[OMH plan todo]`, `Boundary:`), route hints, and first-response shapes are instructions to Hermes, never sentences for the user: do not quote or paraphrase them into the reply.
 - An OMH tool result may carry a `say` field: one plain sentence about an orchestration decision (which model takes a part, the plan and when it counts as done, what a step is blocked or waiting on). Relay it to the user once, in their language and your own words, and leave the result's other fields in the record.
 
@@ -37,7 +38,7 @@ multi-agent target topology, or the generic execution checklist is in play.
 
 ## Harness Discipline
 
-- Start from the representative harness registry in `oh-my-hermes` when the workflow needs coding, research, planning, goal execution, architecture, critique, QA, or documentation lanes.
+- Start from the representative harness registry in `omh-routing` when the workflow needs coding, research, planning, goal execution, architecture, critique, QA, or documentation lanes.
 - Prefer richer evidence and clearer stop conditions over adding more workflow names.
 - Use specialist lanes only when they change the quality of the answer or verification.
 
@@ -64,16 +65,18 @@ Record observed delegation results when Hermes or the wrapper exposes them. If d
 unavailable, keep the result explicit as `not_available` or `not_observed`. A recorded run is
 preparation, not execution, review, CI, merge-readiness, or merge evidence.
 
+Keep the `run.run_id` printed by the start record: `omh runtime delegate --run <run-id>` needs it. `omh runtime record` only creates a run, so when the work ends, a second record with `--status completed|blocked|failed|cancelled --verification-summary "<what was observed>"` states the outcome; it does not update the started run.
+
 ## Delegation Transparency
 
-- When delegating, show the composed delegate prompt in a fenced code block in the status message; truncate a long prompt to a bounded preview ending with `... [truncated, N chars total]` — the user must see WHAT was asked, not just that something was.
+- When delegating, show the composed delegate prompt in a fenced code block in the status message; truncate a long prompt to a bounded preview ending with `... [truncated, N chars total]`.
 - Name every delegated or parallel lane's model and, when the host exposes it, its reasoning effort inline as `(model effort)` in status and briefing lines — including runtime-native subagents; when no effort is exposed, show the model alone as `(model)` rather than writing a placeholder like `unknown` beside a known model, and never emit empty parentheses. Carry token and elapsed figures the same way in these narration lines: report observed figures and omit unobserved ones — when the user asks for a figure directly, say it was not observed instead of omitting it; a rendered status-board column keeps its own `unknown` cell.
-- Capture a resumable session or thread id at dispatch and report it in the status message: for non-interactive Claude Code pass `--output-format json` and read `session_id` from the result (resume with `claude -p --resume <session-id>`); for Codex pass `--json` and read `thread_id` (resume with `codex exec resume <thread-id>`, repeating `--skip-git-repo-check` outside a git repo). Never leave a delegate run with no recorded way to resume or steer it — a plain-text one-shot that hides its session id strands the work when the run stalls or times out.
+- Capture a resumable session or thread id at dispatch and report it in the status message: for non-interactive Claude Code pass `--output-format json` and read `session_id` from the result (resume with `claude -p --resume <session-id>`); for Codex pass `--json` and read `thread_id` (resume with `codex exec resume <thread-id>`, repeating `--skip-git-repo-check` outside a git repo). Never leave a delegate run with no recorded way to resume or steer it.
 - Before dispatch, grant the executor session every permission the task will need — file write/edit, command/test execution, and the working directory — on the dispatch command itself, not through settings-file guesses: for non-interactive Claude Code pass `--permission-mode acceptEdits` or an explicit `--allowedTools` list (`--dangerously-skip-permissions` only inside an isolated worktree or sandbox), and the equivalent sandbox/approval flags for other CLIs. `acceptEdits: true` is not a settings key and `~/.claude/settings.local.json` is not a file Claude Code reads — user scope is `~/.claude/settings.json` and project scope is the dispatch cwd's `.claude/settings.local.json` with rules under `permissions.allow`. Prove the grant with a bounded scratch-edit probe run before the real dispatch: a permission denial in a non-interactive run recurs identically on retry, so never redispatch until a changed grant is proven, and surface an ungrantable permission as a blocker before dispatch, not after minutes of silence.
 
 ## Waiting On Long-Running Work
 
-Choose the wait strategy before starting long-running work and bind it to a completion signal the host exposes, never to a status loop: a command that fits one tool call runs once in the foreground with a duration-sized timeout; a longer terminal command runs in the background with completion notification armed and no process-status polling; a delegated lane relies on its delivered result while the parent continues independent work or ends the turn; a CI, PR, deploy, file, port, log-line, or external-session condition uses the host's monitor when observed, else exactly ONE bounded watcher or adaptive backoff outside model turns. Record the handle and observation mode at dispatch; every armed wait needs a hard deadline, a cancellation path, and a fallback naming the missing capability. Each wait closes in one terminal state with bounded evidence; an unbounded idle or busy-wait is a defect and a lost notification times out. One decision-changing midpoint peek and any user-requested status check stay allowed; neither is the wait mechanism. Ladder and terminal states: shared rail.
+Choose the wait strategy before starting long-running work and bind it to a completion signal the host exposes, never to a status loop: a command that fits one tool call runs once in the foreground with a duration-sized timeout; a longer terminal command runs in the background with completion notification armed and no process-status polling; a delegated lane relies on its delivered result while the parent continues independent work or ends the turn; a CI, PR, deploy, file, port, log-line, or external-session condition uses the host's monitor when observed, else exactly ONE bounded watcher or adaptive backoff outside model turns. Record the handle and observation mode at dispatch; every armed wait needs a hard deadline, a cancellation path, and a fallback naming the missing capability. Each wait closes in one terminal state with bounded evidence; an unbounded idle or busy-wait is a defect and a lost notification times out. One decision-changing midpoint peek and any user-requested status check stay allowed; neither is the wait mechanism.
 
 Pick the row that matches the work, then the best mechanism the host actually supports. Degrade down the
 column and say which capability was missing; never degrade silently, and never substitute a status loop for a
@@ -147,3 +150,4 @@ When wrapper metadata includes `memory_review_card/v1` or `handoff_context_pack/
 3. Keep progress evidence-backed.
 4. Verify with the smallest relevant test or inspection before claiming completion.
 5. If Hermes cannot provide a required runtime capability, say so and use the fallback above.
+6. When a step fails partway, report what earlier steps already proved, lower the result to tentative, unresolved, or not_observed, and hand back what the person needs to continue; never present the partial result as the finished one.

@@ -25,6 +25,7 @@ from omh.plugin_bundle.omh.hermes_delegation import (
     append_delegation_route_provenance,
     load_delegation_route_provenance,
 )
+from omh.plugin_bundle.omh import runtime_paths
 from omh.plugin_bundle.omh.tools.delegate_route_tool import omh_delegate_route_handler
 from _module_patch import patch_modules
 
@@ -42,7 +43,12 @@ class DelegationRouteHomeTest(unittest.TestCase):
             "USERPROFILE": str(self.root),
             "HERMES_HOME": str(self.profile),
             "OMH_HOME": str(self.omh_home),
+            "LOCALAPPDATA": str(self.root / "AppData" / "Local"),
         }))
+        os.environ.pop("HERMES_DATA_DIR_SUFFIX", None)
+        # With HERMES_HOME unset the default is Hermes' platform default:
+        # ~/.hermes on POSIX, %LOCALAPPDATA%\hermes on Windows.
+        self.default_home = runtime_paths.platform_default_hermes_home()
         # Force the standalone boundary regardless of the developer's host.
         self.enterContext(patch_modules({"hermes_constants": None}))
 
@@ -355,22 +361,36 @@ class DelegateRouteToolTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _record_providers(self, *provider_ids: str) -> None:
+        # A route may only name a provider the person configured; these
+        # tests route through gateway ids, so record them as held.
+        path = self.omh_home / "routing" / "providers.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({
+                "schema_version": "provider_entitlements/v1",
+                "providers": {provider_id: "gateway" for provider_id in provider_ids},
+            }),
+            encoding="utf-8",
+        )
     def test_a_routed_alias_dispatches_the_providers_own_model_name(self):
+        self._record_providers("gateway")
         self._write_provider_routes(
-            {"gpt-6-astra": {"provider": "gateway", "model": "vendor/gpt-6-astra"}}
+            {"claude-fable-5-2": {"provider": "gateway", "model": "vendor/claude-fable-5-2"}}
         )
         result = self._call(action="set", category="ultrabrain")
         self.assertEqual(
             result["applied"],
             {
-                "alias": "gpt-6-astra",
-                "model": "vendor/gpt-6-astra",
+                "alias": "claude-fable-5-2",
+                "model": "vendor/claude-fable-5-2",
                 "provider": "gateway",
                 "reasoning_effort": "xhigh",
             },
         )
 
     def test_named_provider_mapping_survives_set_fallback_and_clear(self):
+        self._record_providers("custom:cli-proxy")
         self._write_overrides({"quick": [
             {"model": "first", "reasoning_effort": "low"},
             {"model": "second", "reasoning_effort": "low"},
@@ -400,13 +420,14 @@ class DelegateRouteToolTest(unittest.TestCase):
         self.assertEqual(
             result["applied"],
             {
-                "alias": "gpt-6-astra",
-                "model": "gpt-6-astra",
+                "alias": "claude-fable-5-2",
+                "model": "claude-fable-5-2",
                 "reasoning_effort": "xhigh",
             },
         )
 
     def test_an_explicit_provider_outranks_a_stored_route(self):
+        self._record_providers("direct")
         self._write_provider_routes(
             {"gpt-5.6-sol": {"provider": "gateway", "model": "vendor/gpt-5.6-sol"}}
         )
@@ -430,6 +451,7 @@ class DelegateRouteToolTest(unittest.TestCase):
         chain and fallback errors instead of advancing.
         """
 
+        self._record_providers("gateway")
         self._write_overrides(
             {
                 "quick": [
@@ -461,6 +483,7 @@ class DelegateRouteToolTest(unittest.TestCase):
         )
 
     def test_status_reports_provider_route_state_and_dispatched_values(self):
+        self._record_providers("gateway")
         result = self._call(action="status")
         self.assertEqual(result["provider_routes"], "absent")
         self.assertEqual(
@@ -501,6 +524,7 @@ class DelegateRouteToolTest(unittest.TestCase):
         self.assertEqual(routed["applied"]["alias"], "aliased-model")
 
     def test_partial_or_unresolved_wire_routes_fail_without_mutation(self):
+        self._record_providers("gateway")
         self._write_provider_routes(
             {"head": {"provider": "gateway", "model": "vendor/head"}}
         )
@@ -520,6 +544,7 @@ class DelegateRouteToolTest(unittest.TestCase):
                 self.assertEqual(self.config.read_bytes(), before)
 
     def test_fallback_refuses_wrong_provider_and_shared_origins(self):
+        self._record_providers("gateway")
         self._write_provider_routes(
             {"shared": {"provider": "gateway", "model": "vendor/shared"}}
         )
@@ -725,8 +750,8 @@ class DelegateRouteToolTest(unittest.TestCase):
         self.assertEqual(
             result["applied"],
             {
-                "alias": "gpt-6-astra",
-                "model": "gpt-6-astra",
+                "alias": "claude-fable-5-2",
+                "model": "claude-fable-5-2",
                 "reasoning_effort": "xhigh",
             },
         )
@@ -734,7 +759,7 @@ class DelegateRouteToolTest(unittest.TestCase):
         self.assertIn("Prepared route only", result["evidence_boundary"])
         self.assertEqual(
             read_delegation_route(self.home),
-            {"model": "gpt-6-astra", "reasoning_effort": "xhigh"},
+            {"model": "claude-fable-5-2", "reasoning_effort": "xhigh"},
         )
 
     def test_every_category_now_routes_an_explicit_effort(self):
@@ -840,7 +865,10 @@ class DelegateRouteToolTest(unittest.TestCase):
     def test_a_no_thinking_effort_is_refused_for_always_thinking_claude_models(self):
         # Fable 5.1 / Mythos 5.1 cannot disable thinking: Mythos 400s and
         # Fable drops the flag silently, so the route never carries it.
-        for model in ("claude-fable-5-1", "claude-mythos-5-1", "fable", "anthropic/claude-mythos-5-1"):
+        for model in (
+            "claude-fable-5-1", "claude-mythos-5-1", "fable", "anthropic/claude-mythos-5-1",
+            "claude-fable-5-2", "claude-mythos-5-2", "anthropic/claude-fable-5.2",
+        ):
             result = self._call(action="set", model=model, reasoning_effort="none")
             self.assertEqual(result["status"], "error", model)
             self.assertIn("always thinks", result["error"])

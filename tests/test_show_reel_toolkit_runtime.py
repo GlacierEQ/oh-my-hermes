@@ -19,7 +19,8 @@ import unittest
 
 from _module_patch import patch_modules
 from _toolkit_path_guard import (COMPOSED_ACCEPTED, COMPOSED_LINKS, COMPOSED_REFUSED, POSIX_ONLY, alias_fixture,
-                                 assert_alias_does_not_exempt_links_below, assert_only_system_aliases_trusted)
+                                 assert_alias_does_not_exempt_links_below, assert_only_system_aliases_trusted,
+                                 assert_unsearchable_directory_is_refused)
 
 ROOT = Path(__file__).resolve().parents[1]
 KIT = ROOT / "src/skills/show_reel_toolkit"
@@ -134,6 +135,13 @@ class LocalProjectTests(unittest.TestCase):
             with self.subTest(guard=guard), tempfile.TemporaryDirectory() as td:
                 assert_only_system_aliases_trusted(self, api[guard], api["system_alias"], Path(td), refusal)
 
+    def test_an_unsearchable_directory_is_refused(self):
+        timeline, new_project = self.load("timeline.py"), self.load("new_project.py")
+        for name, guard in (("read_spec", timeline["read_spec"]), ("generated", timeline["generated"]),
+                            ("no_links", lambda path: new_project["no_links"](path, path.parents[2]))):
+            with self.subTest(guard=name), tempfile.TemporaryDirectory() as td:
+                assert_unsearchable_directory_is_refused(self, guard, Path(td))
+
     @POSIX_ONLY
     def test_a_trusted_alias_does_not_exempt_a_link_below_it(self):
         timeline, new_project = self.load("timeline.py"), self.load("new_project.py")
@@ -233,6 +241,23 @@ console.log('safe');
 """
             result = subprocess.run([NODE, "--input-type=module", "-e", script, adapter.as_uri(), str(root)], capture_output=True, text=True, timeout=20)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_browser_skips_the_vsync_wait_and_keeps_its_request_and_colour_scope(self):
+        if not NODE:
+            self.skipTest("optional Node unavailable")
+        script = """
+const {browserArgs}=await import(process.argv[1]);
+console.log(JSON.stringify(browserArgs('http://127.0.0.1:4321',4321)));
+"""
+        adapter = KIT / "scripts/render.mjs"
+        result = subprocess.run([NODE, "--input-type=module", "-e", script, adapter.as_uri()], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        args = json.loads(result.stdout)
+        # The vsync wait dominated capture time; the proxy pair and sRGB profile are the request and colour scope.
+        for flag in ("--disable-gpu-vsync", "--disable-frame-rate-limit", "--proxy-server=http://127.0.0.1:4321",
+                     "--proxy-bypass-list=<-loopback>;127.0.0.1:4321", "--force-color-profile=srgb", "--mute-audio"):
+            self.assertIn(flag, args)
+        self.assertEqual(len(args), len(set(args)))
 
     def test_only_macos_system_aliases_are_trusted(self):
         if not NODE:

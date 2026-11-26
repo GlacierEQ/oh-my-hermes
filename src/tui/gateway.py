@@ -15,7 +15,10 @@ a full pipe would block the gateway mid-write. Inbound items wait in memory
 until `poll` takes them, except the answer to a blocking `call`, which goes
 straight to its caller. `wake_fd` is a pipe that is readable while an item
 waits for `poll`, so the TUI's loop can select on it next to its input and
-sleep until either has something. Nothing here writes a frame to disk or to a
+sleep until either has something (on Windows, where select waits on sockets
+only, the console backend peeks at it instead). The pipe holds at most one
+byte, so signalling never blocks and draining reads only a byte that is
+there, without the non-blocking mode Windows pipes lack before Python 3.12. Nothing here writes a frame to disk or to a
 log.
 """
 
@@ -44,6 +47,11 @@ READY_EVENT = "gateway.ready"
 GATEWAY_PYTHONPATH_ENV = "OMH_TUI_GATEWAY_PYTHONPATH"
 # Names the shim and `omh` use to talk to the frontend; the gateway has no use for them.
 INTERNAL_ENV_PREFIX = "OMH_TUI_"
+# The herdr pane id stays with the TUI, which reports the pane's state itself (`herdr.py`). Where the gateway runs,
+# herdr's own Hermes plugin (gated on `HERDR_ENV=1` and this id) would report a `herdr:hermes` session for the
+# pane, after which herdr refuses the TUI's reports; a gateway daemon started from here also outlives the pane.
+# Only the id goes, as herdr drops it for its own popups: herdr's CLI and skill still work in the gateway.
+HERDR_PANE_ENV = "HERDR_PANE_ID"
 REQUIRED_ENV = ("HERMES_PYTHON", "HERMES_PYTHON_SRC_ROOT")
 
 STDERR_TAIL_LINES = 200
@@ -59,24 +67,43 @@ READER_JOIN_SECONDS = 1.0
 UNREADY_CLOSE_GRACE_SECONDS = 0.5
 # How often a blocking wait given a `cancel` asks it.
 CANCEL_POLL_SECONDS = 0.1
+# What the attach child exits with when the gateway is not answering yet: one restarting or starting (Hermes'
+# `starting` / `draining` verdicts), or a refused, missing or silent control socket or WebSocket. EX_UNAVAILABLE.
+# `gateway_attach.NOT_READY_EXIT` is the same number: that file imports nothing of `omh`.
+GATEWAY_NOT_READY_EXIT = 69
 
 
 class GatewayUnavailable(RuntimeError):
-    """The gateway could not be started, or is gone. `stderr_tail` is what it printed last."""
+    """The gateway could not be started, or is gone. `stderr_tail` is what it printed last; `returncode` is the
+    child's exit code when it exited before `gateway.ready`, else None."""
 
-    def __init__(self, message: str, stderr_tail: tuple[str, ...] = ()) -> None:
+    def __init__(self, message: str, stderr_tail: tuple[str, ...] = (), returncode: int | None = None) -> None:
         super().__init__(message)
         self.stderr_tail = stderr_tail
+        self.returncode = returncode
+
+    @property
+    def not_ready(self) -> bool:
+        """Whether the attach child said the gateway is there but not answering yet (`GATEWAY_NOT_READY_EXIT`)."""
+        return self.returncode == GATEWAY_NOT_READY_EXIT
 
 
 class GatewayCallError(RuntimeError):
     """The gateway answered a call with a JSON-RPC error."""
 
-    def __init__(self, method: str, code: object, message: str) -> None:
+    def __init__(self, method: str, code: object, message: str, data: Mapping[str, Any] | None = None) -> None:
         super().__init__(f"{method} failed ({code}): {message}")
         self.method = method
         self.code = code
         self.message = message
+        self.data: Mapping[str, Any] = data or {}
+
+    @property
+    def reason(self) -> str:
+        """Hermes' refusal reason: the error's `data.reason` (its session API's `RuntimeStoreError`), else the
+        message, which the same refusals carry it in as well."""
+        reason = self.data.get("reason")
+        return reason if isinstance(reason, str) and reason else self.message
 
     @property
     def drift(self) -> bool:
@@ -150,7 +177,7 @@ def gateway_spawn(env: Mapping[str, str]) -> GatewaySpawn:
     child = {
         name: value
         for name, value in env.items()
-        if name not in contract.STRIPPED_GATEWAY_ENV and not name.startswith(INTERNAL_ENV_PREFIX)
+        if name not in (*contract.STRIPPED_GATEWAY_ENV, HERDR_PANE_ENV) and not name.startswith(INTERNAL_ENV_PREFIX)
     }
     launcher_path = env.get(GATEWAY_PYTHONPATH_ENV, "")
     child["PYTHONPATH"] = src_root + os.pathsep + launcher_path if launcher_path else src_root
@@ -211,14 +238,14 @@ class GatewayClient:
         self,
         spawn: GatewaySpawn,
         *,
-        popen: Callable[..., Any] = subprocess.Popen,
+        popen: Callable[..., Any] | None = None,
         clock: Callable[[], float] = time.monotonic,
         first_id: int = 1,
     ) -> None:
         """`first_id` is the first request id this client sends: a client that replaces one whose calls are still
         waiting starts past their ids, so no answer to it is ever read as an answer to them."""
         self._spawn = spawn
-        self._popen = popen
+        self._popen = subprocess.Popen if popen is None else popen  # read now: an import-time default would keep a patch
         self._clock = clock
         self._process: Any = None
         self._readers: list[tuple[threading.Thread, IO[bytes]]] = []
@@ -233,6 +260,7 @@ class GatewayClient:
         self._stderr_lock = threading.Lock()
         self._stderr: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
         self._wake: tuple[int, int] | None = None  # (read end, write end) once `wake_fd` was asked for
+        self._wake_pending = False  # the wake pipe holds its one byte
         self.capabilities: dict[str, Any] = {}
 
     def start(self, ready_timeout: float = 60.0, cancel: Callable[[], bool] | None = None) -> Event:
@@ -272,7 +300,8 @@ class GatewayClient:
         except (GatewayUnavailable, GatewayTimeout) as error:
             self.close(grace=UNREADY_CLOSE_GRACE_SECONDS, terminate_grace=UNREADY_CLOSE_GRACE_SECONDS)
             # Read the tail after reaping: only then has the drain thread seen every line.
-            raise GatewayUnavailable(str(error), tuple(self.stderr_tail())) from None
+            returncode = error.returncode if isinstance(error, GatewayUnavailable) else None
+            raise GatewayUnavailable(str(error), tuple(self.stderr_tail()), returncode) from None
         except (GatewayCallError, GatewayCancelled):
             self.close(grace=UNREADY_CLOSE_GRACE_SECONDS, terminate_grace=UNREADY_CLOSE_GRACE_SECONDS)
             raise
@@ -316,7 +345,9 @@ class GatewayClient:
         if response is None:
             raise GatewayTimeout(method, timeout)
         if response.error is not None:
-            raise GatewayCallError(method, response.error.get("code"), str(response.error.get("message", "")))
+            data = response.error.get("data")
+            raise GatewayCallError(method, response.error.get("code"), str(response.error.get("message", "")),
+                                   data if isinstance(data, Mapping) else None)
         return response.result or {}
 
     def respond(self, request_id: str, frame: dict[str, Any]) -> None:
@@ -326,17 +357,21 @@ class GatewayClient:
         self._write({"jsonrpc": "2.0", "id": request_id, **frame})
 
     def wake_fd(self) -> int:
-        """A descriptor that is readable while an item waits for `poll`; `poll` empties it. POSIX only.
+        """A descriptor that is readable while an item waits for `poll`; `poll` empties it.
 
         The pipe is made on the first call, and is readable at once if items
-        are already queued.
+        are already queued. Non-blocking where the platform allows it (not
+        Windows: `os.set_blocking` takes a pipe there only from 3.12); the
+        one-byte rule keeps either end from blocking anyway.
         """
         with self._inbox_ready:
             if self._wake is None:
                 read_end, write_end = os.pipe()
-                os.set_blocking(read_end, False)
-                os.set_blocking(write_end, False)
+                if os.name != "nt":
+                    os.set_blocking(read_end, False)
+                    os.set_blocking(write_end, False)
                 self._wake = (read_end, write_end)
+                self._wake_pending = False
                 if self._inbox:
                     self._signal_wake()
             return self._wake[0]
@@ -396,6 +431,7 @@ class GatewayClient:
                 stream.close()
         with self._inbox_ready:  # a reader still alive writes the wake pipe under this lock: none can after it
             wake, self._wake = self._wake, None
+            self._wake_pending = False
         for descriptor in wake or ():
             os.close(descriptor)
         return code
@@ -416,7 +452,10 @@ class GatewayClient:
                     return ready
                 exited = next((item for item in self._inbox if isinstance(item, GatewayExited)), None)
                 if exited is not None:
-                    raise GatewayUnavailable(f"the gateway exited with code {exited.returncode} before {READY_EVENT}")
+                    raise GatewayUnavailable(
+                        f"the gateway exited with code {exited.returncode} before {READY_EVENT}",
+                        returncode=exited.returncode,
+                    )
                 remaining = deadline - self._clock()
                 if remaining <= 0:
                     raise GatewayUnavailable(f"the gateway sent no {READY_EVENT} within {ready_timeout:g}s")
@@ -452,7 +491,10 @@ class GatewayClient:
             raise self._unavailable(f"the gateway stopped reading its input ({error})") from error
 
     def _unavailable(self, message: str) -> GatewayUnavailable:
-        return GatewayUnavailable(message, tuple(self.stderr_tail()))
+        """The error for a gateway that is gone, with its exit code once its exit has been seen."""
+        with self._inbox_ready:  # reentrant: a caller may already hold it
+            exited = next((item for item in self._inbox if isinstance(item, GatewayExited)), None)
+        return GatewayUnavailable(message, tuple(self.stderr_tail()), exited.returncode if exited else None)
 
     def _read_stdout(self, stream: IO[bytes]) -> None:
         try:
@@ -492,23 +534,19 @@ class GatewayClient:
             self._inbox_ready.notify_all()
 
     def _signal_wake(self) -> None:
-        """Make the wake pipe readable; called with `_inbox_ready` held. A full pipe is readable already."""
-        if self._wake is not None:
-            try:
-                os.write(self._wake[1], b"\0")
-            except BlockingIOError:
-                pass
+        """Make the wake pipe readable; called with `_inbox_ready` held. One that holds its byte is readable already."""
+        if self._wake is not None and not self._wake_pending:
+            os.write(self._wake[1], b"\0")
+            self._wake_pending = True
 
     def _drain_wake(self) -> None:
+        """Take the wake pipe's byte, if it holds one: never a read that could wait on an empty pipe."""
         with self._inbox_ready:
             wake = self._wake
-            if wake is None:
+            if wake is None or not self._wake_pending:
                 return
-            try:
-                while os.read(wake[0], 4096):
-                    pass
-            except BlockingIOError:
-                pass
+            os.read(wake[0], 1)
+            self._wake_pending = False
 
 
 def _is_ready(item: Inbound) -> bool:

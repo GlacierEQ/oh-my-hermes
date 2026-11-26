@@ -40,6 +40,7 @@ question to inspect, not an instruction to agree.
    tests. Read the relevant implementation and assertions, including context
    outside changed lines. Try to disprove the candidate using an effective
    guard, unreachable precondition, preserved contract, or contrary test.
+   Then run the drop gate below.
 4. Record one result per deduplicated candidate: `confirmed`, `rejected`, or
    `unresolved`. Name the reader, inspected revisions/locations, triggering
    conditions, supporting or contradicting evidence, and any missing context.
@@ -48,6 +49,28 @@ question to inspect, not an instruction to agree.
    supported findings. Keep unresolved items separate with the missing fact
    and the next check or decision needed; retain unresolved security or
    data-loss risks explicitly in that risk list, not confirmed defects.
+
+## Drop gate
+
+A candidate stays out of the findings when any one of these holds:
+
+- No step-by-step trace now: you cannot write the concrete input or state, the
+  path it takes, and the wrong output or state it ends in.
+- Intended or documented: a spec, doc, test assertion, or code comment says the
+  behavior is meant to be this way.
+- Out-of-reach precondition: the trigger needs a privilege or precondition the
+  attacker or user in the threat model cannot have.
+- Theoretical only: the impact is that it could in theory go wrong, with no
+  reachable trigger.
+- Style as bug: a style or hygiene nit presented as a defect; mention it, if at
+  all, as a non-blocking maintainability note.
+
+The last four are contradictions: record the candidate as `rejected` with that
+reason. A candidate that fails only the first is `unresolved` when it is a
+security or data-loss risk and a named next check could supply the missing
+step; otherwise drop it with a one-line reason in the validation record. A
+dropped candidate never reaches the findings list, and only a candidate that
+clears all five can be `confirmed`.
 
 ## Evidence threshold
 
@@ -65,7 +88,9 @@ impact and prerequisites, not from the validator's confidence alone.
 
 Stop the candidate trace at the first inaccessible caller, unknown precondition,
 or missing revision and record that exact gap as unresolved. Do not turn an
-unread path into checked-clean coverage. If no separate reader is available,
+unread path into checked-clean coverage. Open every provided file that defines,
+constructs or calls what the diff touches before deciding; a file you could read
+never goes under Not checked. If no separate reader is available,
 write "independent validation unavailable" and name any self-recheck actually
 performed: the same reader's second pass is not independent. Do not claim an
 independent confirmation in that case. Protected risks remain visible even
@@ -192,7 +217,7 @@ known access limits and any separately granted external-transmission authority.
    contracts. Use these signals to choose targeted depth, not to launch every
    specialist automatically:
    - auth, input, and security: inspect trust boundaries, authorization, and
-     untrusted data with the relevant security review guidance.
+     untrusted data against the application-code security checklist: injection, object-level authorization, SSRF, unsafe deserialization, secrets in code, and crypto misuse. `omh-security-safety-review` covers the agent's own runtime, not application code.
    - boundary, API, and type changes: load `references/architecture-delta.md`
      for ownership and producer/consumer compatibility.
    - migrations and rollback: inspect data preservation, mixed-version

@@ -10,7 +10,16 @@ import re
 import time
 from typing import Final, Iterator
 
-from .model_discovery_adapters import accepted_observation, model_candidates
+from .pi_family_interop import (
+    PI_DISTRIBUTION_HOME,
+    PI_DISTRIBUTION_HOST,
+    PI_FORK_HOME,
+    PI_FORK_HOST,
+    RUNTIME_CONFIG_FILES,
+    RUNTIME_HOME,
+    RUNTIME_MODELS_FILE,
+)
+from .model_discovery_adapters import RUNTIME_CONFIG_SOURCE, accepted_observation, model_candidates
 from .model_discovery_contract import (
     MODEL_DISCOVERY_CLAIM_BOUNDARY,
     MODEL_DISCOVERY_SCHEMA_VERSION,
@@ -26,9 +35,16 @@ _SOURCE_ROOTS: Final[dict[str, tuple[str, ...]]] = {
         ".claude/transcripts",
         ".claude/pre-compact-session-histories",
     ),
-    "senpi": (".senpi/agent/sessions",),
+    PI_DISTRIBUTION_HOST: (f"{PI_DISTRIBUTION_HOME}/agent/sessions",),
     "pi": (".pi/agent/sessions",),
-    "omo": (".omo/omo.json", ".omo/omo.jsonc", ".omo/models.json"),
+    # The fork host writes `agent/sessions/<encoded-cwd>/<ts>_<id>.jsonl` under
+    # its own home (upstream docs/session.md). Any other layout under that home
+    # is reported `layout_unverified` and never read.
+    PI_FORK_HOST: (f"{PI_FORK_HOME}/agent/sessions",),
+    RUNTIME_CONFIG_SOURCE: (
+        *(f"{RUNTIME_HOME}/{name}" for name in RUNTIME_CONFIG_FILES),
+        f"{RUNTIME_HOME}/{RUNTIME_MODELS_FILE}",
+    ),
     "opencode": (
         ".opencode/messages",
         ".local/share/opencode/storage/message",
@@ -58,15 +74,15 @@ def discover_local_models(
         )
         observations.extend(source_observations)
         sources[source] = source_result
-    omp_present = (home / ".omp").exists()
-    sources["omp"] = source_payload(
-        "layout_unverified",
-        (),
-        scanned_records=0,
-        rejected=0,
-        supported_root=omp_present,
-        truncated_reasons=(),
-    )
+    if not sources[PI_FORK_HOST]["supported_root"] and (home / PI_FORK_HOME).exists():
+        sources[PI_FORK_HOST] = source_payload(
+            "layout_unverified",
+            (),
+            scanned_records=0,
+            rejected=0,
+            supported_root=False,
+            truncated_reasons=(),
+        )
     deduplicated = deduplicate(observations)
     return {
         "schema_version": MODEL_DISCOVERY_SCHEMA_VERSION,
@@ -231,5 +247,5 @@ def _source_status(
     if truncated_reasons:
         return "truncated"
     if observations:
-        return "confirmed_active" if source == "omo" else "observed_before"
+        return "confirmed_active" if source == RUNTIME_CONFIG_SOURCE else "observed_before"
     return "unobserved"

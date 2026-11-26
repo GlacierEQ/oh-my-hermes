@@ -1,6 +1,6 @@
 ---
 name: "omh-ops-observability-card"
-description: "[omh] Tracking cost, tokens, latency, or service health: prepare an operations command-board for wrapper-safe token, cost, latency, run history, queue, failure-mode, external metric-provider, and service-quality evidence boundaries. Use when the user says: ops-observability-card, observability card, operations command board, ops command board, service quality board, service quality, external metric provider, metric provider."
+description: "[omh] Tracking cost, tokens, latency, or service health."
 license: MIT
 metadata:
   hermes:
@@ -47,8 +47,8 @@ Bad example:
 
 ## Recovery Notes
 
-- If provider metrics are unavailable, report only local metadata and mark provider truth not_observed.
-- If cost or latency looks risky, surface a warning plus the next measurement rather than a completion claim.
+- If the metric window is missing, keep supplied payloads, mark quality unresolved; hand back the next measure.
+- If a budget threshold is missing, keep the observed cost, mark advice tentative; hand back the gaps.
 
 
 

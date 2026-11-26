@@ -1,0 +1,152 @@
+name: omher
+
+# omher (apps/omher): the whole Playwright e2e suite on Linux runners (no queue, many shards at once); on macOS and
+# Windows the UI checks, the specs that behave per platform, the Tauri shell's Rust tests and an unsigned debug build;
+# plus the bridge's unit tests against a FakeGateway (no Hermes needed) on Linux and Windows.
+
+on:
+  pull_request:
+    paths:
+      - "apps/omher/**"
+      - "docs/OMHER-BOUNDARY.md"
+      - "tests/test_omher_boundary.py"
+      - ".github/workflows/omher.yml"
+      - ".github/workflows/omher-release.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: omher-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  bridge:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: "3.11"
+      - name: Install the bridge's test dependencies
+        run: python -m pip install "websockets>=14" pyyaml "ruamel.yaml>=0.18"  # ruamel: the YAML of Hermes 0.22+
+      - name: Bridge unit tests (FakeGateway)
+        working-directory: apps/omher
+        run: python -m unittest discover -s bridge/tests -v
+      - name: Boundary pins
+        env:
+          PYTHONPATH: tests
+        run: python -m unittest tests.test_omher_boundary -v
+
+  # The whole Playwright suite on Linux: four runners of two shards each (scripts/e2e-shards.sh, OMHER_E2E_PART),
+  # every shard its own Vite + mock bridge. Linux runners start at once; macOS ones queued 45-65 minutes.
+  e2e:
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3, 4]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Install pnpm
+        run: npm install --global pnpm@11
+      - name: Install dependencies
+        working-directory: apps/omher
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium and its Linux libraries, with CJK fonts
+        working-directory: apps/omher
+        run: |
+          pnpm exec playwright install --with-deps chromium
+          sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+      # Left out here and run in the macOS job: specs that measure text or terminal cells against the macOS and
+      # Windows UI fonts (Linux's fallback fonts run wider and its cells round to whole pixels).
+      - name: End-to-end tests against the mock bridge (part ${{ matrix.part }} of 4)
+        working-directory: apps/omher
+        env:
+          OMHER_E2E_PART: ${{ matrix.part }}/4
+          OMHER_E2E_SKIP: >-
+            e2e/ux021.spec.ts e2e/term-blocks.spec.ts e2e/term-exit.spec.ts e2e/runs.spec.ts
+            e2e/session-folder-create.spec.ts e2e/settings-pages-fit.spec.ts
+        run: bash scripts/e2e-shards.sh 2
+
+  app:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            bundles: app
+          - os: windows-latest
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+      - name: Install pnpm
+        run: npm install --global pnpm@11
+      - name: Install dependencies
+        working-directory: apps/omher
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        working-directory: apps/omher
+        run: pnpm typecheck
+      - name: Unit tests (vitest)
+        working-directory: apps/omher
+        run: pnpm test
+      # WebKit too on macOS: the macOS window is WebKit, and e2e/cards-webkit.spec.ts runs there
+      - name: Install Chromium (and WebKit on macOS) for Playwright
+        working-directory: apps/omher
+        run: pnpm exec playwright install chromium ${{ runner.os == 'macOS' && 'webkit' || '' }}
+      # The whole suite runs in the e2e job on Linux. Here only the specs whose keys, fonts, paths or engine differ
+      # per platform: the macOS runner queue alone used to hold a PR 45-65 minutes before an hour of e2e.
+      - name: End-to-end tests that behave per platform
+        working-directory: apps/omher
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then read -ra specs <<< "$E2E_MACOS"; else read -ra specs <<< "$E2E_WINDOWS"; fi
+          bash scripts/e2e-shards.sh 2 "${specs[@]}"
+        env:
+          E2E_MACOS: >-
+            e2e/cards-webkit.spec.ts e2e/term-kitty.spec.ts e2e/term-split-panes.spec.ts e2e/term-find.spec.ts
+            e2e/term-clip-scroll-keys.spec.ts e2e/terminals.spec.ts e2e/bot-reorder.spec.ts e2e/peers.spec.ts
+            e2e/ux021.spec.ts e2e/term-blocks.spec.ts e2e/term-exit.spec.ts e2e/runs.spec.ts
+            e2e/session-folder-create.spec.ts e2e/settings-pages-fit.spec.ts e2e/term-shift-enter.spec.ts
+          E2E_WINDOWS: >-
+            e2e/term-windows-keys.spec.ts e2e/reply-there-fit.spec.ts e2e/panel-ring-drop.spec.ts
+            e2e/sessions-attach.spec.ts e2e/accounts.spec.ts e2e/settings-pages-fit.spec.ts e2e/tasks-fit.spec.ts
+            e2e/terminals.spec.ts e2e/term-find.spec.ts e2e/term-import.spec.ts e2e/copy-prompt.spec.ts
+            e2e/term-shift-enter.spec.ts
+      - name: Rust tests (Tauri shell)
+        working-directory: apps/omher/src-tauri
+        run: cargo test
+      # PRs have no updater signing key (forks never do), so the debug bundle skips the signed updater
+      # artifacts; the release workflow builds and signs them.
+      - name: Build an unsigned debug bundle
+        working-directory: apps/omher
+        run: pnpm tauri build --debug --bundles ${{ matrix.bundles }} --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - name: Check the bridge ships inside the macOS .app
+        if: runner.os == 'macOS'
+        working-directory: apps/omher/src-tauri/target/debug/bundle/macos
+        run: test -f omher.app/Contents/Resources/bridge/omher_bridge.py
+      - name: Check the Windows build carries the bridge and an installer
+        if: runner.os == 'Windows'
+        working-directory: apps/omher/src-tauri/target/debug
+        run: |
+          test -f omher.exe
+          test -f bridge/omher_bridge.py
+          ls bundle/nsis/*.exe

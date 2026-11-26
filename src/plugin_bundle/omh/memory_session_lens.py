@@ -58,6 +58,7 @@ from typing import Any
 
 from .memory_principals import CHANNEL_REF_PATTERN, parse_principal_context
 from .memory_state_files import state_file_lock, write_text_atomic
+from .memory_store_io import guard_store_write
 
 SESSION_LENS_SCHEMA_VERSION = "omh_memory_session_lens/v1"
 SESSION_LENS_LISTS = ("seen", "confirmed")
@@ -214,7 +215,7 @@ def publish_session_lens(
     published before it counts as abandoned and is replaced.
     """
     path = session_lens_path(omh_home, session_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    guard_store_write(path, omh_home=Path(omh_home).expanduser())
     if reset:
         _prune_stale(path.parent, keep=path)
     with state_file_lock(path):
@@ -249,6 +250,7 @@ def note_session_records(omh_home: str | Path, session_id: str, key: str, record
     path = session_lens_path(omh_home, session_id)
     if not path.is_file():
         return []
+    guard_store_write(path, omh_home=Path(omh_home).expanduser())
     with state_file_lock(path):
         current = _read(path, session_id)
         if current is None:
@@ -276,6 +278,7 @@ def withdraw_session_lens(
     path = session_lens_path(omh_home, session_id)
     if not path.parent.is_dir():
         return
+    guard_store_write(path, omh_home=Path(omh_home).expanduser())
     with state_file_lock(path):
         owner = _instance_of(path)
         if instance is not None and owner != instance and not (unowned and owner == ""):
@@ -365,6 +368,14 @@ def lens_channel_scope(lens: dict[str, Any]) -> dict[str, str] | None:
     if lens_surface_class(lens) != SURFACE_CHANNEL or not _channel_scope(scope):
         return None
     return {"kind": "channel", "ref": str(scope["ref"])}
+
+
+def lens_profile_home(lens: dict[str, Any]) -> Path | None:
+    """The Hermes profile home whose settings the provider reads; None when the lens names no absolute one."""
+    value = lens.get("profile_home")
+    if not isinstance(value, str) or "\x00" in value or not Path(value).is_absolute():
+        return None
+    return Path(value)
 
 
 def _prune_stale(directory: Path, *, keep: Path) -> None:

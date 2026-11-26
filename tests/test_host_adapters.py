@@ -14,7 +14,7 @@ import unittest
 from _cli_harness import run_cli
 
 ROOT = Path(__file__).resolve().parents[1]
-HOSTS = ("cursor", "claude", "codex", "opencode", "openclaw", "pi")
+HOSTS = ("cursor", "claude", "codex", "opencode", "openclaw", "pi", "antigravity")
 
 
 def tree(root):
@@ -32,9 +32,14 @@ TAMPERING = (
 )
 
 
-def tamper(case, clone, mutation):
-    path = clone / "agent-skills/ulw-work/SKILL.md"
-    inventory = clone / "agent-skills/.omh-agent-skills-manifest.json"
+def pack_dir(host):
+    """The committed pack `host`'s installers copy (Claude Code has its own copy)."""
+    return json.loads((ROOT / f".{host}/manifest.json").read_bytes())["source"]
+
+
+def tamper(case, clone, mutation, pack="agent-skills"):
+    path = clone / pack / "ulw-work/SKILL.md"
+    inventory = clone / pack / ".omh-agent-skills-manifest.json"
     text = inventory.read_text(encoding="utf-8")
     lines = text.splitlines(keepends=True)
     first = next(index for index, line in enumerate(lines) if line.startswith('    "'))
@@ -67,10 +72,10 @@ def tamper(case, clone, mutation):
     elif mutation == "row_outside_files":
         text = text.replace('  "schema_version"', f'  "{FOREIGN}": "{digest}",\n  "schema_version"')
     elif mutation == "row_parent_escape":
-        readme = clone / "README.md"
+        readme = (clone / pack).parent / "README.md"
         readme.write_bytes(b"outside the pack\n")
         target = row("omh-ask/SKILL.md")
-        (clone / "agent-skills/omh-ask/SKILL.md").unlink()
+        (clone / pack / "omh-ask/SKILL.md").unlink()
         text = text.replace(target, f'    "../README.md": "{hashlib.sha256(readme.read_bytes()).hexdigest()}",\n')
     elif mutation == "row_dot_alias":
         text = text.replace('    "omh-ask/SKILL.md": ', '    "omh-ask/./SKILL.md": ')
@@ -147,7 +152,7 @@ class HostAdapterTests(unittest.TestCase):
         with chdir(ROOT):
             code, output, error = run_cli(["docs", "agent-skills", "--check"])
         self.assertEqual(code, 0, error + output)
-        self.assertEqual(json.loads(output).get("adapter_file_count"), 18)
+        self.assertEqual(json.loads(output).get("adapter_file_count"), 21)
         for host in HOSTS:
             for name in ("install.sh", "install.ps1", "manifest.json"):
                 self.assertTrue((ROOT / f".{host}" / name).is_file())
@@ -162,10 +167,15 @@ class HostAdapterTests(unittest.TestCase):
 
     def _install_equality(self, shell):
         from omh.install.agent_skills_projection import MANIFEST_NAME, agent_skill_files, agent_skills_manifest
-        expected = tree(ROOT / "agent-skills")
-        skills = {p.split("/")[0] for p in expected if p != MANIFEST_NAME}
-        expected[MANIFEST_NAME] = (json.dumps(agent_skills_manifest(agent_skill_files()), indent=2, sort_keys=True) + "\n").encode()
+        from omh.skills.host_adapters import host_pack_files
         for host in HOSTS:
+            # Each host installs its own committed pack, receipt included.
+            expected = tree(ROOT / pack_dir(host))
+            skills = {p.split("/")[0] for p in expected if p != MANIFEST_NAME}
+            files = host_pack_files(host, agent_skill_files())
+            self.assertEqual(expected.pop(MANIFEST_NAME),
+                             (json.dumps(agent_skills_manifest(files), indent=2, sort_keys=True) + "\n").encode())
+            expected[MANIFEST_NAME] = (json.dumps(agent_skills_manifest(files), indent=2, sort_keys=True) + "\n").encode()
             for user in (False, True):
                 with self.subTest(host=host, user=user), tempfile.TemporaryDirectory(prefix="omh adapter ") as tmp:
                     root = Path(tmp).resolve()
@@ -248,14 +258,14 @@ class HostAdapterTests(unittest.TestCase):
         from omh.install.agent_skills_projection import MANIFEST_NAME
         from omh.skills.host_adapters import HOST_ADAPTERS, checksum_inventory, source_digest
         self.assertEqual(tuple(adapter.host for adapter in HOST_ADAPTERS), HOSTS)
-        expected = tree(ROOT / "agent-skills")
-        receipt = expected.pop(MANIFEST_NAME)
-        hashes = {path: hashlib.sha256(content).hexdigest() for path, content in expected.items()}
-        # The committed inventory lists exactly the pack's bytes, and its digest
-        # keeps the pre-inventory definition so stored discovery receipts compare.
-        self.assertEqual(json.loads(receipt)["files"], hashes)
-        self.assertEqual(source_digest(hashes), hashlib.sha256(checksum_inventory(hashes).encode()).hexdigest())
         for host in HOSTS:
+            expected = tree(ROOT / pack_dir(host))
+            receipt = expected.pop(MANIFEST_NAME)
+            hashes = {path: hashlib.sha256(content).hexdigest() for path, content in expected.items()}
+            # The committed inventory lists exactly the pack's bytes, and its digest
+            # keeps the pre-inventory definition so stored discovery receipts compare.
+            self.assertEqual(json.loads(receipt)["files"], hashes)
+            self.assertEqual(source_digest(hashes), hashlib.sha256(checksum_inventory(hashes).encode()).hexdigest())
             manifest = json.loads((ROOT / f".{host}/manifest.json").read_bytes())
             # Nothing per-host moves when a skill body changes.
             self.assertEqual(manifest["inventory"], MANIFEST_NAME)
@@ -263,6 +273,7 @@ class HostAdapterTests(unittest.TestCase):
             for name in ("install.sh", "install.ps1", "manifest.json"):
                 self.assertIsNone(re.search(rb"[0-9a-f]{64}", (ROOT / f".{host}" / name).read_bytes()), name)
             self.assertEqual(manifest["transform"], "copy-only")
+            self.assertEqual(manifest["source"], "agent-skills" if host != "claude" else ".claude/agent-skills")
             self.assertEqual(manifest["evidence"], "docs/AGENT-SKILLS.md#host-support-matrix")
             for scope in ("repo", "user"):
                 with self.subTest(host=host, scope=scope), tempfile.TemporaryDirectory() as tmp:
@@ -366,18 +377,165 @@ class HostAdapterTests(unittest.TestCase):
                     repo.mkdir()
                     shutil.copytree(ROOT / "agent-skills", clone / "agent-skills")
                     shutil.copytree(ROOT / f".{host}", clone / f".{host}", ignore=shutil.ignore_patterns("skills"))
-                    tamper(self, clone, mutation)
+                    tamper(self, clone, mutation, pack_dir(host))
                     result = subprocess.run(command(clone, host), cwd=repo,
                                             capture_output=True, text=True, timeout=60)
                     self.assertNotEqual(result.returncode, 0, result.stdout)
                     self.assertTrue(result.stderr)
                     self.assertEqual(list(repo.iterdir()), [])
 
+    @unittest.skipUnless(shutil.which("sh"), "POSIX shell unavailable")
+    def test_shell_refuses_unsafe_and_case_variant_rows_by_name(self):
+        # install.ps1 names these refusals. The shell installer must too, rather
+        # than leave them to the tree comparison, which a case-sensitive source
+        # holding both spellings passes.
+        cases = {"row_dot_alias": "Unsafe source inventory path: omh-ask/./SKILL.md",
+                 "row_parent_escape": "Unsafe source inventory path: ../README.md",
+                 "row_case_variant": "Duplicate or case-variant source inventory path"}
+        for mutation, message in cases.items():
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                clone, repo = root / "clone", root / "project"
+                repo.mkdir()
+                shutil.copytree(ROOT / "agent-skills", clone / "agent-skills")
+                shutil.copytree(ROOT / ".cursor", clone / ".cursor")
+                tamper(self, clone, mutation)
+                result = subprocess.run(["sh", str(clone / ".cursor/install.sh")], cwd=repo,
+                                        capture_output=True, text=True, timeout=60)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(list(repo.iterdir()), [])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            clone, repo = root / "clone", root / "project"
+            repo.mkdir()
+            shutil.copytree(ROOT / "agent-skills", clone / "agent-skills")
+            shutil.copytree(ROOT / ".cursor", clone / ".cursor")
+            source = clone / "agent-skills"
+            (source / "OMH-ASK").mkdir(exist_ok=True)
+            if (source / "OMH-ASK").samefile(source / "omh-ask"):
+                return  # A case-insensitive source cannot hold both spellings.
+            shutil.copyfile(source / "omh-ask/SKILL.md", source / "OMH-ASK/SKILL.md")
+            inventory = source / ".omh-agent-skills-manifest.json"
+            payload = json.loads(inventory.read_bytes())
+            payload["files"]["OMH-ASK/SKILL.md"] = payload["files"]["omh-ask/SKILL.md"]
+            inventory.write_bytes((json.dumps(payload, indent=2, sort_keys=True) + "\n").encode())
+            result = subprocess.run(["sh", str(clone / ".cursor/install.sh")], cwd=repo,
+                                    capture_output=True, text=True, timeout=60)
+            self.assertNotEqual(result.returncode, 0, result.stdout)
+            self.assertIn("Duplicate or case-variant source inventory path", result.stderr)
+            self.assertEqual(list(repo.iterdir()), [])
+
+    def test_powershell_strict_mode_is_pinned_like_the_root_installer(self):
+        from omh.install.agent_skills_projection import agent_skill_files
+        from omh.skills.host_adapter_render import host_adapter_files
+
+        generated = host_adapter_files(agent_skill_files())
+        self.assertIn("Set-StrictMode -Version 3.0\n", (ROOT / "install.ps1").read_text(encoding="utf-8"))
+        for host in HOSTS:
+            with self.subTest(host=host):
+                text = generated[f".{host}/install.ps1"]
+                self.assertIn("Set-StrictMode -Version 3.0\n", text)
+                self.assertNotIn("-Version Latest", text)
+
+    @unittest.skipUnless(shutil.which("sh"), "POSIX shell unavailable")
+    def test_shell_warns_when_the_other_pack_root_holds_the_pack(self):
+        self._sibling_pack_warning(lambda host: ["sh", str(ROOT / f".{host}/install.sh")])
+
+    @unittest.skipUnless(shutil.which("pwsh") or shutil.which("powershell"), "PowerShell unavailable")
+    def test_powershell_warns_when_the_other_pack_root_holds_the_pack(self):
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        self._sibling_pack_warning(lambda host: [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                                                 "-File", str(ROOT / f".{host}/install.ps1")])
+
+    def _sibling_pack_warning(self, command):
+        for first, second in (("claude", "cursor"), ("opencode", "claude")):
+            with self.subTest(first=first, second=second), tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp).resolve()
+                results = [subprocess.run(command(host), cwd=repo, capture_output=True, text=True, timeout=60)
+                           for host in (first, second)]
+                for result in results:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn("Warning", results[0].stderr)
+                # Git Bash prints /c/..., PowerShell C:\...; assert the root's
+                # last two components in either separator, not the prefix.
+                other = r"\.claude[\\/]skills" if first == "claude" else r"\.agents[\\/]skills"
+                self.assertIn("Warning: ", results[1].stderr)
+                self.assertRegex(results[1].stderr, rf"[\\/]{other} also holds OMH Agent Skills")
+                self.assertIn("docs/AGENT-SKILLS.md#duplicate-copies", results[1].stderr)
+                # The skill list on stdout stays parseable: each names its own pack's skills.
+                for host, result in zip((first, second), results):
+                    listed = {p.name for p in (ROOT / pack_dir(host)).iterdir() if p.is_dir()}
+                    self.assertEqual(set(result.stdout.splitlines()[1:]), listed)
+
+    def test_cli_warns_when_both_pack_roots_hold_the_pack(self):
+        from contextlib import chdir
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            home, repo, other = root / "home", root / "project", root / "other"
+            for path in (home, repo, other):
+                path.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True, timeout=30)
+            with patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+                with chdir(repo):
+                    code, output, error = run_cli(["install", "--target", "agents", "--scope", "repo", "--json"])
+                self.assertEqual(code, 0, error)
+                warnings = json.loads(output)["warnings"]
+                self.assertEqual(len(warnings), 1)
+                self.assertIn(str(repo / ".claude/skills"), warnings[0])
+                self.assertIn("--host", warnings[0])
+                with chdir(other):
+                    code, output, error = run_cli(["install", "--target", "agents", "--host", "cursor", "--json"])
+                    self.assertEqual(code, 0, error)
+                    self.assertEqual(json.loads(output)["warnings"], [])
+                    code, output, error = run_cli(["install", "--target", "agents", "--host", "claude", "--json"])
+                    self.assertEqual(code, 0, error)
+                    self.assertEqual(len(json.loads(output)["warnings"]), 1)
+                    code, output, error = run_cli(["install", "--target", "agents", "--host", "cursor",
+                                                   "--status"], output_json=False)
+                    self.assertEqual(code, 0, error)
+                    self.assertIn("Warning: OMH Agent Skills are installed in both", output)
+
+    @unittest.skipUnless(shutil.which("sh"), "POSIX shell unavailable")
+    def test_edited_toolkit_recovery_is_move_aside_not_rerun(self):
+        from contextlib import chdir
+        from unittest.mock import patch
+        relative = "omh-show-reel/toolkit/scripts/timeline.py"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            home, repo = root / "home", root / "project"
+            home.mkdir()
+            repo.mkdir()
+            support = repo / ".agents/skills" / relative
+            with chdir(repo), patch.dict(os.environ, {"HOME": str(home), "USERPROFILE": str(home)}):
+                command = ["install", "--target", "agents", "--host", "cursor", "--json"]
+                self.assertEqual(run_cli(command)[0], 0)
+                support.write_text("edited support", encoding="utf-8", newline="\n")
+                code, output, error = run_cli(command + ["--status"])
+                self.assertEqual(code, 0, error)
+                status = json.loads(output)
+                self.assertEqual(status["locally_modified"], [relative])
+                self.assertIn("move the toolkit ones aside", status["next_action"])
+                self.assertNotIn("to replace them", status["next_action"])
+                self.assertNotEqual(run_cli(command)[0], 0)
+                result = subprocess.run(["sh", str(ROOT / ".cursor/install.sh")], cwd=repo,
+                                        capture_output=True, text=True, timeout=60)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn(f"Foreign/edited support preserved: {relative} (move it aside, then rerun)",
+                              result.stderr)
+                self.assertEqual(support.read_text(encoding="utf-8"), "edited support")
+                # The documented recovery: move the edited file aside, then rerun.
+                support.rename(root / "timeline.py.bak")
+                result = subprocess.run(["sh", str(ROOT / ".cursor/install.sh")], cwd=repo,
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                code, output, error = run_cli(command + ["--status"])
+                self.assertEqual(json.loads(output)["projection"], "fresh", error)
+
     @unittest.skipUnless(os.name != "nt" and shutil.which("sh"), "POSIX symlink/hash fallback test")
     def test_no_python_or_git_hash_fallback_and_preservation(self):
-        from omh.install.agent_skills_projection import MANIFEST_NAME, agent_skill_files, agent_skills_manifest
-        expected = tree(ROOT / "agent-skills")
-        expected[MANIFEST_NAME] = (json.dumps(agent_skills_manifest(agent_skill_files()), indent=2, sort_keys=True) + "\n").encode()
+        expected = tree(ROOT / ".claude/agent-skills")
         for hasher in ("sha256sum", "shasum"):
             if not shutil.which(hasher):
                 continue  # Only the installed platform checksum utilities can be exercised.

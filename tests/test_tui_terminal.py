@@ -23,13 +23,21 @@ from unittest.mock import patch
 
 from omh.tui import terminal as terminal_module
 from omh.tui.keys import BUTTON_LEFT, KeyDecoder, Mouse
+from omh.tui.screen import CURSOR_SHAPE_BEAM, CURSOR_SHAPE_BLOCK, CURSOR_SHAPE_DEFAULT
 from omh.tui.terminal import (
     BRACKETED_PASTE_OFF,
     BRACKETED_PASTE_ON,
+    FOCUS_REPORTING_OFF,
+    FOCUS_REPORTING_ON,
     KITTY_KEYBOARD_POP,
     KITTY_KEYBOARD_PUSH,
+    KITTY_KEYBOARD_QUERY,
+    XTVERSION_QUERY,
     MODIFY_OTHER_KEYS_OFF,
     MODIFY_OTHER_KEYS_ON,
+    MOUSE_DRAG_OFF,
+    MOUSE_DRAG_ON,
+    MOUSE_MODES_RESET,
     MOUSE_REPORTING_OFF,
     MOUSE_REPORTING_ON,
     BACKGROUND_QUERY,
@@ -121,7 +129,8 @@ class TerminalSupportedTests(unittest.TestCase):
             ):
                 with self.subTest(expected=expected):
                     self.assertEqual(terminal_blocker(stdin, stdout, environ), expected)
-        with patch.object(terminal_module, "termios", None):
+        # A platform with no termios that is not Windows (which has its console backend) falls back first of all.
+        with patch.object(terminal_module, "termios", None), patch.object(terminal_module.os, "name", "posix"):
             self.assertEqual(
                 terminal_blocker(_Stream(), _Stream(), {"TERM": "dumb"}),
                 "the OMH TUI needs termios, which this platform does not have",
@@ -269,15 +278,38 @@ class CursorReplyTests(unittest.TestCase):
 class MouseReportingSequenceTests(unittest.TestCase):
     def test_clicks_and_the_wheel_in_sgr_form_and_never_motion(self) -> None:
         self.assertEqual(MOUSE_REPORTING_ON, "\x1b[?1000h\x1b[?1006h")
-        self.assertEqual(MOUSE_REPORTING_OFF, "\x1b[?1006l\x1b[?1000l")
+        self.assertEqual(MOUSE_REPORTING_OFF, "\x1b[?1006l\x1b[?1002l\x1b[?1000l")  # a drag's motion goes off too
         for motion_mode in ("?1002", "?1003"):
             with self.subTest(mode=motion_mode):
                 self.assertNotIn(motion_mode, MOUSE_REPORTING_ON)
 
+    def test_a_drag_adds_only_a_held_buttons_motion(self) -> None:
+        self.assertEqual((MOUSE_DRAG_ON, MOUSE_DRAG_OFF), ("\x1b[?1002h", "\x1b[?1002l"))
+        self.assertNotIn("?1003", MOUSE_DRAG_ON + MOUSE_REPORTING_OFF)  # motion with no button held: never
+
     def test_the_restore_sequence_always_switches_mouse_reports_off(self) -> None:
         # Written on every exit, a crash and a signal included, whether or not they were turned on.
-        self.assertIn(MOUSE_REPORTING_OFF, RESTORE_SEQUENCE)
+        self.assertIn(MOUSE_MODES_RESET, RESTORE_SEQUENCE)
         self.assertNotIn(MOUSE_REPORTING_ON, RESTORE_SEQUENCE)
+        for mode in ("?1000h", "?1002h", "?1006h"):
+            with self.subTest(mode=mode):
+                self.assertNotIn(mode, RESTORE_SEQUENCE)
+
+    def test_the_reset_switches_off_every_mouse_mode_hermes_resets(self) -> None:
+        # Hermes' own TUI (`ui-tui/src/lib/terminalModes.ts`) arms 1000+1002+1003+1006 and a kill -9 leaves them on;
+        # every tracking mode and every encoding goes off, the encodings first, and none is switched on.
+        self.assertEqual(
+            MOUSE_MODES_RESET,
+            "\x1b[?1016l\x1b[?1015l\x1b[?1006l\x1b[?1005l\x1b[?1003l\x1b[?1002l\x1b[?1001l\x1b[?1000l\x1b[?9l",
+        )
+        self.assertNotIn("h", MOUSE_MODES_RESET)
+
+    def test_focus_reports_are_mode_1004_and_every_exit_switches_them_off(self) -> None:
+        # Asked on entry on every terminal (the pty cases below: an allowlisted one, Apple Terminal, legacy keys),
+        # and switched off on every exit, a crash, a signal and a stop included, so no shell is sent `ESC[I`.
+        self.assertEqual((FOCUS_REPORTING_ON, FOCUS_REPORTING_OFF), ("\x1b[?1004h", "\x1b[?1004l"))
+        self.assertIn(FOCUS_REPORTING_OFF, RESTORE_SEQUENCE)
+        self.assertNotIn(FOCUS_REPORTING_ON, RESTORE_SEQUENCE)
 
 
 @unittest.skipUnless(pty is not None and termios is not None, "needs a POSIX pty")
@@ -336,7 +368,7 @@ class TerminalPtyTests(unittest.TestCase):
 
     def test_bracketed_paste_is_switched_on_and_back_off(self) -> None:
         with Terminal(self.slave, self.slave):
-            self.assertEqual(self.master_output(), BRACKETED_PASTE_ON.encode())
+            self.assertEqual(self.master_output(), (MOUSE_MODES_RESET + BRACKETED_PASTE_ON + FOCUS_REPORTING_ON).encode())
         tail = self.master_output()
         self.assertTrue(tail.endswith(BRACKETED_PASTE_OFF.encode()), tail)
 
@@ -350,7 +382,9 @@ class TerminalPtyTests(unittest.TestCase):
                 term = Terminal(self.slave, self.slave, environ={"TERM_PROGRAM": program})
                 self.assertFalse(term.keyboard_protocol)
                 with term:
-                    self.assertEqual(self.master_output(), (BRACKETED_PASTE_ON + request).encode())
+                    self.assertEqual(
+                        self.master_output(), (MOUSE_MODES_RESET + BRACKETED_PASTE_ON + FOCUS_REPORTING_ON + request).encode()
+                    )
                     self.assertTrue(term.keyboard_protocol)
                 self.assertFalse(term.keyboard_protocol)
                 self.assertTrue(self.master_output().endswith(RESTORE_SEQUENCE.encode()))
@@ -360,7 +394,7 @@ class TerminalPtyTests(unittest.TestCase):
             with self.subTest(environ=environ):
                 term = Terminal(self.slave, self.slave, environ=environ)
                 with term:
-                    self.assertEqual(self.master_output(), BRACKETED_PASTE_ON.encode())
+                    self.assertEqual(self.master_output(), (MOUSE_MODES_RESET + BRACKETED_PASTE_ON + FOCUS_REPORTING_ON).encode())
                     self.assertFalse(term.keyboard_protocol)
                 # Released anyway: harmless where nothing was asked.
                 self.assertTrue(self.master_output().endswith(RESTORE_SEQUENCE.encode()))
@@ -380,7 +414,7 @@ class TerminalPtyTests(unittest.TestCase):
     def test_mouse_reporting_is_off_on_entry_and_set_mouse_writes_only_on_a_change(self) -> None:
         term = Terminal(self.slave, self.slave)
         with term:
-            self.assertEqual(self.master_output(), BRACKETED_PASTE_ON.encode())
+            self.assertEqual(self.master_output(), (MOUSE_MODES_RESET + BRACKETED_PASTE_ON + FOCUS_REPORTING_ON).encode())
             self.assertFalse(term.mouse_reporting)
             term.set_mouse(False)
             self.assertEqual(self.master_output(), b"")
@@ -399,6 +433,68 @@ class TerminalPtyTests(unittest.TestCase):
         self.assertFalse(term.mouse_reporting)
         self.assertTrue(self.master_output().endswith(RESTORE_SEQUENCE.encode()))
 
+    def test_every_mouse_mode_goes_off_on_entry_and_again_on_exit(self) -> None:
+        # A mode another program left on (a killed Hermes TUI's 1003) would report every drag to a TUI that never
+        # asked, which drops the report, so the person's selection dies; it goes off before anything else is asked
+        # for, and again on the way out, though this run never turned the mouse on.
+        term = Terminal(self.slave, self.slave)
+        with term:
+            entry = self.master_output()
+            self.assertTrue(entry.startswith(MOUSE_MODES_RESET.encode()), entry)
+            self.assertFalse(term.mouse_reporting)
+        tail = self.master_output()
+        self.assertIn(MOUSE_MODES_RESET.encode(), tail)
+        self.assertNotIn(MOUSE_REPORTING_ON.encode(), entry + tail)
+
+    def test_the_shells_cursor_shape_is_put_back_only_where_this_run_changed_it(self) -> None:
+        with Terminal(self.slave, self.slave) as term:
+            self.master_output()
+            term.set_cursor_shape(CURSOR_SHAPE_BEAM)
+            self.assertEqual(self.master_output(), CURSOR_SHAPE_BEAM.encode())
+            term.set_cursor_shape(CURSOR_SHAPE_BEAM)
+            self.assertEqual(self.master_output(), b"")
+            term.set_cursor_shape(CURSOR_SHAPE_BLOCK)
+            self.assertEqual(self.master_output(), CURSOR_SHAPE_BLOCK.encode())
+        written = self.master_output()
+        self.assertTrue(written.endswith(RESTORE_SEQUENCE.encode()), written)
+        self.assertTrue(written.startswith(CURSOR_SHAPE_DEFAULT.encode()), written)
+        self.assertIsNone(term.cursor_shape)
+
+    def test_a_run_that_never_set_a_cursor_shape_leaves_the_shells_alone(self) -> None:
+        self.assertNotIn(CURSOR_SHAPE_DEFAULT, RESTORE_SEQUENCE)
+        with Terminal(self.slave, self.slave) as term:
+            self.master_output()
+            term.set_cursor_shape(None)
+            self.assertEqual(self.master_output(), b"")
+        self.assertEqual(self.master_output(), RESTORE_SEQUENCE.encode())
+
+    def test_a_cursor_shape_set_outside_the_with_block_is_refused(self) -> None:
+        term = Terminal(self.slave, self.slave)
+        term.set_cursor_shape(CURSOR_SHAPE_BEAM)
+        self.assertEqual(self.master_output(), b"")
+        self.assertIsNone(term.cursor_shape)
+
+    def test_a_drag_turns_on_over_the_reports_and_off_without_them(self) -> None:
+        term = Terminal(self.slave, self.slave)
+        with term:
+            self.master_output()
+            term.set_mouse(True, drag=True)
+            self.assertEqual(self.master_output(), (MOUSE_REPORTING_ON + MOUSE_DRAG_ON).encode())
+            self.assertEqual((term.mouse_reporting, term.mouse_drag), (True, True))
+            term.set_mouse(True, drag=True)
+            self.assertEqual(self.master_output(), b"")
+            term.set_mouse(True)  # the agent list again: clicks only
+            self.assertEqual(self.master_output(), MOUSE_DRAG_OFF.encode())
+            term.set_mouse(True, drag=True)
+            self.assertEqual(self.master_output(), MOUSE_DRAG_ON.encode())
+            term.set_mouse(False)
+            self.assertEqual(self.master_output(), MOUSE_REPORTING_OFF.encode())
+            self.assertEqual((term.mouse_reporting, term.mouse_drag), (False, False))
+            term.set_mouse(True, drag=True)
+            self.master_output()
+        self.assertFalse(term.mouse_drag)
+        self.assertTrue(self.master_output().endswith(RESTORE_SEQUENCE.encode()))
+
     def test_mouse_reports_are_turned_off_when_the_block_raises_or_a_signal_exits(self) -> None:
         for error in (RuntimeError("boom"), SystemExit(128 + signal.SIGTERM)):
             with self.subTest(error=type(error).__name__):
@@ -409,7 +505,7 @@ class TerminalPtyTests(unittest.TestCase):
                         self.master_output()
                         raise error
                 self.assertFalse(term.mouse_reporting)
-                self.assertIn(MOUSE_REPORTING_OFF, self.master_output().decode())
+                self.assertIn(MOUSE_MODES_RESET, self.master_output().decode())
 
     def test_set_mouse_outside_the_block_writes_nothing(self) -> None:
         # Nothing would turn them off again, and every click would type escape codes into the shell.
@@ -461,8 +557,89 @@ class TerminalPtyTests(unittest.TestCase):
             os.write(self.master, b"ab\x1b]11;rgb:ffff/ffff/ffff\x07\x1b[7;1R\x1b[?62;22cz")
             colour, typed, row = term.query_background()
             self.assertEqual((colour, typed, row), ("#FFFFFF", b"abz", 7))
-            written = (BACKGROUND_QUERY + CURSOR_POSITION_QUERY + DEVICE_ATTRIBUTES_QUERY).encode()
-            self.assertEqual(self.master_output(), written)  # DA1 last: its answer still ends the wait
+            written = BACKGROUND_QUERY + CURSOR_POSITION_QUERY + XTVERSION_QUERY + KITTY_KEYBOARD_QUERY + DEVICE_ATTRIBUTES_QUERY
+            self.assertEqual(self.master_output(), written.encode())  # DA1 last: its answer still ends the wait
+
+    def test_every_terminal_is_asked_for_its_kitty_flags_and_the_answer_goes_to_the_decoder(self) -> None:
+        startup = (BACKGROUND_QUERY + CURSOR_POSITION_QUERY + KITTY_KEYBOARD_QUERY + DEVICE_ATTRIBUTES_QUERY).encode()
+        for program in ("kitty", "WezTerm", "ghostty", "Apple_Terminal", "otty"):
+            with self.subTest(program=program):
+                with Terminal(self.slave, self.slave, environ={"TERM_PROGRAM": program}) as term:
+                    self.master_output()
+                    answer = b"\x1b[?1u" if program in ("kitty", "WezTerm") else b"\x1b[?0u"
+                    os.write(self.master, b"\x1b[7;1R" + answer + b"\x1b[?62;22c")
+                    if program in ("Apple_Terminal", "otty"):  # an answer where nothing was pushed: push, ask again
+                        os.write(self.master, b"\x1b[?1u\x1b[?62;22c")
+                        self.assertEqual(term.query_background(), (None, answer + b"\x1b[?1u", 7))
+                        again = (KITTY_KEYBOARD_PUSH + KITTY_KEYBOARD_QUERY + DEVICE_ATTRIBUTES_QUERY).encode()
+                        self.assertEqual(self.master_output(), startup + again)
+                        self.assertTrue(term.keyboard_protocol)
+                    else:  # pushed on entry, or Ghostty, which never gets the kitty flags
+                        self.assertEqual(term.query_background(), (None, answer, 7))  # the decoder reads it
+                        self.assertEqual(self.master_output(), startup)  # before DA1: answered inside the wait
+                        self.assertEqual(term.keyboard_protocol, program != "Apple_Terminal")
+
+    def test_an_unnamed_terminal_gets_the_push_only_when_xtversion_names_a_known_one(self) -> None:
+        # Over SSH TERM_PROGRAM rarely arrives: the terminal is asked its name (XTVERSION) with the kitty query.
+        startup = BACKGROUND_QUERY + CURSOR_POSITION_QUERY + XTVERSION_QUERY + KITTY_KEYBOARD_QUERY + DEVICE_ATTRIBUTES_QUERY
+        cases = {
+            b"\x1bP>|kitty(0.35.2)\x1b\\": True,
+            b"\x1bP>|WezTerm 20240203-110809-5046fc22\x07": True,
+            b"\x1bP>|ghostty 1.1.3\x1b\\": False,  # its kitty mode drops Alt from Backspace
+            b"\x1bP>|iTerm2 3.5.10\x1b\\": False,  # not known to read the flag as the TUI does
+            b"": False,  # no name before the attributes: an unnamed answer may be Ghostty's
+        }
+        for name, pushed in cases.items():
+            with self.subTest(name=name):
+                with Terminal(self.slave, self.slave, environ={"TERM": "xterm-256color"}) as term:
+                    self.master_output()
+                    os.write(self.master, name + b"\x1b[?0u\x1b[?62;22c" + (b"\x1b[?1u\x1b[?62;22c" if pushed else b""))
+                    _colour, typed, _row = term.query_background()
+                    self.assertNotIn(b"\x1bP", typed)  # the name is an answer, never a key
+                    again = KITTY_KEYBOARD_PUSH + KITTY_KEYBOARD_QUERY + DEVICE_ATTRIBUTES_QUERY if pushed else ""
+                    self.assertEqual(self.master_output(), (startup + again).encode())
+                    self.assertEqual(term.keyboard_protocol, pushed)
+
+    def test_a_kitty_answer_after_the_attributes_answer_is_no_reason_to_push(self) -> None:
+        with Terminal(self.slave, self.slave, environ={"TERM_PROGRAM": "otty"}) as term:
+            self.master_output()
+            os.write(self.master, b"\x1b[?62;22c\x1b[?0u")  # a late answer: the decoder reads it, nothing is pushed
+            self.assertEqual(term.query_background(), (None, b"\x1b[?0u", None))
+            self.assertNotIn(KITTY_KEYBOARD_PUSH.encode(), self.master_output())
+            self.assertFalse(term.keyboard_protocol)
+
+    def test_a_push_on_the_answer_is_popped_on_exit_and_pushed_again_after_a_stop(self) -> None:
+        term = Terminal(self.slave, self.slave, environ={"TERM_PROGRAM": "otty"})
+        with term:
+            self.master_output()
+            os.write(self.master, b"\x1b[?0u\x1b[?62;22c\x1b[?1u\x1b[?62;22c")  # both answers in one read
+            self.assertEqual(term.query_background(), (None, b"\x1b[?0u\x1b[?1u", None))
+            self.master_output()
+            with patch.object(os, "kill"):  # the stop itself: the job is not really stopped here
+                self.assertTrue(term.suspend())
+            written = self.master_output().decode()
+            self.assertIn(RESTORE_SEQUENCE, written)
+            self.assertTrue(written.endswith(BRACKETED_PASTE_ON + FOCUS_REPORTING_ON + KITTY_KEYBOARD_PUSH), written)
+        self.assertTrue(self.master_output().endswith(RESTORE_SEQUENCE.encode()))  # KITTY_KEYBOARD_POP among it
+
+    def test_a_terminal_that_answers_no_kitty_query_gets_no_push(self) -> None:
+        for environ in ({"TERM_PROGRAM": "Apple_Terminal"}, {"TERM_PROGRAM": "otty", "OMH_TUI_KEYBOARD": "legacy"}):
+            with self.subTest(environ=environ):
+                with Terminal(self.slave, self.slave, environ=environ) as term:
+                    self.master_output()
+                    os.write(self.master, b"\x1b[?62;22c")
+                    self.assertEqual(term.query_background(timeout=5.0), (None, b"", None))
+                    asked = "" if environ.get("OMH_TUI_KEYBOARD") else KITTY_KEYBOARD_QUERY
+                    written = (BACKGROUND_QUERY + CURSOR_POSITION_QUERY + asked + DEVICE_ATTRIBUTES_QUERY).encode()
+                    self.assertEqual(self.master_output(), written)
+                    self.assertFalse(term.keyboard_protocol)
+
+    def test_a_terminal_that_answers_only_the_attributes_still_ends_the_wait_at_once(self) -> None:
+        with Terminal(self.slave, self.slave, environ={"TERM_PROGRAM": "kitty"}) as term:
+            os.write(self.master, b"\x1b[?62;22c")  # no kitty answer: the protocol is not spoken there
+            started = time.monotonic()
+            self.assertEqual(term.query_background(timeout=5.0), (None, b"", None))
+            self.assertLess(time.monotonic() - started, 1.0)
 
     def test_the_cursor_query_after_a_stop_asks_only_for_the_position(self) -> None:
         with Terminal(self.slave, self.slave) as term:

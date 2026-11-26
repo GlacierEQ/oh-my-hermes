@@ -1,6 +1,6 @@
 ---
 name: "omh-running-work-board"
-description: "[omh] Live view of running coding units: showing which coding units are running right now, on which runtime and model, with observed tokens and elapsed time. Use when the user says: running-work-board, running work board, which units are running, what models are running, 지금 뭐 돌고 있어, 뭐가 돌고 있어, 어떤 모델로 돌고 있어, 실행 중인 작업 보여줘."
+description: "[omh] Live view of running coding units: showing which coding units…"
 license: MIT
 compatibility: "Requires the omh CLI on PATH (pip install oh-my-hermes)."
 metadata:
@@ -23,6 +23,7 @@ This is an OMH `running-work-board` workflow skill, projected for Agent Skills h
 ## Do Not Use When
 
 - The user wants to start, plan, or dispatch coding work rather than observe it.
+- The user wants to create or change tasks on an agent board, or to coordinate profiles.
 - The user wants review, CI, or merge evidence, which a status board never provides.
 - The user is asking about their own application's runtime status rather than OMH coding units.
 
@@ -42,6 +43,7 @@ Bad example:
 
 ## Completion Checklist
 
+- The board is rendered with `omh coding status-board --json` (read-only: local dispatch and progress artifacts; on Hermes it also reads delegate children and workers from Hermes' own records), not recalled.
 - Runtime and model are named per unit, or explicitly reported as unknown.
 - Token counts and session references are observed values or the literal unknown, never estimates.
 - Elapsed time for an unfinished unit comes from its start marker, which cannot prove the unit is still alive.
@@ -61,7 +63,7 @@ Bad example:
 
 Use when the user asks what coding work is running right now -- which unit, which runtime, which model, how long, how many tokens -- rather than asking to start, plan, or review work.
 
-    Strong routing signals: `running-work-board`, `running work board`, `which units are running`, `what models are running`, `지금 뭐 돌고 있어`, `뭐가 돌고 있어`, `어떤 모델로 돌고 있어`, `실행 중인 작업 보여줘`
+    Strong routing signals: `running-work-board`, `running work board`, `which units are running`, `what models are running`, `지금 뭐 돌고 있어`, `뭐가 돌고 있어`, `어떤 모델로 돌고 있어`, `실행 중인 작업 보여줘`, `что делают агенты`, `покажи что запущено`, `чем заняты агенты`, `что запущено сейчас`
 
 ## Catalog Metadata
 

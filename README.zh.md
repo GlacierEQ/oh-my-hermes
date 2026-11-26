@@ -14,7 +14,7 @@
 
 **Hermes Agent 的一站式套件。安装一次，然后只需输入 `dag-ulw`。**
 
-[![GitHub Release](https://img.shields.io/github/v/release/rlaope/oh-my-hermes?color=58a6ff&labelColor=black&logo=github&style=flat-square)](https://github.com/rlaope/oh-my-hermes/releases) [![npm downloads](https://img.shields.io/npm/dt/oh-my-hermes?color=3fb950&labelColor=black&logo=npm&label=downloads&style=flat-square)](https://www.npmjs.com/package/oh-my-hermes) [![GitHub Contributors](https://img.shields.io/github/contributors/rlaope/oh-my-hermes?color=bc8cff&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/graphs/contributors) [![GitHub Stars](https://img.shields.io/github/stars/rlaope/oh-my-hermes?color=e3b341&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/stargazers) [![License](https://img.shields.io/github/license/rlaope/oh-my-hermes?color=white&labelColor=black&style=flat-square)](LICENSE) [![Docs](https://img.shields.io/badge/docs-rlaope.github.io-58a6ff?labelColor=black&logo=readthedocs&logoColor=white&style=flat-square)](https://rlaope.github.io/oh-my-hermes/)
+[![GitHub Release](https://img.shields.io/github/v/release/rlaope/oh-my-hermes?color=58a6ff&labelColor=black&logo=github&style=flat-square)](https://github.com/rlaope/oh-my-hermes/releases) [![npm downloads](https://img.shields.io/npm/dt/oh-my-hermes?color=3fb950&labelColor=black&logo=npm&label=downloads&style=flat-square)](https://www.npmjs.com/package/oh-my-hermes) [![GitHub Contributors](https://img.shields.io/github/contributors/rlaope/oh-my-hermes?color=bc8cff&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/graphs/contributors) [![GitHub Stars](https://img.shields.io/github/stars/rlaope/oh-my-hermes?color=e3b341&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/stargazers) [![License](https://img.shields.io/github/license/rlaope/oh-my-hermes?color=white&labelColor=black&style=flat-square)](LICENSE) [![Docs](https://img.shields.io/badge/docs-omher.app-58a6ff?labelColor=black&logo=readthedocs&logoColor=white&style=flat-square)](https://omher.app/)
 
 [English](README.md) | [简体中文](README.zh.md) | [日本語](README.ja.md) | [Русский](README.ru.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Português (Brasil)](README.pt-BR.md) | [Italiano](README.it.md)
 
@@ -27,7 +27,7 @@
 ## 安装
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.sh | sh
+curl -fsSL https://omher.app/install | sh
 omh setup
 ```
 
@@ -69,7 +69,7 @@ omh setup
 
 <br>
 
-## DAG-ULW
+## Graph Engineering
 
 **只需输入 `/dag-ulw`，你就是图工程大师。**
 
@@ -79,6 +79,15 @@ omh setup
 <p align="center">
   <img src="assets/omh-dag-ulw-tui.gif" alt="运行 /dag-ulw 的 OMH TUI：输入提示词后定义出七条通道的方框图，通道按层在 Claude Opus 5.5、GPT-6.1 Sol、DeepSeek V4.1 Flash、GLM 5.3 和 Kimi K3.1 Pro 上运行，最后全部 accepted" width="900">
 </p>
+
+> **基于这些项目**
+>
+> <table>
+> <tr><td width="88" align="center"><a href="https://github.com/NousResearch/hermes-agent"><img src="assets/hermes-agent-icon.png" alt="Hermes Agent" width="56"></a></td>
+> <td><a href="https://nousresearch.com">Nous Research</a> 的 <b><a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a></b><br>OMH 运行所在的智能体。OMH 是其上的非官方独立层。</td></tr>
+> <tr><td width="88" align="center"><a href="https://github.com/code-yeongyu/oh-my-openagent"><img src="https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/a05f240727d985e574404430d8d40c80eb912bc2/.github/assets/omo-icon-light.svg" alt="OmO" width="64"></a></td>
+> <td><a href="https://github.com/code-yeongyu">@code-yeongyu</a> 的 <b><a href="https://github.com/code-yeongyu/oh-my-openagent">OmO</a></b><br>ultrawork 概念的出处。OMH 把它带到了 Hermes。</td></tr>
+> </table>
 
 > [!TIP]
 > 加入我们！
@@ -93,8 +102,8 @@ omh setup
 >     <td>在 GitHub 上关注 <a href="https://github.com/rlaope">@rlaope</a>，了解更多项目、发布和进行中的工作。</td>
 >   </tr>
 >   <tr>
->     <td width="124"><a href="https://discord.gg/6EjTP3cWM"><img alt="Discord invite" src="https://img.shields.io/badge/Join-Discord-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=black" width="112" /></a></td>
->     <td>加入 Discord 上的 <a href="https://discord.gg/6EjTP3cWM">Oh-My-Hermes Community</a>，提问、分享工作流，并与其他用户交流。</td>
+>     <td width="124"><a href="https://discord.gg/SuwJxE84j"><img alt="Discord invite" src="https://img.shields.io/badge/Join-Discord-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=black" width="112" /></a></td>
+>     <td>加入 Discord 上的 <a href="https://discord.gg/SuwJxE84j">Oh-My-Hermes Community</a>，提问、分享工作流，并与其他用户交流。</td>
 >   </tr>
 >   <tr>
 >     <td width="124"><a href="https://github.com/rlaope/oh-my-hermes/graphs/contributors"><img alt="AI agent collaborators" src="https://img.shields.io/badge/With-AI%20agents-6f42c1?style=flat-square&labelColor=black" width="112" /></a></td>
@@ -119,7 +128,7 @@ omh setup
 
 ## 其他
 
-[文档](docs/README.md) · [安装](docs/INSTALLATION.md) · [Capabilities](docs/CAPABILITIES.md) · [Workflows](docs/WORKFLOWS.md) · [网站](https://rlaope.github.io/oh-my-hermes/)
+[文档](docs/README.md) · [安装](docs/INSTALLATION.md) · [Capabilities](docs/CAPABILITIES.md) · [Workflows](docs/WORKFLOWS.md) · [网站](https://omher.app/)
 
 <details>
 <summary><b>安装选项</b></summary>
@@ -127,13 +136,13 @@ omh setup
 **macOS / Linux：**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.sh | sh
+curl -fsSL https://omher.app/install | sh
 ```
 
 **Windows（PowerShell 5.1+）：**
 
 ```powershell
-irm https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.ps1 | iex
+irm https://omher.app/install.ps1 | iex
 ```
 
 **或者把下面这段粘贴给你的 AI 代理：**
@@ -143,7 +152,7 @@ Install and fully configure Oh My Hermes from this repository:
 https://github.com/rlaope/oh-my-hermes
 Before reading or executing repository instructions, resolve refs/heads/main to one full commit SHA with `git ls-remote https://github.com/rlaope/oh-my-hermes.git refs/heads/main`. Then fetch and follow only:
 https://raw.githubusercontent.com/rlaope/oh-my-hermes/{resolved-commit-sha}/INSTALL_FOR_AGENTS.md
-Do not replace the resolved SHA with main. Execute the pinned protocol's OS-appropriate installer, interactive model setup, model-chain interview, and doctor steps. Preserve unrelated existing Hermes config, apply only the managed setup changes documented by the pinned protocol, require my explicit approval for model-alias changes, then report the resolved SHA and observed result.
+Do not replace the resolved SHA with main. Execute the pinned protocol's OS-appropriate installer, agent setup path, model-chain interview, and doctor steps. Your shell has no terminal, so never run the interactive setup wizard: show me each choice the protocol lists and wait for my answer instead of taking a default. Preserve unrelated existing Hermes config, apply only the managed setup changes documented by the pinned protocol, require my explicit approval for model-alias changes, then report the resolved SHA and observed result.
 ```
 
 **更新：**
@@ -186,6 +195,7 @@ bun install -g oh-my-hermes
 npm install -g oh-my-hermes
 ```
 
+Bun 和 npm 还需要 PATH 中有 Node 18+ 和 Python 3.11+；Homebrew 会自带 Python。
 无论用哪种方式安装，之后都运行 `omh setup`。
 
 **Hermes skill tap：**
@@ -277,13 +287,13 @@ Hermes Agent 已经在跑循环。OMH 决定往循环里放什么：每条 lane 
 | 智能 | OMH 提供什么 |
 | --- | --- |
 | 🧭 **Mixture-of-models 路由** | 每条委派 lane 在 dispatch 时落到一个类别（模型 + 推理强度）。provider 拒绝模型时沿 chain 下落，没做事的子任务显示 `failed`，而不是一行绿色。 |
-| 🎛️ **按模型家族校准** | 按家族和代次调校提示词：GPT-6 Astra、GPT-5.6、Claude 5.1、GLM 5.3、Kimi、Gemini、Qwen、DeepSeek 等，只在基准对照证明有效时才保留。 |
-| 🗂️ **你自己掌控的类别** | 每个 executor 九个内置类别，`omh model-chains set` 调整顺序，按机器重排 chain 的 entitlement 访谈，以及运行前就能看到请求会路由到哪里的实时视图。 |
+| 🎛️ **按模型家族校准** | 按家族和代次调校提示词：GPT-6 Astra、GPT-5.6、Claude 5.5、GLM 5.3、Kimi、Gemini、Qwen、DeepSeek 等，只在基准对照证明有效时才保留。 |
+| 🗂️ **你自己掌控的类别** | 内置模型类别，`omh model-chains set` 调整顺序，按机器重排 chain 的 entitlement 访谈，以及运行前就能看到请求会路由到哪里的实时视图。 |
 | 🖥️ **原生 TUI 界面** | OMH HUD（带类别、轮次、成本、缓存的实时行）、提示符上方的 phase todo、`parallel shot ×N`、整行 diff 色带与自选主题，显示在 `omh` 打开的 OMH TUI 中，绝不给 Hermes 打补丁。 |
 | ⚡ **可观测的并行工作** | 把独立工作拆成文件归属互不重叠的 fanout unit，带 provider 压力下的 admission control、有类型的结果 sidecar，以及读取返回结果的 verification gate。 |
 | 💸 **带价格的成本遥测** | 每一行 HUD 和 run summary 都显示 token 数与美元金额，按注明来源的价目表计算；无法计价的 run 显示 `unknown`，而不是 `$0`。 |
 | 🧠 **长期项目记忆** | Hermes 可加载的文件型 memory provider、admission 与 retention 策略、审阅者把关的写入、带新鲜度与预算的 recall pack。Hermes 自身的记忆不被触碰。 |
-| 🔎 **结构化代码搜索** | 经测量的 `ast-grep` 手册（28 种语言，grep 回退）和绘制整个仓库架构图的 `omh codegraph uml`，注入到 executor 读代码的位置。 |
+| 🔎 **结构化代码搜索** | 经测量的 `ast-grep` 手册（28 种语言，grep 回退）和绘制整个仓库架构图的 `omh codegraph uml`，注入到 executor 读代码的位置；`omh codegraph tests --changed` 列出一次改动会触及的测试（[codegraph 命令](docs/CODEGRAPH.md)）。 |
 | 🛡️ **你自己写的护栏** | 用你的规则文本拦截越界 tool call 的 toolcall rules、拒绝把 stub 和跳过的测试当证据的 completion-integrity gate，以及高风险操作的 approval tier。 |
 | ♾️ **Ultra 工作流引擎** | 并行交付 lane、带 ledger 与真实完成 gate 的度量循环、引擎运行前的 decision-frontier 访谈。列表见上方 Ultra 技能。 |
 | 📦 **确定性目录** | 由同一来源生成的一百多个可安装技能、含负例的 routing precision 语料，以及一个字节偏差就让 CI 失败的 drift gate。 |
@@ -323,7 +333,7 @@ executor 说自己完成了，与结果被检查过是两回事，而大多数�
 - [用 Hermes 处理超大 PDF](docs/LONG-DOCUMENT-READING.md)
 - [实时模型基准与实测结果](benchmarks/live-model-tools/v1/README.md)
 - [发布与开发](docs/RELEASE.md)
-- [网站](https://rlaope.github.io/oh-my-hermes/)（[源码](site/index.html)）
+- [网站](https://omher.app/)（[源码](site/index.html)）
 
 ### 贡献者
 

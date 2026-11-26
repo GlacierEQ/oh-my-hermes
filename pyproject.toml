@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oh-my-hermes"
-version = "4.0.2"
+version = "5.0.1"
 description = "Install a Hermes-native skill workflow pack."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,7 +28,7 @@ classifiers = [
 omh = "omh.cli:main"
 
 [project.urls]
-Homepage = "https://rlaope.github.io/oh-my-hermes/"
+Homepage = "https://omher.app/"
 Issues = "https://github.com/rlaope/oh-my-hermes/issues"
 Repository = "https://github.com/rlaope/oh-my-hermes"
 
@@ -72,6 +72,7 @@ packages = [
   "omh.surfaces",
   "omh.system",
   "omh.workflows",
+  "omh.workflows.repro_audit",
   "omh.wrapper",
 ]
 
@@ -101,9 +102,14 @@ packages = [
 "omh.tui" = "src/tui"
 "omh.tui.attach" = "src/tui/attach"
 "omh.workflows" = "src/workflows"
+"omh.workflows.repro_audit" = "src/workflows/repro_audit"
 "omh.wrapper" = "src/wrapper"
 
 [tool.setuptools.package-data]
+# `git archive` (and so every GitHub archive) writes the commit into this
+# file through `.gitattributes` export-subst; `omh --version` reads it.
+"omh" = ["_archive_commit.txt"]
+"omh.workflows.repro_audit" = ["data/contract.json"]
 # Closed optional companion data, not packages/imported production modules.
 "omh.skills" = [
   "ai_job_search_toolkit/README.md", "ai_job_search_toolkit/scripts/job_state.py",
@@ -112,6 +118,12 @@ packages = [
   "geospatial_analysis_toolkit/README.md", "geospatial_analysis_toolkit/LICENSE.upstream",
   "geospatial_analysis_toolkit/scripts/analyze.py", "geospatial_analysis_toolkit/examples/input.json",
   "geospatial_analysis_toolkit/examples/overlay.json", "geospatial_analysis_toolkit/upstream-manifest.json",
+  "sprite_forge_toolkit/README.md", "sprite_forge_toolkit/LICENSE.upstream",
+  "sprite_forge_toolkit/scripts/forge.py", "sprite_forge_toolkit/examples/layout.json",
+  "sprite_forge_toolkit/upstream-manifest.json",
+  "frontend_toolkit/README.md", "frontend_toolkit/LICENSE.upstream",
+  "frontend_toolkit/scripts/phone_check.py", "frontend_toolkit/examples/phone-clean.html",
+  "frontend_toolkit/examples/phone-overflow.html", "frontend_toolkit/upstream-manifest.json",
   "biomedical_evidence_toolkit/README.md", "biomedical_evidence_toolkit/scripts/reconcile.py",
   "biomedical_evidence_toolkit/upstream-manifest.json",
   "molecular_docking_toolkit/README.md", "molecular_docking_toolkit/NOTICE.md",
@@ -129,6 +141,17 @@ packages = [
   "show_reel_toolkit/assets/sfx_presets.json",
   "show_reel_toolkit/examples/timing.json", "show_reel_toolkit/examples/music-spec.json", "show_reel_toolkit/examples/README.md",
   "show_reel_craft/*.md",
+  "channel_watch_toolkit/README.md", "channel_watch_toolkit/scripts/channel_watch.py",
+  "channel_watch_toolkit/examples/watch.json",
+  "pr_watch_toolkit/README.md", "pr_watch_toolkit/scripts/pr_watch.py",
+  "pr_watch_toolkit/scripts/pr_event_guard.py", "pr_watch_toolkit/examples/pr-watch.json",
+  "pr_watch_toolkit/examples/pr-event-guard.json",
+  "monitor_watch_toolkit/README.md", "monitor_watch_toolkit/scripts/api_watch.py",
+  "monitor_watch_toolkit/scripts/google_watch.py", "monitor_watch_toolkit/scripts/vault_watch.py",
+  "monitor_watch_toolkit/examples/*.json",
+  "data_share_review_toolkit/README.md", "data_share_review_toolkit/scripts/residual_scan.py",
+  "commit_pr_authoring_toolkit/README.md", "commit_pr_authoring_toolkit/scripts/merge_danger_scan.py",
+  "inference_serving_toolkit/README.md", "inference_serving_toolkit/scripts/vram_kv_calc.py",
 ]
 "omh.skins" = ["*.yaml"]
 "omh.tui" = ["frontend/dist/*.js"]
@@ -141,16 +164,16 @@ packages = [
 
 [dependency-groups]
 dev = [
-    "pytest==9.1.1",
+    "pytest==9.2.0",
 ]
 lint = [
-    "ruff==0.17.1",
+    "ruff==0.17.6",
 ]
 
 # Initial static-analysis baseline (issue #638). Scoped to Pyflakes (F) —
 # correctness signal (unused imports/vars, undefined names, shadowing) —
-# rather than the full pycodestyle/style surface, because this ~135k LOC
-# repo has no enforced line-length or import-order convention today and a
+# rather than the full pycodestyle/style surface, because this large repo has
+# no enforced line-length or import-order convention today and a
 # style-driven ruleset would demand a repo-wide reformat out of scope for a
 # baseline gate. Broaden the ruleset in follow-up work, not this issue.
 #

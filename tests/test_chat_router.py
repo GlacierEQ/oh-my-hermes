@@ -33,6 +33,7 @@ from omh.routing.route_plan import public_workflow_identifier
 from omh.plugin_bundle.omh.awareness import awareness_route_hint, awareness_route_hint_context
 from omh.skills.catalog import primary_harness_for_skill, routable_definitions
 from _route_owner import dispatched_or_asked, route_owner, route_owner_harness, shortlist_skills
+from omh.coding.pi_family_interop import PI_DISTRIBUTION_HOST, RUNTIME_USER_PHRASE
 
 
 class AiJobSearchActorRoutingTests(unittest.TestCase):
@@ -327,10 +328,10 @@ _REPINNED_PI_FAMILY_SESSION_INVENTORY_REQUESTS_OPEN_HARNESS_SESSION_IN = frozens
 )
 
 
-def sionic_omh_usage_evaluation_prompt() -> str:
-    return """이번 Sionic 작업에서 OMH가 얼마나 관여했는지 사용성 평가하고,
+def demo_omh_usage_evaluation_prompt() -> str:
+    return """이번 Example 작업에서 OMH가 얼마나 관여했는지 사용성 평가하고,
 왜 OMH를 덜 썼는지 분석해서 라우터 강화 플랜으로 잡아줘.
-Sionic은 마크다운 노트뿐 아니라 위키 페이지/site 생성도 포함했어.
+Example은 마크다운 노트뿐 아니라 위키 페이지/site 생성도 포함했어.
 결과창에는 Background process proc_d5eb61ddcf80 finished with exit code 0~
 Here's the final output: 같은 raw output, turn.completed usage, Self-improvement review 줄이 보였고
 이걸 프리티하게 OMH wrapper report로 정리해야 했어.
@@ -3507,7 +3508,11 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
                 self.assertEqual(task_card["task_type"], "omh_cli_maintenance")
                 self.assertEqual(task_card["route_level"], "operator_maintenance_command")
                 self.assertEqual(task_card["command"], command)
-                self.assertEqual(task_card["command_argv"], ["omh", command])
+                # A flagless uninstall is the full purge, so its card previews with --dry-run.
+                self.assertEqual(
+                    task_card["command_argv"],
+                    ["omh", command, "--dry-run"] if command == "uninstall" else ["omh", command],
+                )
                 self.assertEqual(task_card["recommended_next_action"], f"run_omh_{command}")
                 self.assertIn("code changes require a separate request", task_card["user_facing_summary"])
                 self.assertTrue(
@@ -3784,7 +3789,7 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
         self.assertIn("do not persist transient task", card["summary"])
 
     def test_pasted_omh_awareness_evaluation_routes_learning_before_delivery(self) -> None:
-        message = sionic_omh_usage_evaluation_prompt()
+        message = demo_omh_usage_evaluation_prompt()
 
         decision = route_chat_message(message, source="discord", limit=8)
         task_card = decision["task_card"]
@@ -3829,12 +3834,12 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
         self.assertIsNone(decision["task_card"])
         self.assertNotIn("task_card:router_design_feedback", decision["recommendations"][0]["matched"])
 
-        domain = route_chat_message("고객 관여도 분석해서 Sionic 위키 페이지 개선해줘.", source="discord")
+        domain = route_chat_message("고객 관여도 분석해서 Example 위키 페이지 개선해줘.", source="discord")
         self.assertNotEqual(domain["selected_skill"], "workflow-learning")
         self.assertIsNone(domain["task_card"])
 
     def test_domain_work_with_pasted_status_does_not_become_omh_quality_loop(self) -> None:
-        message = """Sionic 위키 페이지 사용성 평가하고 더 보기 좋게 만들어줘.
+        message = """Example 위키 페이지 사용성 평가하고 더 보기 좋게 만들어줘.
 
 [omh] v1.0.2 | plugin:ready | target:single | coding-agent:runtime(codex)
 [OMH] Native bridge status context.
@@ -3857,7 +3862,7 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
 Evidence boundary: prepared handoffs are not execution evidence.
 Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
 
-Sionic 작업 말고 OMH 라우터 강화 플랜으로 잡아줘.
+Example 작업 말고 OMH 라우터 강화 플랜으로 잡아줘.
 """
 
         decision = route_chat_message(message, source="discord")
@@ -5385,6 +5390,39 @@ selected_workflow=ultraprocess
                 )
 
 
+class MaintenanceUninstallCardTests(unittest.TestCase):
+    def test_uninstall_card_previews_before_the_full_purge(self) -> None:
+        from omh.routing.task_cards import _maintenance_command_card
+
+        card = _maintenance_command_card("uninstall")
+        self.assertEqual(card["command_argv"], ["omh", "uninstall", "--dry-run"])
+        self.assertIn("omh uninstall --dry-run", card["first_safe_action"])
+        self.assertEqual(card["recommended_next_action"], "run_omh_uninstall")
+        for command in ("update", "setup", "doctor", "install", "list"):
+            self.assertNotIn("--dry-run", _maintenance_command_card(command)["command_argv"])
+
+    def test_uninstall_card_carries_a_typed_keep_command_flag(self) -> None:
+        from omh.routing.task_cards import classify_task
+
+        self.assertEqual(classify_task("omh uninstall")["command_argv"], ["omh", "uninstall", "--dry-run"])
+        self.assertEqual(
+            classify_task("omh uninstall --keep-command")["command_argv"],
+            ["omh", "uninstall", "--dry-run", "--keep-command"],
+        )
+        self.assertIn("already shown", classify_task("omh uninstall")["first_safe_action"])
+
+    def test_wrapper_button_and_explanation_preview_instead_of_running_uninstall(self) -> None:
+        from omh.wrapper.contract import build_chat_interaction_payload
+
+        payload = build_chat_interaction_payload("omh uninstall", source="discord")
+        action = payload["chat_response"]["actions"][0]
+        self.assertEqual(action["id"], "run_omh_uninstall")
+        self.assertEqual(action["label"], "Preview omh uninstall")
+        explanation = payload["chat_response"]["state"]["workflow_explanation"]
+        self.assertIn("omh uninstall --dry-run", explanation["primary_action_hint"])
+        self.assertIn("omh uninstall --dry-run", explanation["recommended_reply"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -5460,16 +5498,16 @@ class UltraperfRoutingMatrixTests(unittest.TestCase):
 
 
 class PiFamilyExecutorCueTests(unittest.TestCase):
-    """pi/senpi/opencode delivery requests reach the coding lane; Raspberry-Pi
+    """pi-family and opencode delivery requests reach the coding lane; Raspberry-Pi
     hardware talk never becomes an executor handoff."""
 
     POSITIVE = (
         "have pi implement the retry fix",
-        "have senpi fix the login bug",
+        f"have {PI_DISTRIBUTION_HOST} fix the login bug",
         "delegate to pi: fix the login bug",
         "tell pi to fix the flaky test",
         "opencode로 이 버그 고쳐줘",
-        "omo runtime으로 이 버그 고쳐줘",
+        f"{RUNTIME_USER_PHRASE}으로 이 버그 고쳐줘",
     )
     # Bare "pi" stays owned by Raspberry-Pi physical-device routing.
     NEGATIVE = (
@@ -5495,7 +5533,7 @@ class PiFamilyExecutorCueTests(unittest.TestCase):
 
     def test_pi_family_session_inventory_requests_open_harness_session_inventory(self) -> None:
         for message in (
-            "show the senpi session inventory",
+            f"show the {PI_DISTRIBUTION_HOST} session inventory",
             "show the opencode session inventory",
             "recover the previous pi coding session",
         ):

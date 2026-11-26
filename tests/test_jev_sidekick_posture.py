@@ -6,7 +6,7 @@ may not. It may say a plugin directory exists, that Hermes' config lists the
 name, and that a credential NAME appears in the env file. It may quote what a
 catalog entry declares, naming where the quote was read. It may not say the
 plugin ran, that Jev is served, or that anything left the machine -- and it may
-never read a credential value, which the fixtures below prove by writing one
+never copy a credential value, which the fixtures below prove by writing one
 and asserting it reaches no output.
 
 The check is appended on every run, in both branches, because an optional
@@ -415,7 +415,7 @@ class PostureTests(unittest.TestCase):
             self.assertEqual(posture["status"], "absent")
             self.assertEqual(posture["plugins"], [])
             self.assertEqual(posture["skipped"], [])
-            self.assertIn("never reads credential values", str(posture["claim_boundary"]))
+            self.assertIn("never copies or reports credential values", str(posture["claim_boundary"]))
             self.assertIn(posture["status"], POSTURE_STATUSES)
 
     def test_a_missing_hermes_home_is_absent_rather_than_an_error(self) -> None:
@@ -923,15 +923,37 @@ class DoctorCheckTests(unittest.TestCase):
         sentinel = "sk-omh-jev-sentinel-9f8e7d6c5b4a"
         with TemporaryDirectory() as tmp:
             paths = _paths(Path(tmp))
-            with patch.dict(os.environ, {"TYPESAFE_API_KEY": sentinel}):
+            with patch.dict(os.environ, {"TYPESAFE_API_KEY": sentinel, "TYPESAFE_BASE_URL": "https://gateway.example/v1"}):
                 _checks, check = _doctor_check(paths)
-            self.assertIn("omh_jev_ask: route typesafe by variable name", check.message)
+            self.assertIn("route typesafe (custom base URL configured) by variable name", check.message)
             self.assertIn("no ask recorded", check.message)
             self.assertIn("HTTPS proxy", check.message)
+            self.assertTrue(check.detail["omh_jev_ask"]["typesafe_base_url_configured"])
             self.assertNotIn(sentinel, check.message)
             self.assertNotIn(sentinel, json.dumps(check.detail))
             self.assertEqual(check.detail["omh_jev_ask"]["route_available"], "typesafe")
             self.assertEqual(check.detail["credential_names_present"], [])
+
+    def test_the_local_endpoint_settings_are_named_in_the_same_check(self) -> None:
+        sentinel = "sk-omh...5b4a"
+        with TemporaryDirectory() as tmp:
+            paths = _paths(Path(tmp))
+            setting = paths.omh_home / "jev" / "settings.json"
+            setting.parent.mkdir(parents=True, exist_ok=True)
+            setting.write_text(
+                json.dumps({"local_http_endpoint": True, "typesafe_model": "clef-flash:latest"}), encoding="utf-8"
+            )
+            with patch.dict(os.environ, {"TYPESAFE_API_KEY": sentinel, "TYPESAFE_BASE_URL": "http://10.0.2.2:11434"}):
+                _checks, check = _doctor_check(paths)
+            self.assertIn(
+                "route typesafe (custom base URL configured) (local HTTP allowed) (model clef-flash:latest)",
+                check.message,
+            )
+            block = check.detail["omh_jev_ask"]
+            self.assertTrue(block["local_http_endpoint_setting"])
+            self.assertEqual(block["typesafe_model_setting"], "clef-flash:latest")
+            self.assertNotIn(sentinel, check.message)
+            self.assertNotIn(sentinel, json.dumps(check.detail))
 
     def test_an_openrouter_key_alone_is_not_an_omh_jev_ask_route(self) -> None:
         with TemporaryDirectory() as tmp:

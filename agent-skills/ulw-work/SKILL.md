@@ -1,6 +1,6 @@
 ---
 name: "ulw-work"
-description: "[omh] Accepted plan awaiting implementation: split it into disjoint parallel lanes with per-lane acceptance criteria, verification commands, and owners; prevents two lanes editing the same file. Aliases: ulw. Use when the user says: ultrawork, parallel work, parallel implementation, parallel then integrate, high throughput, coding team, coordinated workers, finish until done."
+description: "[omh] Accepted plan awaiting implementation. Aliases: ulw."
 license: MIT
 compatibility: "Requires the omh CLI on PATH (pip install oh-my-hermes)."
 metadata:
@@ -18,57 +18,23 @@ This is an OMH `ultrawork` workflow skill, projected for Agent Skills hosts (Cla
 
 ## Why This Exists
 
-`ultrawork` exists to choose one-owner, ordered-dependency, or independent-frontier execution for an accepted implementation plan without letting concurrency blur ownership, verification, worker protocol, worktree isolation, or observed runtime evidence. It also carries four named internal capabilities absorbed from sibling engines: `coordinated_scope` (coordinated worker lanes), `delivery_boundary` (one bounded plan-to-PR cycle), `single_owner_persistence` (one owner finishes and verifies), and `durable_checkpoint` (durable goal ledger with checkpoints and a final gate).
+Read `references/details.md` first.
 
 ## First Steps
 
-- Initialize an English phase checklist through the host's task mechanism or a durable file: bootstrap, each implementation/verification lane, independent review, and evidence/cleanup close. Keep one outcome active and update declarations from observed results.
+Read `references/details.md` first.
 
 ## Do Not Use When
 
-- Avoid conflicting parallel writers; use single-owner or ordered execution.
-- The plan is not accepted, lane boundaries are unclear, or verification commands are missing.
-- The user expects Hermes to secretly execute coding lanes instead of preparing explicit selected-runtime handoffs.
-- For a decision spike, use `omh-decision-prototype`.
-- [capability:coordinated_scope] The lanes are exploratory research or QA coordination without an accepted implementation plan; frame them with the `coordinated_scope` capability before parallel delivery.
-- [capability:single_owner_persistence] The request is a settings-only change, one bounded edit that is explicitly low-risk and has a direct owner and verification path, or a direct answer/diagnosis; use one direct owner instead of opening parallel delivery lanes, a finish-until-done loop, or a goal ledger.
-- [capability:delivery_boundary] The user wants an open-ended feedback loop or long-horizon campaign; use `ulw-loop` instead.
-- [capability:single_owner_persistence] Progress must survive sessions as a ledger with multiple checkpoints and a final gate; use the `durable_checkpoint` capability.
-- [capability:durable_checkpoint] One concrete, already-scoped task only needs one owner to finish and verify; use the `single_owner_persistence` capability.
-- [capability:durable_checkpoint] The next work must be discovered or reframed repeatedly through research and feedback cycles; use `ulw-loop`.
-- [capability:durable_checkpoint] Acceptance criteria, current checkpoint, and final gate expectations are too vague to make a goal inspectable.
+Read `references/details.md` first.
 
 ## Examples
 
-Good example:
-
-- Prompt: $ultrawork split the accepted docs refresh, CLI output polish, and test updates into parallel implementation lanes.
-- Expected behavior: Create disjoint lane prompts with acceptance criteria, verification commands, and review evidence requirements.
-- Why: The work can be split cleanly and benefits from parallel execution discipline.
-
-Bad example:
-
-- Prompt: $ultrawork refactor the central router in five agents at once.
-- Expected behavior: Keep one owner or re-plan boundaries before parallelization.
-- Why: Shared core logic makes parallel edits likely to conflict or hide regressions.
+Read `references/details.md` first.
 
 ## Completion Checklist
 
-- The phase checklist was declared before engine work started and every outcome reached a terminal state; a run that declared none, or that left outcomes pending, is not complete.
-- Every concurrently runnable lane is disjoint by write scope, invariant, or responsibility, and every ordered unit carries an explicit acyclic dependency edge, before parallel handoffs are prepared.
-- Each lane has acceptance criteria, verification command, worker protocol expectation, and review owner.
-- Every lane's owner and routing were named before dispatch, never inferred from inheritance; a lane dispatched on inherited routing is unrouted.
-- Builder, verifier, reviewer, documentation, and PR lanes have explicit host task owners and observed evidence.
-- Worker ACK, dispatch, result, review, CI, and merge evidence are observed or explicitly missing.
-- Integration verification ran after lane results before the final status claims completion.
-- Changed behavior was exercised through the real user surface after diagnostics and relevant tests passed, and every spawned QA resource has a cleanup receipt.
-- The closing brief includes observed host accounting or an explicit run-summary not_available statement, never estimated usage.
-- [capability:coordinated_scope] The integrated status names which coordination lanes are observed, blocked, or still prepared_not_observed.
-- [capability:coordinated_scope] Coordination teardown is explicit: released lanes are named and closed instead of lingering as implicit owners.
-- [capability:durable_checkpoint] The goal_status_card/v1 or goal_continuation/v1 names the next action and the final status says complete, blocked, or continue with the exact remaining checkpoint.
-- [capability:durable_checkpoint] All explicitly linked coding milestones have matching observed runtime evidence or stay prepared_not_observed and named as gaps without closing the goal.
-- [capability:durable_checkpoint] Long-running or background executor milestones report observed handles, current state, changed-file summaries, missing checks, and prepared-vs-observed boundaries while work is running.
-- [capability:durable_checkpoint] Branch, PR, CI, review, and merge claims are verified against local HEAD, remote branch SHA, PR head SHA, and merge commit before saying a fix landed.
+Read `references/details.md` first.
 
 ## Recovery Notes
 
@@ -87,7 +53,7 @@ Bad example:
 
 Use when an accepted implementation plan can be split into independent, reviewable work lanes.
 
-    Strong routing signals: `ultrawork`, `$ultrawork`, `ulw`, `$ulw`, `parallel work`, `parallel implementation`, `parallel then integrate`, `high throughput`, `coding team`, `coordinated workers`, `finish until done`, `persistent execution`, `implement`, `one-cycle delivery`, `single-cycle delivery`, `end-to-end process`, `delivery process`, `research plan implement review docs pr`, `plan implement review docs pr`, `prepare a pr`, `make a pr`, `open a pr`, `pr-ready`, `red green refactor`, `red-green refactor`, `red-green`, `failing test first`, `並列で実装`, `並列実装`, `並行して実装`, `コーディングチームで`, `并行实现`, `并行开发`, `并行推进`, `编码团队`, `implementasi paralel`
+    Strong routing signals: `ultrawork`, `$ultrawork`, `ulw`, `$ulw`; all of them in `references/details.md`.
 
 ## Catalog Metadata
 
@@ -103,7 +69,7 @@ Quality bar:
 - When adapting an existing capability, read `../omh-verification-gate/references/adaptation-quality.md` before accepting a plan, dispatching work, or claiming completion; carry its criteria and comparisons into tasks and evidence.
 - Attach acceptance criteria, verification commands, and review expectations to each lane.
 - Keep dispatch, execution, review, CI, and merge status evidence separate.
-- After final brief composition and before unattended coding handoff, explicitly run `omh handoff-risk-scan --brief-file <final-brief> --repo <workspace> --strict --json`. Route high_risk (exit 1) to existing confirmation or security-safety-review; scan_error (exit 2) requires repaired input and a new scan. Clear never grants permission or bypasses metadata preflight, approval, or host policy.
+- After final brief composition and before unattended coding handoff, explicitly run `omh handoff-risk-scan --brief-file <final-brief> --repo <workspace> --strict --json`. Route high_risk (exit 1) to existing confirmation or `omh-security-safety-review`; scan_error (exit 2) requires repaired input and a new scan. Clear never grants permission or bypasses metadata preflight, approval, or host policy.
 - Write every lane or node prompt standalone with TASK, DELIVERABLE, SCOPE, VERIFY, and STOP WHEN in that order, exact paths and binary pass/fail observables, and one role per node; a dependency edge orders execution only and never substitutes upstream output.
 - End every code-changing run with a verification fan-in that depends on all producer lanes, runs the repository's real test/build command, and reports captured binary pass/fail output; downstream consumers re-check upstream claims before trusting them.
 - For each behavioral increment follow PIN -> RED -> GREEN -> SURFACE -> CLEAN: pin behavior a refactor could hide, capture the intended failing proof before implementation, make the smallest change, exercise the real user surface, and tear down every QA resource with a cleanup receipt; tests alone never prove completion.
@@ -112,7 +78,7 @@ Quality bar:
 - [capability:coordinated_scope] Keep the current host as coordinator and narrator; delegate through the host's own subagent/task mechanism with explicit ownership, or run lanes sequentially when unavailable.
 - [capability:delivery_boundary] Complete exactly one plan-to-PR delivery cycle, then stop with status, evidence gaps, or a next recommended workflow.
 - [capability:delivery_boundary] Start a delivery cycle with codebase/source research and a ralplan-style decision record before implementation handoff.
-- [capability:delivery_boundary] Run code-review as a gate after implementation evidence exists; review preparation alone is not review evidence.
+- [capability:delivery_boundary] Run `omh-code-review` as a gate after implementation evidence exists; review preparation alone is not review evidence.
 - [capability:delivery_boundary] End a delivery cycle with a PR-ready or PR-observed report that separates prepared, executed, reviewed, verified, CI, and PR evidence.
 - [capability:delivery_boundary] Use the host's own subagent/task mechanism with explicit owner, acceptance criteria, verification commands, and a resumable ledger for durable checkpoints. Never imply hidden execution.
 - When the user explicitly selects an external coding owner, use the host's authorized task mechanism, verify its actual capabilities, and capture its session/task handle. Missing delegation means sequential work or a named blocker, never fabricated dispatch.
@@ -126,17 +92,14 @@ Quality bar:
 - [capability:single_owner_persistence] For single-owner coding edits, prepare and track the selected runtime path instead of implying unobserved work happened or hiding execution inside chat narration.
 - [capability:single_owner_persistence] Report single-owner completion only from observed execution and verification evidence, with remaining risks named.
 - [capability:durable_checkpoint] Keep goal state durable, inspectable, and separate from chat narration in the metadata-only .omh/goals goal_ledger/v1.
-- [capability:durable_checkpoint] Create a code-changing goal with `omh goal create --obligation slop-cleanup`; it completes only after a checkpoint cites one completed `ai-slop-cleaner` run for it, recorded and cited with the commands that skill closes on (`--cleanup-outcome passed|skipped|reverted` and an outputs or verification summary the integrity check accepts; placeholders are refused). Without the flag the goal is not gated.
+- [capability:durable_checkpoint] Create a code-changing goal with `omh goal create --obligation slop-cleanup`; it completes only after a checkpoint cites one completed `omh-ai-slop-cleaner` run for it, recorded and cited with the commands that skill closes on (`--cleanup-outcome passed|skipped|reverted` and an outputs or verification summary the integrity check accepts; placeholders are refused). Without the flag the goal is not gated.
 - [capability:durable_checkpoint] Checkpoint every success, blocker, and final quality gate with fresh evidence.
 - [capability:durable_checkpoint] Reject completion with a summary-only goal_completion_gate/v1 result until required criteria, blockers, and explicitly linked runtime runs are satisfied.
 - [capability:durable_checkpoint] Name the one element gating goal progress from the linked loop's loop_constraint_assessment/v1 before checkpointing the next step; load `ulw-loop/references/goal-constraint-discipline.md` for the method.
 
 Required inputs:
 
-- accepted plan
-- work units with read/write scopes
-- dependency edges or shared invariants
-- verification commands
+Read `references/details.md` first.
 
 Expected outputs:
 
@@ -147,8 +110,7 @@ Expected outputs:
 
 Artifact expectations:
 
-- prepared coding delegation record per implementation lane when wrappers can record them
-- [capability:single_owner_persistence] goal-execution run record with checkpoint or final evidence when available
+Read `references/details.md` first.
 
 Safety rules:
 
@@ -158,7 +120,7 @@ Safety rules:
 - [capability:coordinated_scope] Use coordination lanes only when work is independent; if two lanes are not independent, collapse them under one owner or re-plan before dispatch.
 - [capability:coordinated_scope] Keep shared-file edits under one owner; if integration reveals a shared-file conflict, stop lane fan-out and reassign ownership before continuing.
 - [capability:coordinated_scope] Record unobserved delegation as not_observed; a delegation record exists only when separate participants are observed.
-- [capability:delivery_boundary] Do not continue into a repeated feedback loop; recommend `loop` when the user wants ongoing cycles.
+- [capability:delivery_boundary] Do not continue into a repeated feedback loop; recommend `ulw-loop` when the user wants ongoing cycles.
 - [capability:delivery_boundary] Do not skip planning when the delivery request is broad, risky, or user-visible; a ralplan-style or reviewed plan names acceptance criteria, risks, and verification commands.
 - [capability:delivery_boundary] Run docs sync only when behavior, setup, commands, examples, or public claims changed.
 - [capability:delivery_boundary] Keep web research source-backed and permission-aware; do not run hidden network or LLM calls from OMH core.

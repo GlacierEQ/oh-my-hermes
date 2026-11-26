@@ -4,10 +4,11 @@ Each test runs `omh.tui.app.main` (or the `App` it builds) with a scripted
 terminal whose output lands in the VT screen model, a fake HUD poller, and the
 real `GatewayClient` talking to the replay gateway, which plays recorded Hermes
 6c61c3e27d frames and checks every frame the TUI sends against the recording.
-The TUI's startup differs from the recording client's (it asks `config.get`
-and `commands.catalog` after `session.create`, without waiting for either), so
-those two are answered from the scenario's answer table: the catalog with its
-recorded answer, the config with an empty one.
+The TUI's startup differs from the recording client's (it asks `config.get`,
+`commands.catalog`, `session.list` and `model.options` after `session.create`,
+without waiting for any), so those are answered from the scenario's answer
+table: the catalog and the session list with their recorded answers, the
+config with an empty one and the configured default with no model.
 
 A script step waits for a condition on what the screen shows, then delivers
 its bytes (or a resize); one silent read follows every step, so a lone Esc
@@ -44,13 +45,16 @@ from _tui_gateway_replay import (
     replay_env,
     spans,
 )
-from _tui_lines import composer_text, INFO_INSET, line_text, RULE_ROW, rule_rows
+from _tui_lines import badge_text, info_row_index, without_badge, composer_text, INFO_INSET, line_text, RULE_ROW, rule_rows
 from _vt_screen import VTScreen
 from omh.tui import terminal as terminal_module
 from omh.skin_pack import default_theme, hex_to_rgb, theme_for_name, write_theme_choice
 from omh.tui.app import (
     EXIT_HINT,
+    RESPAWN_LEFT_REASON,
+    SEND_NOW_HINT,
     SLOT_ARM_SECONDS,
+    SESSION_LIST_LIMIT,
     App,
     banner_logo,
     initial_theme,
@@ -60,8 +64,11 @@ from omh.tui.app import (
 )
 from omh.tui.gateway import GatewayClient, GatewayUnavailable, ServerRequest, gateway_spawn
 from omh.tui.keys import CHAR, DOWN, ENTER, ESCAPE, LEFT, RIGHT, UP, Key, Mouse, Paste
-from omh.tui.launch import FALLBACK_EXIT, FALLBACK_SENTINEL_ENV
-from omh.tui.modes import ACCEPT_LABEL, IDLE_HINT, PLAN_LABEL, STEER_COMMAND_HINT, STEER_KEY_HINT, info_line
+from omh.tui.launch import (
+    BOTS_HOME_ENV, CLOSED_EXIT, FALLBACK_EXIT, FALLBACK_SENTINEL_ENV, RUNTIME_ENV, RUNTIME_OWN_VALUE, SESSION_FILE_ENV,
+)
+from omh.tui.live_sessions import LIVE_SESSIONS_FILE, PENDING_MARKER
+from omh.tui.modes import ACCEPT_LABEL, PLAN_LABEL, info_line
 from omh.tui.screen import CLEAR_SCREEN_AND_SCROLLBACK, ERASE_SCROLLBACK
 from omh.tui.style import Span
 from omh.tui.theme import DEFAULT_THEME, theme_named
@@ -77,11 +84,18 @@ RULE_MARK = "────"  # in both of the composer's rules
 BOX_MARK = RULE_ROW  # one of the composer's rules: two per frame, above and under it
 # The working row's clock, `(12s · …` or `(1m 4s)`: on screen while a turn runs or waits on the person.
 WORKING_CLOCK = re.compile(r"\(\d+(?:m \d+)?s(?: · |\))")
+# Between turns in the normal mode: the info line's left side is the badge alone, or with the agent count after it.
+IDLE_LEFT = re.compile(r"\d+ agents?(?: · ↓ agents)?")
+EMPTY_COMPOSER = "❯ Ask Hermes anything"  # the composer's placeholder: nothing typed
 # Between the composer and the info line on these 24-row terminals: the bottom rule.
 UNDER_COMPOSER = 1
 # Only the session call is awaited. The catalog is read after the session, naming it, so project-local skills
-# are listed for its workspace; a fresh session then asks for the stored sessions, to name the last one.
-STARTUP_METHODS = ["client.capabilities", "session.create", "config.get", "commands.catalog", "session.list"]
+# are listed for its workspace; a fresh session then asks for the stored sessions, to name the last one. Last,
+# the config file's mtime and Hermes' configured default model, which a later move is measured from.
+STARTUP_METHODS = [
+    "client.capabilities", "session.create", "config.get", "commands.catalog", "session.list", "config.get",
+    "model.options",
+]
 NO_TERMIOS = terminal_module.termios is None
 # The block logo a start shows above the banner on these 24-row terminals from 100 columns: six rows and a blank.
 LOGO = [line_text(row) for row in banner_logo(default_theme(), None, 100, 24)]
@@ -93,12 +107,25 @@ TURN_CANCELLED = "Turn cancelled before the agent was ready"
 INTERRUPTED = ("session.interrupt", {"result": {"status": "interrupted"}})
 
 
-def startup_answers() -> tuple[tuple[str, dict], ...]:
+# Hermes' configured default (a `model.options` naming no session): the same at every read, so nothing moves.
+NO_DEFAULT = ("model.options", {"result": {"model": "", "provider": ""}})
+# A launch whose default read Hermes refused: nothing to measure a move from, so a turn starts without the check
+# (`App._start_turn`). Tests of what input typed in one burst does during a turn use it.
+UNREAD_DEFAULT = ("model.options", {"error": {"code": 4001, "message": "no default"}})
+
+
+# Ctrl+U, a no-op on the empty composer, in front of prompts typed ahead in one read. A read of plain lines is an
+# unmarked paste (`KeyDecoder`) and stays in the composer; a read with a control key in it is typed, so its Enters send.
+TYPED_AHEAD = b"\x15"
+
+
+def startup_answers(default: tuple[str, dict] = NO_DEFAULT) -> tuple[tuple[str, dict], ...]:
     return (
         ("config.get", {"result": {"config": {}}}),
         ("commands.catalog", recorded_answer("session", "commands_catalog")),
         # The last-session lookup a fresh session makes: the recording lists only the session itself.
         ("session.list", recorded_answer("session", "session_list")),
+        default,
     )
 
 
@@ -136,6 +163,8 @@ class ScriptedTerminal:
         self.fired: dict[str, float] = {}  # label -> when that step fired
         self.exited_at = 0.0
         self.mouse_reporting = False
+        self.mouse_drag = False  # reports include a held button's motion (the pager's drag)
+        self.cursor_shape: str | None = None
         self.mouse_calls: list[bool] = []  # every `set_mouse` that changed the state, in order
         self.background: str | None = None  # what the background query answers
         self.cursor_row: int | None = None  # the 1-based cursor row the same query reports
@@ -184,13 +213,23 @@ class ScriptedTerminal:
         self.suspended += 1
         return True
 
-    def set_mouse(self, enabled: bool) -> None:
+    def set_mouse(self, enabled: bool, drag: bool = False) -> None:
         """As `Terminal.set_mouse`: the mode switch is written only when the state changes."""
+        drag = enabled and drag
+        if drag != self.mouse_drag:
+            self.mouse_drag = drag
+            self.write(terminal_module.MOUSE_DRAG_ON if drag else terminal_module.MOUSE_DRAG_OFF)
         if enabled == self.mouse_reporting:
             return
         self.mouse_reporting = enabled
         self.mouse_calls.append(enabled)
         self.write(terminal_module.MOUSE_REPORTING_ON if enabled else terminal_module.MOUSE_REPORTING_OFF)
+
+    def set_cursor_shape(self, shape: str | None) -> None:
+        """As `Terminal.set_cursor_shape`: written only when the shape changes."""
+        if shape != self.cursor_shape:
+            self.cursor_shape = shape
+            self.write(shape or terminal_module.CURSOR_SHAPE_DEFAULT)
 
     def _wait(self, what: str) -> bytes:
         if time.monotonic() > self.deadline:
@@ -222,27 +261,32 @@ class ScriptedTerminal:
     # -- reading the screen --
 
     def info_row(self) -> str:
-        """The info line: the screen's last row that is not blank ("" on a blank screen)."""
+        """The info line, its badge taken out: the last row that starts with the badge, else the screen's last row that
+        is not blank (an agent view's rows stand under the line; "" on a blank screen)."""
         rows = [line for line in self.screen.lines() if line]
-        return rows[-1] if rows else ""
+        badged = [line for line in rows if without_badge(line) != line]
+        return without_badge((badged or rows)[-1]) if rows else ""
 
     def history(self) -> str:
         return "\n".join(self.screen.history())
 
     def idle(self) -> bool:
-        """No turn runs and nothing asks (agents may still run): the info line offers `? for shortcuts`, or, in accept
-        or plan, whose line is the same either way, it names the mode and no working row is on the screen."""
-        row = self.info_row()
-        if IDLE_HINT in row:
+        """No turn runs and nothing asks (agents may still run): no working row is on the screen, and the info line
+        names the mode in accept or plan, or, in the normal mode, says nothing after the badge but the agent count
+        while the composer is empty (a draft, Esc's or Ctrl+C's second press, a picker or a question each say or
+        hide something)."""
+        lines = self.screen.lines()
+        if any(WORKING_CLOCK.search(line) for line in lines):
+            return False
+        body = self.info_row().removeprefix(INFO_INSET)
+        if body.startswith((ACCEPT_LABEL, PLAN_LABEL)):
             return True
-        return row.removeprefix(INFO_INSET).startswith((ACCEPT_LABEL, PLAN_LABEL)) and not any(
-            WORKING_CLOCK.search(line) for line in self.screen.lines()
-        )
+        left = re.split(r" {3,}", body)[0].strip()
+        return (not left or IDLE_LEFT.fullmatch(left) is not None) and any(line.startswith(EMPTY_COMPOSER) for line in lines)
 
     def running(self) -> bool:
-        """The info line offers a steer: a turn runs, nothing asks, normal mode."""
-        row = self.info_row()
-        return STEER_COMMAND_HINT in row or STEER_KEY_HINT in row
+        """A turn runs and nothing asks: the working row counts its seconds."""
+        return any(WORKING_CLOCK.search(line) for line in self.screen.lines()) and not self.idle()
 
     def shows(self, needle: str) -> Callable[[], bool]:
         return lambda: needle in "\n".join(self.screen.lines())
@@ -284,8 +328,9 @@ class FakePoller:
     def take(self) -> None:
         return None
 
-    def refresh(self) -> None:
+    def refresh(self) -> int:
         self.refreshes = getattr(self, "refreshes", 0) + 1
+        return self.refreshes
 
     def watch_tokens(self, session_ids: Sequence[str]) -> None:
         self.watched = tuple(session_ids)
@@ -320,6 +365,8 @@ class Run:
 class AppTestCase(unittest.TestCase):
     def prepare(self, scenario: Scenario, *, rows: int = 24, cols: int = 80, env: dict | None = None) -> Run:
         root = Path(self.enterContext(make_test_tempdir("omh-tui-app-")))
+        # `main` builds the App itself: a Ctrl+V that finds no image never reads the machine's real clipboard here.
+        self.enterContext(patch("omh.tui.app.clipboard_text", lambda *args, **kwargs: None))
         materialize(root, scenario)
         environ = {
             **replay_env(root),
@@ -327,8 +374,15 @@ class AppTestCase(unittest.TestCase):
             "HERMES_TUI_CWD": "/fixture/project",
             # The input history file goes here, never into the person's own ~/.hermes.
             "HERMES_HOME": str(root),
+            # The session record, turn ends and theme too, never into the person's own ~/.omh (`live_sessions`).
+            "OMH_HOME": str(root / "omh"),
             "TERM": "xterm-256color",
             FALLBACK_SENTINEL_ENV: str(root / "fallback"),
+            "OMH_TUI_WALLPAPER": "0",  # the living wallpaper paints the blank cells; its own tests turn it on
+            "OMH_TUI_UPDATE_CHECK": "0",  # the update notice asks npm; its own tests turn it on, with the fetch injected
+            # The main screen leaves the mouse to the terminal, the behaviour these replays pin byte for byte;
+            # `tests/test_tui_main_mouse.py` turns it on.
+            "OMH_TUI_MOUSE": "0",
             **(env or {}),
         }
         environ.pop("OMH_NO_TUI", None)
@@ -352,6 +406,7 @@ class AppTestCase(unittest.TestCase):
             open_terminal=lambda: run.terminal,
             make_client=self.make_client(run),
             make_poller=lambda omh_home, hermes_home: run.poller,
+            contain_faults=False,  # a render bug raises here (`App.contain_faults`)
         )
         return run
 
@@ -383,6 +438,7 @@ class StartupRefusalTests(AppTestCase):
             open_terminal=lambda: run.terminal,
             make_client=self.make_client(run),
             make_poller=lambda omh_home, hermes_home: run.poller,
+            contain_faults=False,  # a render bug raises here (`App.contain_faults`)
         )
         self.assert_fell_back(run)
         self.assertIn("cannot run the OMH TUI", run.stderr.getvalue())
@@ -423,13 +479,14 @@ class StartupRefusalTests(AppTestCase):
         self.assertEqual((run.terminal.screen.lines()[:5], run.terminal.screen.scrollback), (shell, []))
         self.assertEqual(run.clients[0].close(grace=FAST_GRACE), 0)
 
-    def test_drift_on_the_busy_mode_call_is_a_notice_and_the_session_goes_on(self) -> None:
-        # config.get is answered after the first frame, and the busy mode has a default: its drift costs nothing.
+    def test_drift_on_the_settings_call_is_a_notice_and_the_session_goes_on(self) -> None:
+        # config.get is answered after the first frame, and what it sets has defaults: its drift costs nothing.
         drift = recorded_answer("session", "drift_reply")
         answers = (
             ("config.get", drift),
             ("commands.catalog", recorded_answer("session", "commands_catalog")),
             ("session.list", recorded_answer("session", "session_list")),
+            NO_DEFAULT,
         )
         run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
         run.terminal.script(
@@ -439,6 +496,20 @@ class StartupRefusalTests(AppTestCase):
         self.run_main(run)
         self.assert_clean_run(run)
         self.assertNotIn("this Hermes refused config.get", run.stderr.getvalue())
+
+    def test_a_render_bug_in_a_session_main_runs_here_raises(self) -> None:
+        # The harness passes `contain_faults=False`: a part of the frame that raises fails the test that drives
+        # `main`, where the launched TUI would draw it as a warn row (`App._drawn`).
+        answers = (
+            ("commands.catalog", recorded_answer("session", "commands_catalog")),
+            ("session.list", recorded_answer("session", "session_list")),
+            NO_DEFAULT,
+        )
+        run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
+        run.terminal.script(Step(b"\x04", when=run.terminal.idle, label="the idle info line"))
+        with patch.object(App, "_info_line", side_effect=RuntimeError("a render bug")):
+            with self.assertRaisesRegex(RuntimeError, "a render bug"):
+                self.run_main(run)
 
     def test_the_gateway_stderr_printed_at_a_failed_start_carries_no_escape_sequence(self) -> None:
         run = self.prepare(
@@ -487,6 +558,7 @@ class StartupRefusalTests(AppTestCase):
             open_terminal=lambda: run.terminal,
             make_client=interrupted,
             make_poller=lambda omh_home, hermes_home: run.poller,
+            contain_faults=False,  # a render bug raises here (`App.contain_faults`)
         )
         self.assertEqual(run.code, 130)
         self.assertIn("interrupted", run.stderr.getvalue())
@@ -539,6 +611,8 @@ class ExitSignalTests(AppTestCase):
                 # leaves this runner alive and the script below exits it.
                 self.addCleanup(signal.signal, signum, signal.signal(signum, outer))
                 run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=startup_answers()))
+                # Under `omh` too: a signal's code is never the closed-session one.
+                run.environ[SESSION_FILE_ENV] = str(run.root / "omh-session.json")
                 run.terminal = SignalledTerminal(signum)
                 run.terminal.script(Step(b"\x04", when=run.terminal.idle, label="the first frame"))
                 with self.assertRaises(SystemExit) as raised:
@@ -555,13 +629,14 @@ class ExitSignalTests(AppTestCase):
 class SessionTests(AppTestCase):
     def test_startup_draws_status_and_composer_and_writes_the_active_session_file(self) -> None:
         run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=startup_answers()))
+        run.environ[SESSION_FILE_ENV] = str(run.root / "omh-session.json")
         run.terminal.script(Step(b"\x04", when=run.terminal.idle, capture="ready", label="the first frame"))
         self.run_main(run)
-        self.assert_clean_run(run)
+        self.assert_clean_run(run, CLOSED_EXIT)  # `omh` launched it: Hermes prints no epilogue, `omh` its card
         screen = run.terminal.captures["ready"]
         info = info_index(screen)
-        self.assertTrue(screen[info].startswith(INFO_INSET + IDLE_HINT), screen)
-        self.assertIn("deepseek/deepseek-v4.1-flash-ultrafast · ", screen[info])
+        self.assertTrue(screen[info].startswith(INFO_INSET + badge_text() + "   "), screen)  # the badge alone on the left
+        self.assertIn("v4.1-flash-ultrafast · ", screen[info])  # its short name beside the badge at 80 columns
         composer = info - 1 - UNDER_COMPOSER
         self.assertEqual(composer_text(screen[composer]), "❯ Ask Hermes anything", screen)
         self.assertTrue(screen[composer - 1].startswith(BOX_MARK), screen)
@@ -570,6 +645,11 @@ class SessionTests(AppTestCase):
         self.assertEqual(run.calls("config.get")[0]["params"], {"key": "full"})
         self.assertEqual(json.loads(run.active_session_file.read_text(encoding="utf-8")), {"session_id": STORED_ID})
         self.assertEqual(stat.S_IMODE(os.stat(run.active_session_file).st_mode), 0o600)
+        # `omh`'s own copy names the home whose state database holds the session, for the exit card.
+        omh_session = Path(run.environ[SESSION_FILE_ENV])
+        self.assertEqual(json.loads(omh_session.read_text(encoding="utf-8")),
+                         {"session_id": STORED_ID, "hermes_home": str(run.root), "opened": []})
+        self.assertEqual(stat.S_IMODE(os.stat(omh_session).st_mode), 0o600)
         self.assertEqual(run.poller.sessions, [STORED_ID])
         self.assertTrue(run.poller.started and run.poller.stopped)
         # A new HUD snapshot wakes the loop as gateway news does: through the app, whichever client is live.
@@ -577,6 +657,28 @@ class SessionTests(AppTestCase):
         self.assertEqual((run.terminal.entered, run.terminal.exited), (1, 1))
         # The region is gone after exit; nothing of it is left on the screen.
         self.assertNotIn(BOX_MARK, run.terminal.history())
+
+    def test_the_hud_reads_the_home_the_session_runs_on_even_on_the_tuis_own_runtime(self) -> None:
+        # On its own runtime (`omh theme runtime own`) the session, its state database and the `processes.json`
+        # its background terminals land in all live in the TUI home `HERMES_HOME` names. `BOTS_HOME_ENV` names the
+        # bots' home for the bot board only: a HUD that read it found no process, so no `✳ Waiting…` row stood
+        # over the composer while the session waited on one (the owner's screen, 2026-11-11).
+        for extra, label in (({}, "shared"), ({RUNTIME_ENV: RUNTIME_OWN_VALUE, BOTS_HOME_ENV: "/bots"}, "own")):
+            with self.subTest(runtime=label):
+                run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=startup_answers()),
+                                   env=extra)
+                run.terminal.script(Step(b"\x04", when=run.terminal.idle, label="the first frame"))
+                homes: list[tuple[str | None, str | None]] = []
+
+                def make_poller(omh_home: str | None, hermes_home: str | None, run: Run = run) -> FakePoller:
+                    homes.append((omh_home, hermes_home))
+                    return run.poller
+
+                run.code = main(run.environ, stdin=TtyStream(), stdout=TtyStream(), stderr=run.stderr,
+                                open_terminal=lambda run=run: run.terminal, make_client=self.make_client(run),
+                                make_poller=make_poller, contain_faults=False)
+                self.assert_clean_run(run)
+                self.assertEqual([home for _omh, home in homes], [str(run.root)])
 
     def test_a_typed_prompt_is_submitted_and_the_reply_lands_in_scrollback(self) -> None:
         prompt = "Reply with exactly the word: ok"
@@ -606,7 +708,7 @@ class SessionTests(AppTestCase):
         )
         run.terminal.script(
             # One read: the second Enter lands while the first prompt's turn is pending.
-            Step(b"first prompt\rsecond prompt\r", when=run.terminal.idle, label="idle"),
+            Step(TYPED_AHEAD + b"first prompt\rsecond prompt\r", when=run.terminal.idle, label="idle"),
             Step(b"\x04", when=lambda: "cleanly)." in run.terminal.history() and run.terminal.idle(), label="turn 2"),
         )
         self.run_main(run)
@@ -631,6 +733,46 @@ class SessionTests(AppTestCase):
         self.assert_clean_run(run)
         (interrupt,) = run.calls("session.interrupt")
         self.assertEqual(interrupt["params"], {"session_id": LIVE_ID})
+
+    def test_ctrl_c_twice_during_a_turn_interrupts_once_and_exits_0(self) -> None:
+        run = self.prepare(
+            Scenario("session", spans("session", "startup", "create", "interrupted_turn"), answers=startup_answers())
+        )
+        run.terminal.script(
+            self.submit(run, "Write the numbers from 1 to 300, one per line, nothing else."),
+            Step(b"\x03", when=run.terminal.running, label="running"),
+            Step(b"\x03", when=run.terminal.shows(EXIT_HINT), label="the exit hint"),
+        )
+        self.run_main(run)
+        self.assert_clean_run(run)
+        self.assertEqual([frame["params"] for frame in run.calls("session.interrupt")], [{"session_id": LIVE_ID}])
+
+    def test_a_session_closed_under_omh_exits_closed_exit_and_elsewhere_0(self) -> None:
+        # Hermes' launcher prints its exit summary, naming `hermes --tui --resume`, for 0 and 130 only.
+        closes = {
+            "ctrl+c twice": lambda run: (Step(b"\x03", when=run.terminal.idle, label="idle"),
+                                         Step(b"\x03", when=run.terminal.shows(EXIT_HINT), label="the exit hint")),
+            "ctrl+d": lambda run: (Step(b"\x04", when=run.terminal.idle, label="idle"),),
+            "/exit": lambda run: (self.submit(run, "/exit"),),
+        }
+        for launched_by_omh in (True, False):
+            for name, steps in closes.items():
+                with self.subTest(omh=launched_by_omh, close=name):
+                    answers = (*startup_answers(), ("session.close", {"result": {"closed": True}}))
+                    run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
+                    if launched_by_omh:
+                        run.environ[SESSION_FILE_ENV] = str(run.root / "omh-session.json")
+                    run.terminal.script(*steps(run))
+                    self.run_main(run)
+                    self.assert_clean_run(run, CLOSED_EXIT if launched_by_omh else 0)
+
+    def test_a_gateway_exit_under_omh_still_returns_1(self) -> None:
+        run = self.prepare(
+            Scenario("session", spans("session", "startup", "create"), answers=startup_answers(), after=EXIT)
+        )
+        run.environ[SESSION_FILE_ENV] = str(run.root / "omh-session.json")
+        self.run_main(run)
+        self.assertEqual(run.code, 1)
 
     def test_ctrl_c_twice_while_idle_exits_0(self) -> None:
         run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=startup_answers()))
@@ -685,6 +827,7 @@ class SessionTests(AppTestCase):
                 stderr=run.stderr,
                 make_client=self.make_client(run),
                 make_poller=lambda omh_home, hermes_home: run.poller,
+                contain_faults=False,  # a render bug raises here (`App.contain_faults`)
             )
         self.assert_clean_run(run)
         self.assertEqual(given, [run.environ])
@@ -749,7 +892,7 @@ class SessionTests(AppTestCase):
         terminal = run.terminal
         terminal.script(
             # One read: the second prompt queues behind the first, whose turn the error ends.
-            Step(b"first prompt\rsecond prompt\r", when=terminal.idle, label="idle"),
+            Step(TYPED_AHEAD + b"first prompt\rsecond prompt\r", when=terminal.idle, label="idle"),
             Step(b"\x04", when=lambda: len(run.calls("prompt.submit")) == 2, label="the queued prompt sent"),
         )
         self.run_main(run)
@@ -769,7 +912,7 @@ class SessionTests(AppTestCase):
         run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
         terminal = run.terminal
         terminal.script(
-            Step(b"first prompt\rsecond prompt\r", when=terminal.idle, label="idle"),
+            Step(TYPED_AHEAD + b"first prompt\rsecond prompt\r", when=terminal.idle, label="idle"),
             Step(b"\x04", when=lambda: len(run.calls("prompt.submit")) == 2, label="the queued prompt sent"),
         )
         self.run_main(run)
@@ -782,6 +925,14 @@ class SessionTests(AppTestCase):
         answers = (*startup_answers(), ("session.close", {"result": {"closed": True}}))
         run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
         run.terminal.script(self.submit(run, "/quit"))
+        self.run_main(run)
+        self.assert_clean_run(run)
+        self.assertEqual([frame["params"] for frame in run.calls("session.close")], [{"session_id": LIVE_ID}])
+
+    def test_exit_is_quit(self) -> None:
+        answers = (*startup_answers(), ("session.close", {"result": {"closed": True}}))
+        run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
+        run.terminal.script(self.submit(run, "/exit"))
         self.run_main(run)
         self.assert_clean_run(run)
         self.assertEqual([frame["params"] for frame in run.calls("session.close")], [{"session_id": LIVE_ID}])
@@ -891,7 +1042,9 @@ class SessionTests(AppTestCase):
         self.assertTrue(all(len(line) <= 60 for line in everything))
 
     def test_a_session_without_subagents_never_turns_on_mouse_reporting_so_drag_selection_stays_native(self) -> None:
-        # With agents to click it does, for as long as they are clickable: `test_tui_agent_mouse`.
+        # With OMH_TUI_MOUSE=0, this harness's default. With agents to click it does, for as long as they are
+        # clickable (`test_tui_agent_mouse`); without the switch the main screen takes the mouse
+        # (`test_tui_main_mouse`).
         run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=startup_answers()))
         run.terminal.script(Step(b"\x04", when=run.terminal.idle, label="the first frame"))
         self.run_main(run)
@@ -935,7 +1088,7 @@ class PromptSlotTests(AppTestCase):
         self.assert_denied(run)
         slot = "\n".join(run.terminal.captures["slot"])
         self.assertIn("rm -rf ./omh-m0-probe-dir", slot)
-        self.assertIn("waiting on you", slot)
+        self.assertIn("waiting for your approval", slot)
         self.assertEqual(json.loads(run.active_session_file.read_text(encoding="utf-8")), {"session_id": APPROVAL_STORED_ID})
 
     def test_esc_on_an_approval_sends_the_explicit_deny(self) -> None:
@@ -950,8 +1103,8 @@ class PromptSlotTests(AppTestCase):
         self.assert_denied(run)
 
     def test_up_then_enter_on_an_armed_approval_still_denies(self) -> None:
-        # Up then Enter is the composer's recall-and-resend. On an approval Up moves nothing,
-        # so the Enter answers the default deny; the replay accepts only the deny.
+        # Up then Enter is the composer's recall-and-resend. On an approval Up moves from allow once, where it
+        # opens, to deny, the first row, so the Enter answers deny; the replay accepts only the deny.
         run = self.approval_run()
         run.terminal.script(
             self.submit(run, "Run rm -rf ./omh-m0-probe-dir"),
@@ -977,7 +1130,12 @@ class PromptSlotTests(AppTestCase):
             Step(b"\x1b[C\r", when=terminal.shows("Hermes asks to run"), label="the approval slot"),
             Step(when=lambda: not now.__setitem__(0, 100.0 + SLOT_ARM_SECONDS / 2), label="half the delay"),
             Step(b"\r", when=terminal.shows("Hermes asks to run"), label="still arming"),
-            Step(when=lambda: not now.__setitem__(0, 100.0 + SLOT_ARM_SECONDS), label="the delay passed"),
+            # The delay starts again from the last early key: one delay after the opening the slot still arms, so
+            # this Enter (allow once, were it armed) answers nothing and starts the delay again.
+            Step(when=lambda: not now.__setitem__(0, 100.0 + SLOT_ARM_SECONDS), label="one delay on"),
+            Step(b"\r", when=terminal.shows("Hermes asks to run"), label="restarted"),
+            # A hair past (100.8 - 100.4 is a little under 0.4 in floats), and short of a doubled delay.
+            Step(when=lambda: not now.__setitem__(0, 100.0 + SLOT_ARM_SECONDS * 2 + 0.01), label="the delay passed"),
             Step(b"d", when=terminal.shows("Hermes asks to run"), label="armed"),
             Step(b"\x04", when=lambda: "proceed." in terminal.history() and terminal.idle(), label="end"),
         )
@@ -1075,7 +1233,8 @@ class PromptSlotTests(AppTestCase):
 
     def test_keys_and_an_enter_that_arrive_as_a_clarify_opens_answer_nothing(self) -> None:
         # Enter would pick the highlighted `red`, and so would `1`. Typed for the composer as the
-        # question lands, they reach it inside the arm delay and do nothing; the replay records `blue`.
+        # question lands, they reach it inside the arm delay and answer nothing (the `1` stays in the
+        # draft); the replay records `blue`.
         run = self.prepare(
             Scenario("session", spans("session", "startup", "create", "clarify_turn"), answers=startup_answers())
         )
@@ -1091,8 +1250,17 @@ class PromptSlotTests(AppTestCase):
             Step(b"\r", when=question, label="the clarify slot"),
             Step(when=lambda: not now.__setitem__(0, 100.0 + SLOT_ARM_SECONDS / 2), label="half the delay"),
             Step(b"1", when=question, label="still arming"),
-            Step(when=lambda: not now.__setitem__(0, 100.0 + SLOT_ARM_SECONDS), label="the delay passed"),
+            # The delay starts again from the last early key: one delay after the opening the slot still arms, so
+            # this Enter (`red`, were it armed) answers nothing and starts the delay again.
+            Step(when=lambda: not now.__setitem__(0, 100.0 + SLOT_ARM_SECONDS), label="one delay on"),
+            Step(b"\r", when=question, label="restarted"),
+            # A hair past (100.8 - 100.4 is a little under 0.4 in floats), and short of a doubled delay.
+            Step(when=lambda: not now.__setitem__(0, 100.0 + SLOT_ARM_SECONDS * 2 + 0.01), label="the delay passed"),
             Step(b"2", when=question, label="armed"),
+            # The early `1` went on into the draft, not the answer: once the turn ends, Ctrl+C clears it (with text
+            # typed it clears, never interrupts) and Ctrl+D leaves.
+            Step(b"\x03", when=lambda: not any(WORKING_CLOCK.search(line) for line in terminal.screen.lines())
+                 and "blue" in terminal.history(), label="the turn ended"),
             Step(b"\x04", when=terminal.idle, label="the end of the turn"),
         )
         with terminal:
@@ -1166,6 +1334,16 @@ class SlashCommandTests(AppTestCase):
                 self.assertEqual(run.calls("command.dispatch"), [])
                 self.assertEqual((run.terminal.entered, run.terminal.exited), (1, 1))
 
+    def test_under_omh_a_drift_reply_ends_the_session_naming_omh_resume(self) -> None:
+        answers = (*startup_answers(), ("slash.exec", {"error": {"code": 4000, "message": "extra fields not permitted"}}))
+        run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
+        run.environ[SESSION_FILE_ENV] = str(run.root / "omh-session.json")
+        run.terminal.script(self.submit(run, "/xyz"))
+        self.run_main(run)
+        self.assertEqual(run.code, 1)
+        self.assertIn(f"Resume the session: omh --resume {STORED_ID}", run.stderr.getvalue())
+        self.assertNotIn("hermes --tui", run.stderr.getvalue())
+
     def test_tab_completes_a_local_command_and_history_pages_on_the_alternate_screen(self) -> None:
         run = self.prepare(
             Scenario("session", spans("session", "startup", "create", "plain_turn"), answers=startup_answers())
@@ -1228,42 +1406,139 @@ class InfoLineRightTests(unittest.TestCase):
 
     MODEL = "deepseek/deepseek-v4.1-flash-ultrafast"
 
+    def setUp(self) -> None:
+        patched = patch("omh.tui.app.__version__", "9.9.9")  # the badge's version, fixed: no width moves with a release
+        patched.start()
+        self.addCleanup(patched.stop)
+
     def app(self, cols: int = 100) -> App:
         app = App(ScriptedTerminal(rows=24, cols=cols), None, {}, poller=FakePoller())  # type: ignore[arg-type]
         app.model, app.context_percent, app.effort = self.MODEL, 5.0, "high"
         return app
 
     def right(self, app: App, width: int) -> str:
-        row = line_text(app._info_line(width))
-        self.assertTrue(row.startswith(INFO_INSET + IDLE_HINT), row)
+        row = without_badge(line_text(app._info_line(width)))
         self.assertLessEqual(line_width(app._info_line(width)), width)
-        return row[len(INFO_INSET + IDLE_HINT) :].strip()
+        return row.strip()
 
     def test_the_right_side_is_model_context_and_effort_with_no_brand_and_no_state(self) -> None:
         app = self.app()
-        row = line_text(app._info_line(100))
-        self.assertTrue(row.endswith(f"{self.MODEL} · ctx 5% · effort high"), row)
+        row = without_badge(line_text(app._info_line(100)))  # the badge is the left side's, at its end
+        self.assertTrue(row.endswith(f"{self.MODEL} · ctx ━─────────── 5% · effort high"), row)
         self.assertEqual(line_width(app._info_line(100)), 100)  # the right side ends on the last cell
         for gone in ("⚚", "OMH", "idle", "running", "│"):
             self.assertNotIn(gone, row)
 
-    def test_the_model_shortens_first_then_goes_then_the_effort_then_the_context(self) -> None:
-        # The inset, `? for shortcuts` and the 3-cell gap take 20 cells; the right side takes the longest form that
-        # fits beside.
+    def test_the_model_shortens_then_the_context_goes_then_the_effort_and_the_model_last(self) -> None:
+        # The inset, the badge with its version and the 3-cell gap take 26 cells; the right side takes the longest form
+        # that fits beside, and goes whole before the badge shortens. No token counts here: the gauge is the longest
+        # context. The model's shortest name outlasts the context and the effort (owner QA, 2026-11-10: a mode label
+        # beside them used to leave no model at 120 columns).
         app = self.app()
         expected = {
-            81: f"{self.MODEL} · ctx 5% · effort high",
-            80: "deepseek-v4.1-flash-ultrafast · ctx 5% · effort high",
-            72: "deepseek-v4.1-flash-ultrafast · ctx 5% · effort high",
-            71: "v4.1-flash-ultrafast · ctx 5% · effort high",
-            63: "v4.1-flash-ultrafast · ctx 5% · effort high",
-            62: "ctx 5% · effort high",
-            40: "ctx 5% · effort high",
-            39: "ctx 5%",
-            26: "ctx 5%",
-            25: "",
+            100: f"{self.MODEL} · ctx ━─────────── 5% · effort high",
+            99: "deepseek-v4.1-flash-ultrafast · ctx ━─────────── 5% · effort high",
+            91: "deepseek-v4.1-flash-ultrafast · ctx ━─────────── 5% · effort high",
+            90: "v4.1-flash-ultrafast · ctx ━─────────── 5% · effort high",
+            82: "v4.1-flash-ultrafast · ctx ━─────────── 5% · effort high",
+            81: "v4.1-flash-ultrafast · ctx 5% · effort high",
+            69: "v4.1-flash-ultrafast · ctx 5% · effort high",
+            68: "v4.1-flash-ultrafast · effort high",
+            60: "v4.1-flash-ultrafast · effort high",
+            59: "v4.1-flash-ultrafast",
+            46: "v4.1-flash-ultrafast",
+            45: "ctx ━─────────── 5%",
+            44: "ctx 5%",
+            32: "ctx 5%",
+            31: "",
         }
         self.assertEqual({width: self.right(app, width) for width in expected}, expected)
+
+    def test_the_context_is_a_gauge_its_percent_and_the_tokens_used_of_the_most(self) -> None:
+        # Owner, 2026-10-30: twelve cells, the filled ones in the context's colour, the rest dim; the percent in the
+        # context's colour; used/max muted.
+        app = self.app()
+        theme = app.theme
+        for used, percent, gauge, style in ((74_000, 37, "━━━━────────", theme.muted),
+                                            (144_000, 72, "━━━━━━━━━───", theme.muted),
+                                            (182_000, 91, "━━━━━━━━━━━─", theme.warn)):
+            with self.subTest(percent=percent):
+                app._take_usage({"context_used": used, "context_max": 200_000, "context_percent": percent})
+                row = without_badge(line_text(app._info_line(120)))
+                counts = f"{used // 1000}k/200k"
+                self.assertTrue(row.endswith(f"{self.MODEL} · ctx {gauge} {percent}% {counts} · effort high"), row)
+                filled, empty = gauge.rstrip("─"), "─" * gauge.count("─")
+                self.assertEqual(
+                    [(span.text, span.style) for span in app._context_forms()[0]],
+                    [("ctx ", theme.muted), (filled, style), (empty, theme.dim), (f" {percent}%", style),
+                     (f" {counts}", theme.muted)],
+                )
+
+    def test_the_token_counts_are_compact(self) -> None:
+        app = self.app()
+        for used, maximum, percent, said in ((13_541, 1_000_000, 1, "ctx ──────────── 1% 13.5k/1M"),
+                                             (950, 200_000, 0, "ctx ──────────── 0% 950/200k"),
+                                             (1_200_000, 2_000_000, 60, "ctx ━━━━━━━───── 60% 1.2M/2M"),
+                                             (400_000, 400_000, 100, "ctx ━━━━━━━━━━━━ 100% 400k/400k")):
+            with self.subTest(used=used):
+                app._take_usage({"context_used": used, "context_max": maximum, "context_percent": percent})
+                self.assertEqual(line_text(app._context_forms()[0]), said)
+
+    def test_a_narrow_line_drops_the_token_counts_then_the_gauge_then_the_context(self) -> None:
+        app = self.app()
+        app._take_usage({"context_used": 74_000, "context_max": 200_000, "context_percent": 37})
+        full, gauge, model = "ctx ━━━━──────── 37% 74k/200k", "ctx ━━━━──────── 37%", "v4.1-flash-ultrafast"
+        expected = {
+            109: f"deepseek-v4.1-flash-ultrafast · {full} · effort high",
+            100: f"{model} · {full} · effort high",
+            92: f"{model} · {full} · effort high",
+            91: f"{model} · {gauge} · effort high",
+            83: f"{model} · {gauge} · effort high",
+            82: f"{model} · ctx 37% · effort high",
+            70: f"{model} · ctx 37% · effort high",
+            69: f"{model} · effort high",
+            59: model,
+            46: model,
+            45: "ctx 37%",
+            33: "ctx 37%",
+            32: "",
+        }
+        self.assertEqual({width: self.right(app, width) for width in expected}, expected)
+
+    def test_under_no_color_the_gauge_still_reads(self) -> None:
+        app = App(ScriptedTerminal(rows=24, cols=120), None, {"NO_COLOR": "1"}, poller=FakePoller())  # type: ignore[arg-type]
+        app.model, app.effort = self.MODEL, "high"
+        app._take_usage({"context_used": 182_000, "context_max": 200_000, "context_percent": 91})
+        spans = app._context_forms()[0]
+        self.assertEqual(line_text(spans), "ctx ━━━━━━━━━━━─ 91% 182k/200k")  # the glyphs carry the part used
+        from omh.tui.style import NO_COLOR
+
+        self.assertTrue(all(span.style.depth == NO_COLOR for span in spans))  # painted with no colour at all
+
+    def test_a_shared_gateway_usage_frame_fills_the_gauge(self) -> None:
+        # `gateway/session_usage.py::usage_frame` (Hermes bf0203a794): `{"usage": tui_usage(stats), **stats}`, the
+        # status-bar view nested and the session counters beside it; `message.complete` carries the nested view.
+        from omh.tui.gateway import Event
+
+        stats = {"input_tokens": 70_000, "output_tokens": 900, "prompt_tokens": 74_000, "api_calls": 3,
+                  "last_prompt_tokens": 74_000, "context_tokens": 74_000, "context_length": 200_000,
+                  "context_source": "provider_usage", "compression_count": 0, "model": "claude-opus-5-5"}
+        nested = {"model": "claude-opus-5-5", "input": 70_000, "output": 900, "prompt": 74_000, "calls": 3,
+                   "context_used": 74_000, "context_max": 200_000, "context_percent": 37,
+                   "context_source": "provider_usage", "context_estimated": False, "compressions": 0}
+        app = self.app(cols=120)
+        app.sid = "s"
+        app._on_event(Event("session.usage", "s", {"usage": nested, **stats}))
+        self.assertTrue(line_text(app._info_line(120)).endswith("ctx ━━━━──────── 37% 74k/200k · effort high"))
+        app._on_event(Event("message.complete", "s", {"text": "done", "status": "complete",
+                                                      "usage": {**nested, "context_used": 150_000,
+                                                                "context_percent": 75}}))
+        self.assertTrue(line_text(app._info_line(120)).endswith("ctx ━━━━━━━━━─── 75% 150k/200k · effort high"))
+        # After a compaction Hermes leaves the context figures out of the nested view until a reply re-measures it
+        # (`last_prompt_tokens` -1, read as 0): the gauge holds what it last showed.
+        app._on_event(Event("session.usage", "s", {"usage": {"output": 950, "calls": 4},
+                                                    **stats, "last_prompt_tokens": 0}))
+        self.assertEqual((app.context_percent, app.context_used, app.context_max), (75, 150_000, 200_000))
 
     def test_a_model_has_up_to_three_names_longest_first(self) -> None:
         from omh.tui.modes import model_forms
@@ -1286,7 +1561,7 @@ class InfoLineRightTests(unittest.TestCase):
                 with self.subTest(model=model):
                     self.assertFalse([form for form in model_forms(model) if form[:1].isdigit()])
         self.assertEqual(model_forms("z-ai/glm-5.3"), ("z-ai/glm-5.3", "glm-5.3"))
-        self.assertEqual(model_forms("gemini-3.1-pro"), ("gemini-3.1-pro",))
+        self.assertEqual(model_forms("gemini-4-argon"), ("gemini-4-argon",))
         self.assertEqual(model_forms("openai/gpt-5.5"), ("openai/gpt-5.5", "gpt-5.5"))
         self.assertEqual(model_forms("kimi-k3"), ("kimi-k3", "k3"))  # a word that starts with a letter stays
 
@@ -1295,7 +1570,7 @@ class InfoLineRightTests(unittest.TestCase):
         for effort, said in (("", "ctrl+t effort"), ("default", "effort default"), ("xhigh", "effort xhigh")):
             with self.subTest(effort=effort):
                 app.effort = effort
-                self.assertTrue(line_text(app._info_line(100)).endswith(f"ctx 5% · {said}"))
+                self.assertTrue(line_text(app._info_line(100)).endswith(f"ctx ━─────────── 5% · {said}"))
 
     def test_the_context_turns_warn_then_error_as_it_fills(self) -> None:
         app = self.app()
@@ -1305,7 +1580,7 @@ class InfoLineRightTests(unittest.TestCase):
             with self.subTest(percent=percent):
                 app._take_usage({"context_used": 1, "context_max": 2, "context_percent": percent}
                                 if percent is not None else {"context_used": 1, "context_max": 1_000_000})
-                span = next(span for span in app._info_line(100) if span.text.startswith("ctx"))
+                span = next(span for span in app._info_line(100) if span.text.endswith("%"))
                 self.assertEqual(span.style, style)
 
     def test_a_usage_block_without_context_figures_leaves_the_shown_context(self) -> None:
@@ -1315,7 +1590,7 @@ class InfoLineRightTests(unittest.TestCase):
         for usage in ({"output": 12}, {"context_used": 1, "context_max": 0}, {"context_max": 10}, None):
             with self.subTest(usage=usage):
                 app._take_usage(usage)
-                self.assertEqual(app.context_percent, 25.0)
+                self.assertEqual((app.context_percent, app.context_used, app.context_max), (25.0, 50_000, 200_000))
 
     def test_the_huds_chips_stand_first_on_the_right_and_go_last(self) -> None:
         from test_tui_panels import hud_payload
@@ -1328,43 +1603,37 @@ class InfoLineRightTests(unittest.TestCase):
         payload["activity"].update(live=True, post_tool_call_observed=True, open_call_count=2, oldest_open_elapsed_seconds=12)
         app.hud = HudSnapshot(app.stored_id, payload, 0.0)
         idle = line_text(app._info_line(160))
-        self.assertTrue(idle.endswith(f"repeat x4 cycle-of-2 approval · {self.MODEL} · ctx 5% · effort high"), idle)
+        self.assertTrue(idle.endswith(f"repeat x4 cycle-of-2 approval · {self.MODEL} · ctx ━─────────── 5% · effort high"), idle)
         self.assertNotIn("tool", idle)  # the calls in flight only while a turn runs
         app.turn_pending = True
         running = line_text(app._info_line(160))
-        self.assertTrue(running.endswith(f"repeat x4 cycle-of-2 approval · 2 tools · 12s · {self.MODEL} · ctx 5% · effort high"),
+        self.assertTrue(running.endswith(f"repeat x4 cycle-of-2 approval · 2 tools · 12s · {self.MODEL} · ctx ━─────────── 5% · effort high"),
                         running)
         app.turn_pending = False
-        self.assertEqual(self.right(app, 50), "repeat x4 cycle-of-2 approval")
+        self.assertEqual(self.right(app, 55), "repeat x4 cycle-of-2 approval")
 
 
 class InfoLineLeftTests(unittest.TestCase):
     def row(self, width: int = 80, **facts: object) -> str:
-        defaults: dict[str, object] = {"mode": "normal", "busy": False, "queued": 0, "keyboard_protocol": False}
+        defaults: dict[str, object] = {"mode": "normal"}
         return line_text(info_line(**{**defaults, **facts}, width=width, theme=DEFAULT_THEME))  # type: ignore[arg-type]
 
-    def test_normal_mode_names_the_keys_that_matter_now(self) -> None:
-        self.assertEqual(self.row(), "? for shortcuts")
-        self.assertEqual(self.row(busy=True), "/steer <text> steers")  # the working row offers the interrupt
-        self.assertEqual(self.row(busy=True, keyboard_protocol=True), "ctrl+enter steer")
-        self.assertEqual(self.row(busy=True, queued=2), "/steer <text> steers · ↑ edit queued")
-
-    def test_ctrl_enter_is_named_only_where_the_terminal_tells_it_from_enter(self) -> None:
-        for busy in (False, True):
-            with self.subTest(busy=busy):
-                self.assertNotIn("ctrl+enter", self.row(busy=busy, keyboard_protocol=False))
+    def test_normal_mode_says_nothing_of_its_own(self) -> None:
+        # Between turns the launch card names `?`, which still opens the list; during a turn the working row offers
+        # the interrupt and the queue's own row the send-now key.
+        self.assertEqual(self.row(), "")
 
     def test_accept_and_plan_say_so_in_their_own_colour(self) -> None:
-        accept = info_line(mode="accept", busy=False, queued=0, keyboard_protocol=False, width=80, theme=DEFAULT_THEME)
+        accept = info_line(mode="accept", width=80, theme=DEFAULT_THEME)
         self.assertEqual(line_text(accept), "⏵⏵ accept all on (⇧⇥ to cycle)")
         self.assertEqual(accept[0].style, replace(DEFAULT_THEME.mode_accept, bold=True))
-        plan = info_line(mode="plan", busy=True, queued=1, keyboard_protocol=True, width=80, theme=DEFAULT_THEME)
+        plan = info_line(mode="plan", width=80, theme=DEFAULT_THEME)
         self.assertEqual(line_text(plan), "⏸ plan mode on (⇧⇥ to cycle)")
         self.assertEqual(plan[0].style, replace(DEFAULT_THEME.mode_plan, bold=True))
-        hermes_own = info_line(mode="accept", busy=False, queued=0, keyboard_protocol=False, width=80,
+        hermes_own = info_line(mode="accept", width=80,
                                theme=DEFAULT_THEME, cycle="plan")
         self.assertEqual(line_text(hermes_own), "⏵⏵ accept all on (⇧⇥ plan)")
-        both = info_line(mode="accept+plan", busy=False, queued=0, keyboard_protocol=False, width=80,
+        both = info_line(mode="accept+plan", width=80,
                          theme=DEFAULT_THEME, cycle="plan off")
         self.assertEqual(line_text(both), "⏵⏵ accept all on · ⏸ plan mode on (⇧⇥ plan off)")
 
@@ -1467,26 +1736,33 @@ class ShellLineTests(unittest.TestCase):
         _say(stream, "gateway said: \x1b[31mboom\x1b[0m \x1b]8;;http://x\x07link\x1b]8;;\x07")
         self.assertEqual(stream.getvalue(), "gateway said: boom link\n")
 
-class StickyPromptTests(unittest.TestCase):
-    """The sent prompt is echoed above the composer only once it has scrolled off the screen."""
-
-    def app(self, flushed: int, busy: bool = True) -> App:
-        app = App(ScriptedTerminal(rows=20, cols=60), None, {}, poller=FakePoller())  # type: ignore[arg-type]
-        app.sticky = "what changed in the build?"
-        app.turn_pending = busy
-        app.flushed_since_prompt = flushed
-        return app
-
-    def test_no_echo_while_the_prompt_is_still_on_screen(self) -> None:
-        self.assertFalse(self.app(flushed=12)._sticky_needed(12))  # 12 transcript rows above the region
-
-    def test_the_echo_appears_once_the_prompt_has_scrolled_off(self) -> None:
-        self.assertTrue(self.app(flushed=13)._sticky_needed(12))
-
-    def test_no_echo_when_no_turn_is_running(self) -> None:
-        self.assertFalse(self.app(flushed=99, busy=False)._sticky_needed(12))
-
 class ModelChainPickerTests(unittest.TestCase):
+    def test_identity_save_preserves_prompt_and_cancel_and_noop_do_not_write(self) -> None:
+        from omh.plugin_bundle.omh.model_chain_picker import picker_rows
+
+        root = Path(self.enterContext(make_test_tempdir("omh-tui-picker-")))
+        environ = {"OMH_HOME": str(root / "omh"), "HERMES_HOME": str(root / "hermes"), "NO_COLOR": "1"}
+        path = root / "omh" / "routing" / "identities.json"
+        path.parent.mkdir(parents=True)
+        profile = {"prompt": "Existing prompt.\nDo not rewrite it.", "model_chain": [{"model_id": "deepseek-flash", "reasoning_effort": "low"}]}
+        document = {"schema_version": "omh_identity_profiles/v1", "identities": {"review": profile, "broken": {"keep": "me"}}}
+        path.write_text(json.dumps(document), encoding="utf-8")
+        original = path.read_bytes()
+        count = len(picker_rows(root / "omh", hermes_home=root / "hermes")["categories"])
+        for ending in ((Key(ENTER),), (Key(CHAR, " "), Key(ESCAPE)), (Key(CHAR, " "), Key(ENTER))):
+            keys = iter([Key(DOWN)] * count + list(ending))
+            message = run_model_chain_picker(
+                environ, DEFAULT_THEME, read_key=lambda: picker_key(next(keys)), write=lambda _: None, width=120,
+            )
+            if ending[-1].name == ESCAPE or len(ending) == 1:
+                self.assertEqual(path.read_bytes(), original)
+            else:
+                self.assertIn("Saved 1 custom identity", message)
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {
+                    **document, "identities": {"review": {**profile, "enabled": False}, "broken": {"keep": "me"}},
+                })
+        self.assertEqual(sorted(item.name for item in path.parent.iterdir()), ["identities.json"])
+
     def test_tui_keys_map_to_picker_tokens_and_ctrl_c_ctrl_d_esc_cancel(self) -> None:
         cases = {
             Key(UP): "up", Key(DOWN): "down", Key(LEFT): "left", Key(RIGHT): "right", Key(ENTER): "enter",
@@ -1511,6 +1787,26 @@ class ModelChainPickerTests(unittest.TestCase):
         self.assertIn("Model chains", written[0])
         self.assertEqual(list(root.iterdir()), [])
 
+    def test_a_refused_enter_keeps_the_picker_open_and_the_fix_saves_both_rows(self) -> None:
+        # deep is the second row, and + takes its Opus head to xhigh. The ring then
+        # walks onto Gemini 4 Argon, whose list stops at high.
+        from omh.plugin_bundle.omh.model_chain_picker import known_model_aliases
+
+        root = Path(self.enterContext(make_test_tempdir("omh-tui-picker-")))
+        environ = {"OMH_HOME": str(root / "omh"), "HERMES_HOME": str(root / "hermes"), "NO_COLOR": "1"}
+        aliases = known_model_aliases()
+        walk = ["right"] * (aliases.index("gemini-4-argon") - aliases.index("claude-opus-5-5"))
+        keys = iter(["down", "plus", *walk, "up", "plus", "enter", "minus", "enter"])
+        written: list[str] = []
+        message = run_model_chain_picker(
+            environ, DEFAULT_THEME, read_key=lambda: next(keys), write=written.append, width=100
+        )
+        self.assertIn("! deep: xhigh is not on gemini-4-argon's list; −/+ or d", written[-2])
+        self.assertTrue(message.startswith("Saved 2 categories"), message)
+        categories = json.loads((root / "omh" / "routing" / "model-chains.json").read_text(encoding="utf-8"))["categories"]
+        self.assertEqual(categories["ultrabrain"][0], {"model": "claude-fable-5-2", "reasoning_effort": "max"})
+        self.assertEqual(categories["deep"][0], {"model": "gemini-4-argon", "reasoning_effort": "high"})
+
 
 FRESH_LIVE_ID = "fresh01"
 FRESH_STORED_ID = "20261013_140000_fresh"
@@ -1525,6 +1821,7 @@ def busy_mode_answers(mode: str) -> tuple[tuple[str, dict], ...]:
         ("config.get", {"result": {"config": {"display": {"busy_input_mode": mode}}}}),
         ("commands.catalog", recorded_answer("session", "commands_catalog")),
         ("session.list", recorded_answer("session", "session_list")),
+        UNREAD_DEFAULT,
     )
 
 
@@ -1615,7 +1912,7 @@ class OpeningTests(AppTestCase):
                 status = info_index(screen)
                 rule = status - 2 - UNDER_COMPOSER
                 self.assertIn(RULE_MARK, screen[rule], screen)
-                self.assertEqual(status, 33, screen)  # the info line on the last row, the composer right above it
+                self.assertEqual(status, 33, screen)  # the info line on the last row, the composer above
         start = run.terminal.captures["start"]
         rule = info_index(start) - 2 - UNDER_COMPOSER
         self.assertTrue(start[LOGO_ROWS].startswith(f"⚚ OH-MY-HERMES v{__version__} · ~/project"), start)
@@ -1682,7 +1979,7 @@ class OpeningTests(AppTestCase):
                 self.assertEqual(history[: LOGO_ROWS - 1], LOGO[:-1])  # scrolling up stops at the logo
                 self.assertEqual(first[: LOGO_ROWS - 1], LOGO[:-1])  # the logo opens the top row
                 self.assertEqual(rows["after"], rows["before"])
-                self.assertEqual(rows["before"], 33 - 1 - UNDER_COMPOSER)  # the bottom rows: composer, rule, info
+                self.assertEqual(rows["before"], 34 - 2 - UNDER_COMPOSER)  # the bottom rows: composer, rule, info
                 writes = "".join(run.terminal.writes)
                 # The startup query, the push, ED 3 once, then the first frame. No ED 2: the push leaves only the
                 # cursor's own row on the screen, the top row, which the first frame paints over.
@@ -1775,17 +2072,20 @@ class OpeningTests(AppTestCase):
         self.assertTrue(history[LOGO_ROWS].startswith(f"⚚ OH-MY-HERMES v{__version__} · resumed {STORED_ID}"))
         self.assertEqual(run.calls("session.list"), [])  # a resumed session needs no pointer to the last one
         self.assertEqual(
-            history[LOGO_ROWS + 2 : LOGO_ROWS + 13],
-            [  # each block on its rail, and a blank row between two calls, as for a live turn
+            history[LOGO_ROWS + 2 : LOGO_ROWS + 16],
+            [  # each block on its rail, a blank row between two blocks and two between two calls, as for a live turn
                 "┃ ❯ What is in this repo?",
                 "",
-                "┃ ● Let me look.",
+                "⚚ Hermes",  # who wrote it; the record does not say which model, so none is named
+                "  Let me look.",
                 "",
                 "┃ ● terminal(ls -la)",
                 "",
+                "",
                 "┃ ● read_file(README.md)",
                 "",
-                "┃ ● It is oh-my-hermes.",
+                "⚚ Hermes",
+                "  It is oh-my-hermes.",
                 "",
                 "┃ ❯ Thanks",
             ],
@@ -1819,7 +2119,10 @@ class LocalCommandTests(AppTestCase):
     def after_reply(self, run: Run) -> Callable[[], bool]:
         return lambda: "later." in run.terminal.history() and run.terminal.idle()
 
-    def test_new_declines_open_requests_and_opens_a_fresh_session(self) -> None:
+    def test_new_typed_while_an_approval_waits_never_leaves_the_turn_and_runs_once_it_ends(self) -> None:
+        # Typed during the turn, `/fresh` (Hermes' alias of /new) waits in the queue: the approval stays the
+        # person's, who denies it; the deny stops the turn, the queue comes back to the composer as after any
+        # interrupt, and sent again between turns it opens the fresh session.
         create = recorded_answer("approval", "create")
         fresh = {
             "result": {
@@ -1833,29 +2136,35 @@ class LocalCommandTests(AppTestCase):
         answers = (
             *startup_answers(),
             ("session.create", create),
+            INTERRUPTED,
             ("session.create", fresh),
             ("session.close", {"result": {"closed": True}}),
-            # An alias answered while the approval is open: the one way /new runs with a request pending.
             ("slash.exec", {"result": {"type": "alias", "target": "new"}}),
         )
         startup, turn = spans("approval", "startup", "approval_turn")
         run = self.prepare(Scenario("approval", (startup, turn), answers=answers))
-        run.terminal.script(
-            Step(b"Run rm -rf ./omh-m0-probe-dir\r/fresh\r", when=run.terminal.idle, label="idle"),
-            Step(b"\x04", when=run.terminal.shows(f"New session {FRESH_STORED_ID}."), label="the new session"),
+        terminal = run.terminal
+        terminal.script(
+            Step(TYPED_AHEAD + b"Run rm -rf ./omh-m0-probe-dir\r/fresh\r", when=terminal.idle, label="idle"),
+            Step(when=terminal.shows("Hermes asks to run"), label="the approval slot"),
+            Step(b"d", when=lambda: time.monotonic() - terminal.fired["the approval slot"] > SLOT_ARM_SECONDS + 0.05,
+                 label="armed"),
+            Step(b"\r", when=lambda: "what you queued is back in the composer" in terminal.history(),
+                 label="the turn ended"),
+            Step(b"\x04", when=terminal.shows(f"New session {FRESH_STORED_ID}."), label="the new session"),
         )
         self.run_main(run)
         self.assert_clean_run(run)
         denied = [frame for frame in run.frames if frame.get("id") == "srq-52e9720342b6"]
         self.assertEqual(denied, [{"jsonrpc": "2.0", "id": "srq-52e9720342b6", "result": {"choice": "deny"}}])
+        (interrupt,) = run.calls("session.interrupt")
+        (slash,) = run.calls("slash.exec")
+        self.assertLess(run.frames.index(interrupt), run.frames.index(slash))  # /fresh ran only after the turn
+        self.assertEqual(slash["params"], {"command": "fresh", "session_id": "f05e2691"})
         (closed,) = run.calls("session.close")
         self.assertEqual(closed["params"], {"session_id": "f05e2691"})
         self.assertEqual(len(run.calls("session.create")), 2)
-        self.assertEqual(run.calls("slash.exec")[0]["params"], {"command": "fresh", "session_id": "f05e2691"})
-        # The closed session's remaining events never reach the fresh transcript.
-        self.assertNotIn("It was blocked", run.terminal.history())
-        # The decline was the TUI's, not the person's: the fresh transcript says so.
-        self.assertIn("Declined 1 open request from the session you left.", run.terminal.history())
+        self.assertNotIn("Declined 1 open request", run.terminal.history())  # nothing was open to decline
         self.assertEqual(run.poller.sessions, [APPROVAL_STORED_ID, FRESH_STORED_ID])
         self.assertEqual(json.loads(run.active_session_file.read_text(encoding="utf-8")), {"session_id": FRESH_STORED_ID})
 
@@ -1947,7 +2256,8 @@ class LocalCommandTests(AppTestCase):
         )
         self.run_main(run)
         self.assert_clean_run(run)
-        said = " ".join(word for word in terminal.history().split() if word != "┃")  # it wraps on the echo's rail
+        # It wraps on the echo's rail: read without the rail's bar, as without the spaces.
+        said = " ".join(word for word in terminal.history().split() if word != "┃")
         self.assertIn("follows the terminal's background (a dark one, as COLORFGBG names it)", said)
 
     def test_keys_typed_while_the_background_query_waited_reach_the_composer(self) -> None:
@@ -1999,9 +2309,9 @@ class LocalCommandTests(AppTestCase):
         self.assertEqual(seen[-1], hex_to_rgb(theme_named("crimson").rule.fg))
         history = terminal.history()
         self.assertIn("Theme crimson applies to this session", history)
-        said = " ".join(word for word in history.split() if word != "┃")  # it wraps on the echo's rail
-        self.assertIn("No theme or launch look named nope. Themes: sky, amber, crimson, mono. "
-                      "Launch looks: spectrum, violet, gold, graphite.", said)
+        said = " ".join(word for word in history.split() if word != "┃")  # it wraps on the echo's rail: no bar
+        self.assertIn("No theme or launch look named nope. Themes: sky, amber, crimson, mono, kanagawa. "
+                      "Launch looks: spectrum, violet, gold, graphite, sakura, moonlit, aurora, ember, kanagawa-wave.", said)
 
     def test_help_lists_local_commands_the_hermes_catalog_by_category_and_keys_in_the_transcript(self) -> None:
         run = self.prepare(
@@ -2024,13 +2334,17 @@ class LocalCommandTests(AppTestCase):
         # The recorded catalog's categories, without what the TUI runs itself, routes to Hermes' terminal or drops:
         # Session (/new /clear /redraw), Exit (/quit) and TUI (/density /logs /mouse) are left with nothing, and
         # /export is the TUI's (it says what Hermes exports before it runs).
-        self.assertIn("  Configuration: /import /config", pager)
+        # /import only runs in Hermes' classic CLI: /help names it on a line of its own instead.
+        self.assertIn("  Configuration: /config", pager)
+        self.assertIn("Only Hermes' classic CLI (`hermes --cli`) runs /handoff /worktree /snapshot /import /hatch "
+                      "/palette", pager)
+        self.assertIn("/compact       Compress this session's context", pager)
         self.assertIn("  Tools & Skills: /tools /toolsets /skills", pager)
         self.assertNotIn("Session:", pager)
         self.assertNotIn("skill commands available", pager)  # the recording lists none
         # The keys live in one table that ? and /keys draw; /help points there.
         self.assertIn("Keys: ? on an empty composer, or /keys, lists every key.", pager)
-        self.assertIn("/yolo included", pager)
+        self.assertIn("/yolo turns off Hermes' approval prompts for this session, as Shift+Tab's accept all does", pager)
         # The banner no longer says it, so /help is where the way back to Hermes' own terminal stays.
         self.assertIn("Bare `hermes` opens Hermes' own terminal.", pager)
         self.assertIn("┃ ❯ /help\n┃   ⎿  OMH TUI commands:", terminal.history())
@@ -2073,13 +2387,13 @@ class LocalCommandTests(AppTestCase):
             Scenario(
                 "session",
                 spans("session", "startup", "create", "plain_turn", "smart_approved_turn"),
-                answers=startup_answers(),
+                answers=startup_answers(UNREAD_DEFAULT),
             )
         )
         terminal = run.terminal
         terminal.script(
             self.submit(run, "/queue"),
-            Step(b"first prompt\rsecond prompt\r/queue\r", when=terminal.shows("Nothing is queued."), label="empty"),
+            Step(TYPED_AHEAD + b"first prompt\rsecond prompt\r/queue\r", when=terminal.shows("Nothing is queued."), label="empty"),
             Step(b"\x04", when=lambda: "cleanly)." in terminal.history() and terminal.idle(), label="turn 2"),
         )
         self.run_main(run)
@@ -2088,11 +2402,14 @@ class LocalCommandTests(AppTestCase):
         listed = history.index("┃   ⎿  Queued (sent one at a time as each turn ends):")
         self.assertEqual(history[listed - 1], "┃ ❯ /queue")
         self.assertEqual(history[listed + 1], "┃      1. second prompt")
-        self.assertIn("┃ ❯ second prompt  ⧗ from queue", history[listed:])  # the queue sent it once the turn ended
+        self.assertIn("┃ ❯ second prompt", history[listed:])  # the queue sent it once the turn ended, as any prompt
+        self.assertFalse(any("from queue" in row for row in history), history)  # with no tag (owner, 2026-11-21)
         self.assertLess(history.index("┃ ❯ first prompt"), listed)
 
-    def test_steer_and_interrupt_modes_send_input_during_a_turn_at_once(self) -> None:
-        for mode in ("steer", "interrupt"):
+    def test_input_during_a_turn_queues_whatever_the_busy_mode(self) -> None:
+        # Hermes' `display.busy_input_mode` is Hermes' and its bots' business: a prompt sent before Hermes starts the
+        # turn queues, so a `steer` or `interrupt` there never redirects or stops the turn from the OMH TUI.
+        for mode in ("queue", "steer", "interrupt"):
             with self.subTest(mode=mode):
                 run = self.prepare(
                     Scenario(
@@ -2103,11 +2420,10 @@ class LocalCommandTests(AppTestCase):
                 )
                 terminal = run.terminal
                 terminal.script(
-                    # The busy mode is read without holding up the first frame, and input sent while a turn runs
-                    # before its answer queues (Hermes' default). The replay answers in the order it was asked,
-                    # config.get before the catalog, so once the menu offers Hermes' /undo the mode has arrived.
+                    # The replay answers in the order it was asked, config.get before the catalog, so once the
+                    # menu offers Hermes' /undo the settings have arrived.
                     Step(b"/und", when=terminal.idle, label="idle"),
-                    Step(b"\x15first prompt\rsecond prompt\r", when=terminal.shows("/undo"), label="the mode read"),
+                    Step(b"\x15first prompt\rsecond prompt\r", when=terminal.shows("/undo"), label="the settings read"),
                     Step(b"\x04", when=lambda terminal=terminal: "cleanly)." in terminal.history() and terminal.idle(),
                          label="turn 2"),
                 )
@@ -2115,9 +2431,12 @@ class LocalCommandTests(AppTestCase):
                 self.assert_clean_run(run)
                 first, second = run.calls("prompt.submit")
                 self.assertEqual(first["params"], {"session_id": LIVE_ID, "text": "first prompt"})
-                # Sent while the first turn was pending, with no `queued`: Hermes applies its own mode.
-                self.assertEqual(second["params"], {"session_id": LIVE_ID, "text": "second prompt"})
-                self.assertNotIn("queued", terminal.history())
+                # Held until the first turn ended, and sent as the queue's: Hermes applies no busy mode to it.
+                self.assertEqual(second["params"], {"session_id": LIVE_ID, "text": "second prompt", "queued": True})
+                self.assertIn("┃ ❯ second prompt", terminal.history())
+                self.assertNotIn("from queue", terminal.history())  # a prompt the queue sent carries no tag
+                self.assertEqual(run.calls("session.interrupt") + run.calls("session.redirect"), [])
+
 
 SHOT = {
     "attached": True,
@@ -2141,7 +2460,7 @@ CLIP = {
 }
 OTHER_STORED_ID = "20261012_090000_router"
 OTHER_LIVE_ID = "c0ffee01"
-INTERRUPT_ROW = re.compile(r"\(\d+s · esc to interrupt\)")
+INTERRUPT_ROW = re.compile(r"\(\d+s( · ↓[\d.]+k? tokens)? · esc to interrupt\)")
 
 
 def bracketed(text: str) -> bytes:
@@ -2150,11 +2469,12 @@ def bracketed(text: str) -> bytes:
 
 def info_index(screen: list[str]) -> int:
     """The info line's row: the last that is not blank, since every row under the region is."""
-    return max(index for index, line in enumerate(screen) if line)
+    return info_row_index(screen)
 
 
 def info_row_of(screen: list[str]) -> str:
-    return screen[info_index(screen)]
+    """The info line, its badge taken out (`without_badge`)."""
+    return without_badge(screen[info_index(screen)])
 
 
 def composer_row(screen: list[str]) -> str:
@@ -2174,16 +2494,26 @@ def resumed_other(messages: list[dict] | None = None) -> dict:
     }
 
 
+# The bytes the TUI reads from the path Hermes staged an image at: the fixtures' paths name no real file.
+KEPT_IMAGE = b"\x89PNG\r\n\x1a\nfixture"
+DETACHED = ("image.detach", {"result": {"detached": True, "count": 0}})
+# Hermes' answer to the preview the TUI asks for each attached image, when `display.inline_images` is off.
+RENDERED_OFF = ("image.render", {"result": {"mode": "off"}})
+
+
 @unittest.skipIf(NO_TERMIOS, "the OMH TUI needs termios")
+@patch("omh.tui.app.read_image", lambda path: KEPT_IMAGE)
 class AttachmentTests(AppTestCase):
-    def test_image_shows_a_chip_above_the_composer_and_the_submit_that_sends_it_clears_it(self) -> None:
-        answers = (*startup_answers(), ("image.attach", {"result": SHOT}))
+    def test_image_is_a_token_in_the_composer_and_the_echo_lists_it_under_the_prompt(self) -> None:
+        upload = "/fixture/hermes-home/images/upload_1.png"
+        answers = (*startup_answers(), ("image.attach", {"result": SHOT}), DETACHED, RENDERED_OFF,
+                   ("image.attach_bytes", {"result": {"attached": True, "path": upload, "count": 1}}))
         run = self.prepare(Scenario("session", spans("session", "startup", "create", "plain_turn"), answers=answers))
         terminal = run.terminal
         terminal.script(
             Step(b"/image ./shot.png\r", when=terminal.idle, capture="before", label="idle"),
-            Step(b"Reply with exactly the word: ok\r", when=terminal.shows("shot.png 1280×720"), capture="chip",
-                 label="the chip"),
+            Step(b"Reply with exactly the word: ok\r", when=terminal.shows("[Image #1]"), capture="token",
+                 label="the token"),
             Step(b"\x04", when=lambda: "later." in terminal.history() and terminal.idle(), capture="after",
                  label="the reply"),
         )
@@ -2191,34 +2521,69 @@ class AttachmentTests(AppTestCase):
         self.assert_clean_run(run)
         (attach,) = run.calls("image.attach")
         self.assertEqual(attach["params"], {"session_id": LIVE_ID, "path": "./shot.png"})
-        before, chip = terminal.captures["before"], terminal.captures["chip"]
-        status = info_index(chip)
-        # The chip row sits between the top rule and the input; the launch put the composer on the bottom rows, and
-        # it stays there, the chip taking a row above the input.
-        self.assertEqual(status, info_index(before))
-        composer = status - 1 - UNDER_COMPOSER
-        self.assertTrue(composer_text(chip[composer]).startswith("❯"), chip)
-        self.assertEqual(composer_text(chip[composer - 1]), "📎 shot.png 1280×720  Backspace removes")  # under the rule
-        self.assertIn(RULE_MARK, chip[composer - 2])
-        self.assertEqual(len(run.calls("prompt.submit")), 1)
-        self.assertNotIn("📎 shot.png", "\n".join(terminal.captures["after"]))  # the echo above still names it
+        # Hermes let go of it at once, and the prompt staged it again from the TUI's bytes, right before it went.
+        (detach,) = run.calls("image.detach")
+        self.assertEqual(detach["params"], {"session_id": LIVE_ID, "path": "/fixture/project/shot.png"})
+        (stage,) = run.calls("image.attach_bytes")
+        self.assertEqual(base64.b64decode(stage["params"]["content_base64"]), KEPT_IMAGE)
+        methods = [frame.get("method") for frame in run.frames if frame.get("method")]
+        self.assertLess(methods.index("image.attach_bytes"), methods.index("prompt.submit"))
+        before, token = terminal.captures["before"], terminal.captures["token"]
+        # The token is in the input row itself: no row above it, and the composer stays where the launch put it.
+        self.assertEqual(info_index(token), info_index(before))
+        self.assertEqual(composer_row(token), "❯ [Image #1]")
+        self.assertIn(RULE_MARK, token[info_index(token) - 1 - UNDER_COMPOSER - 1])
+        self.assertNotIn("📎", "\n".join(token))  # no attachment row: the token is the image
+        (submit,) = run.calls("prompt.submit")
+        self.assertEqual(submit["params"]["text"], "[Image #1] Reply with exactly the word: ok")
+        history = terminal.history()
+        self.assertIn("[Image #1] Reply with exactly the word: ok", history)
+        self.assertIn("⎿  [Image #1]", history)  # one row under the echo for the image it went with
 
     def test_paste_reports_an_empty_clipboard_and_ctrl_v_attaches_its_image(self) -> None:
         answers = (
             *startup_answers(),
             ("clipboard.paste", {"result": {"attached": False, "message": "No image found in clipboard"}}),
             ("clipboard.paste", {"result": CLIP}),
+            DETACHED,
+            RENDERED_OFF,
         )
         run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
         terminal = run.terminal
         terminal.script(
             self.submit(run, "/paste"),
             Step(b"\x16", when=terminal.shows("No image found in clipboard"), label="the empty-clipboard notice"),
-            Step(b"\x04", when=terminal.shows("clip_20261013_120000_1.png 640×480"), label="the clipboard chip"),
+            # Ctrl+C clears the draft, the token with it, and Ctrl+D then exits on the empty composer.
+            Step(b"\x03\x04", when=terminal.shows("❯ [Image #1]"), label="the clipboard image's token"),
         )
         self.run_main(run)
         self.assert_clean_run(run)
         self.assertEqual([frame["params"] for frame in run.calls("clipboard.paste")], [{"session_id": LIVE_ID}] * 2)
+        (detach,) = run.calls("image.detach")  # at once, as it was staged; Ctrl+C sends nothing more
+        self.assertEqual(detach["params"], {"session_id": LIVE_ID, "path": CLIP["path"]})
+
+    def test_ctrl_v_with_no_image_pastes_the_clipboard_text_and_says_so_only_when_there_is_none(self) -> None:
+        """#3131: a terminal that sends Ctrl+V on as ^V (no paste of its own) still pastes the clipboard's text; an
+        image still wins, and a clipboard with neither keeps Hermes' notice."""
+        clipboard = ["echo pasted by ctrl+v", None]
+        no_image = ("clipboard.paste", {"result": {"attached": False, "message": "No image found in clipboard"}})
+        answers = (*startup_answers(), no_image, no_image, ("clipboard.paste", {"result": CLIP}), DETACHED, RENDERED_OFF)
+        run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
+        terminal = run.terminal
+        terminal.script(
+            Step(b"\x16", when=terminal.idle, label="idle"),
+            Step(b"\x16", when=terminal.shows("❯ echo pasted by ctrl+v"), capture="text", label="the pasted text"),
+            Step(b"\x16", when=terminal.shows("No image found in clipboard"), label="the empty-clipboard notice"),
+            Step(b"\x03\x04", when=terminal.shows("[Image #1]"), capture="image", label="the clipboard image's token"),
+        )
+        with patch("omh.tui.app.clipboard_text", lambda *args: clipboard.pop(0)):
+            self.run_main(run)
+        self.assert_clean_run(run)
+        self.assertEqual(composer_row(terminal.captures["text"]), "❯ echo pasted by ctrl+v")
+        self.assertNotIn("No image found", "\n".join(terminal.captures["text"]))
+        self.assertEqual(composer_row(terminal.captures["image"]), "❯ echo pasted by ctrl+v [Image #1]")
+        self.assertEqual(clipboard, [])  # read for the two Ctrl+V that found no image, never for the image
+        self.assertEqual(len(run.calls("clipboard.paste")), 3)
 
     def test_a_one_line_paste_is_offered_to_detect_drop_first(self) -> None:
         answers = (
@@ -2231,49 +2596,70 @@ class AttachmentTests(AppTestCase):
                 "matched": True, "is_image": False, "path": "/fixture/project/notes.txt", "name": "notes.txt",
                 "text": "[User attached file: /fixture/project/notes.txt]"}}),
             ("input.detect_drop", {"result": {"matched": False}}),
+            DETACHED,
+            RENDERED_OFF,
         )
         run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
         terminal = run.terminal
         file_ref = "[User attached file: /fixture/project/notes.txt]"
         terminal.script(
             Step(bracketed("/fixture/project/drop.png"), when=terminal.idle, label="idle"),
-            Step(bracketed("/fixture/project/notes.txt"), when=terminal.shows("drop.png 800×600"), capture="image",
-                 label="the image chip"),
-            Step(bracketed(" and hello"), when=terminal.shows(f"❯ {file_ref}"), label="the file reference"),
-            Step(bracketed("line one\nline two"), when=terminal.shows("and hello"), capture="typed",
-                 label="the unmatched paste"),
+            Step(bracketed("/fixture/project/notes.txt"), when=terminal.shows("❯ [Image #1]"), capture="image",
+                 label="the image token"),
+            Step(bracketed(" and"), when=terminal.shows(f"{file_ref}"), label="the file reference"),
+            Step(bracketed(" ~/x"), when=terminal.shows("and"), label="the text paste"),
+            Step(bracketed("line one\nline two"), when=terminal.shows("and ~/x"), capture="typed",
+                 label="the unmatched path"),
             Step(b"\x03\x04", when=terminal.shows("line two"), label="the multi-line paste"),
         )
         self.run_main(run)
         self.assert_clean_run(run)
         sent = [frame["params"] for frame in run.calls("input.detect_drop")]
+        # A paste no path could start (" and") is typed at once and never asked about; a path Hermes finds no file
+        # for (" ~/x") is typed as pasted.
         self.assertEqual(sent, [
             {"session_id": LIVE_ID, "text": "/fixture/project/drop.png"},
             {"session_id": LIVE_ID, "text": "/fixture/project/notes.txt"},
-            {"session_id": LIVE_ID, "text": " and hello"},
+            {"session_id": LIVE_ID, "text": " ~/x"},
         ])
-        # An image drop is queued by the gateway: a chip, and nothing typed (the placeholder is drawn, not typed).
-        self.assertEqual(composer_row(terminal.captures["image"]), "❯ Ask Hermes anything")
-        self.assertEqual(composer_row(terminal.captures["typed"]), f"❯ {file_ref} and hello")
+        # An image drop is queued by the gateway: a token, never the path typed.
+        self.assertEqual(composer_row(terminal.captures["image"]), "❯ [Image #1]")
+        self.assertEqual(composer_row(terminal.captures["typed"]), f"❯ [Image #1] {file_ref} and ~/x")
 
-    def test_backspace_on_an_empty_composer_detaches_the_last_image(self) -> None:
-        answers = (
-            *startup_answers(),
-            ("image.attach", {"result": SHOT}),
-            ("image.detach", {"result": {"detached": True, "count": 0}}),
+    def test_ime_syllables_pasted_one_by_one_keep_their_order_with_the_space_after_them(self) -> None:
+        # Termius sends each syllable a Korean input method commits as its own bracketed paste, and on a slow link
+        # the space typed after one comes in the same read. Bytes from the reporter's client (Termius 7.8.2).
+        run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=startup_answers()))
+        terminal = run.terminal
+        terminal.script(
+            Step(bracketed("안"), when=terminal.idle, label="idle"),
+            Step(bracketed("녕") + b" " + bracketed("하") + bracketed("세") + bracketed("요") + b" ",
+                 when=terminal.shows("❯ 안"), label="the first syllable"),
+            Step(bracketed("반"), when=terminal.shows("하세요"), label="the second word"),
+            Step(b"", when=terminal.shows("하세요 반"), capture="typed", label="the third word"),
+            Step(b"\x03\x04", when=terminal.shows("하세요 반"), label="the typed line"),
         )
+        self.run_main(run)
+        self.assert_clean_run(run)
+        self.assertEqual(composer_row(terminal.captures["typed"]), "❯ 안녕 하세요 반")
+        self.assertEqual(run.calls("input.detect_drop"), [])
+
+    def test_cmd_backspace_takes_the_text_and_the_image_and_nothing_stages_it_again(self) -> None:
+        answers = (*startup_answers(), ("image.attach", {"result": SHOT}), DETACHED, RENDERED_OFF)
         run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
         terminal = run.terminal
         terminal.script(
             self.submit(run, "/image ./shot.png"),
-            Step(b"\x7f", when=terminal.shows("shot.png 1280×720"), label="the chip"),
-            Step(b"\x04", when=lambda: not terminal.shows("📎 shot.png")() and terminal.idle(), capture="gone",
-                 label="the chip gone"),
+            Step("이런느낌으로".encode(), when=terminal.shows("[Image #1]"), label="the token"),
+            Step(b"\x15", when=terminal.shows("[Image #1] 이런느낌으로"), label="the token and the words"),  # Cmd+Backspace
+            Step(b"\x04", when=lambda: not terminal.shows("[Image #1]")() and terminal.idle(), capture="gone",
+                 label="the token gone"),
         )
         self.run_main(run)
         self.assert_clean_run(run)
-        (detach,) = run.calls("image.detach")
+        (detach,) = run.calls("image.detach")  # when it was staged; the token's deletion needs no call
         self.assertEqual(detach["params"], {"session_id": LIVE_ID, "path": "/fixture/project/shot.png"})
+        self.assertEqual(run.calls("image.attach_bytes"), [])
         self.assertTrue(composer_row(terminal.captures["gone"]).startswith("❯"))
 
 
@@ -2309,9 +2695,10 @@ class SessionSwitchTests(AppTestCase):
         self.run_main(run)
         self.assert_clean_run(run)
         startup, listing = run.calls("session.list")  # the fresh session's last-session lookup, then /sessions
-        self.assertEqual((startup["params"], listing["params"]), ({"limit": 3}, {"limit": 50}))
+        self.assertEqual((startup["params"], listing["params"]), ({"limit": 3}, {"limit": SESSION_LIST_LIMIT}))
         picker = "\n".join(terminal.captures["picker"])
-        self.assertIn("● Reply with ok", picker)
+        self.assertIn("Reply with ok", picker)  # the `/resume` card: its name, then `● this session · …`
+        self.assertIn("● this session", picker)
         self.assertIn("2 messages", picker)
         methods = [frame.get("method") for frame in run.frames]
         (resume,) = run.calls("session.resume")
@@ -2379,34 +2766,58 @@ class KeyTests(AppTestCase):
     def running(self, run: Run) -> Callable[[], bool]:
         return run.terminal.running
 
-    def test_esc_on_an_empty_composer_interrupts_and_with_text_keeps_the_draft(self) -> None:
+    def test_esc_with_a_draft_interrupts_the_turn_and_keeps_the_draft(self) -> None:
+        # Enter never interrupts a turn, so Esc is the one-key stop, as in Claude Code: with a draft typed too.
         run = self.interrupted_run()
         terminal = run.terminal
         terminal.script(
             self.submit(run, "Write the numbers from 1 to 300, one per line, nothing else."),
             Step(b"draft", when=self.running(run), capture="running", label="running"),
             Step(b"\x1b", when=terminal.shows("❯ draft"), label="the draft"),
-            # The replay holds the turn open until it sees session.interrupt, so a turn still running
-            # well after that Esc proves the Esc sent nothing.
-            Step(b"\x15", when=lambda: terminal.shows("❯ draft")() and time.monotonic() - terminal.fired["the draft"] > 0.4,
-                 capture="after the first esc", label="the draft after Esc"),
-            Step(b"\x1b", when=lambda: not terminal.shows("❯ draft")(), label="the empty composer"),
-            Step(b"\x04", when=lambda: "Interrupted." in terminal.history() and terminal.idle(), label="end"),
+            Step(b"\x15", when=lambda: "Interrupted." in terminal.history() and terminal.shows("❯ draft")(),
+                 capture="stopped", label="the turn stopped"),
+            Step(b"\x04", when=terminal.idle, label="end"),
         )
         self.run_main(run)
         self.assert_clean_run(run)
         (interrupt,) = run.calls("session.interrupt")
         self.assertEqual(interrupt["params"], {"session_id": LIVE_ID})
-        after = terminal.captures["after the first esc"]
-        self.assertNotIn("Interrupted.", "\n".join(after))  # the turn still runs
-        self.assertIn("esc again to", info_row_of(after))  # and the info line says what a second Esc does
+        self.assertIn("❯ draft", "\n".join(terminal.captures["stopped"]))  # the draft stayed, untouched
         activity = [line for line in terminal.captures["running"] if INTERRUPT_ROW.search(line)]
         self.assertEqual(len(activity), 1, terminal.captures["running"])
+
+    def test_a_terminal_that_answers_the_kitty_query_names_ctrl_enter_under_the_first_queued_prompt(self) -> None:
+        prompt = "Write the numbers from 1 to 300, one per line, nothing else."
+        for answer, key in ((b"\x1b[?1u", "ctrl+enter"), (b"", "ctrl+j")):
+            with self.subTest(answer=answer):
+                run = self.interrupted_run()
+                terminal = run.terminal
+                terminal.typed_during_query = answer  # what `Terminal.query_background` hands back
+                said = SEND_NOW_HINT.format(key=key)
+                terminal.script(
+                    # One read: the second line lands before Hermes starts the turn, which Enter cannot steer yet, so
+                    # it queues (legacy bytes only: no key arrives as a report).
+                    Step(TYPED_AHEAD + prompt.encode() + b"\rthen stop\r", when=terminal.idle, label="the idle info line"),
+                    Step(b"\x03", when=terminal.shows(said), capture="queued", label="queued"),
+                    # The interrupt brings the queued prompt back into the composer: clear it, then leave.
+                    Step(b"\x15\x04", when=lambda: "Interrupted." in terminal.history(), label="end"),
+                )
+                self.run_main(run)
+                self.assert_clean_run(run)
+                queued = terminal.captures["queued"]
+                row = next(index for index, line in enumerate(queued) if said in line)
+                self.assertEqual(queued[row - 1].rstrip(), "┃ ❯ then stop")  # under the queued prompt, its own row
+                self.assertEqual(queued[row].rstrip(), f"  ⎿  {said}")
+                working = next(index for index, line in enumerate(queued) if "esc to interrupt" in line)
+                self.assertLess(row, working)  # in the chat, above the working row
+                self.assertNotIn("steer", info_row_of(queued))  # the info line names no steer key
+                (submit,) = run.calls("prompt.submit")
+                self.assertEqual(submit["params"]["text"], prompt)  # the answer typed nothing
 
     def test_the_activity_row_counts_the_seconds_since_the_prompt(self) -> None:
         run = self.interrupted_run()
         terminal = run.terminal
-        two_seconds = re.compile(r"\(2s · esc to interrupt\)")
+        two_seconds = re.compile(r"\(2s( · ↓[\d.]+k? tokens)? · esc to interrupt\)")  # the replay streams
         terminal.script(
             self.submit(run, "Write the numbers from 1 to 300, one per line, nothing else."),
             Step(b"\x03", when=lambda: any(two_seconds.search(line) for line in terminal.screen.lines()),
@@ -2442,8 +2853,8 @@ class KeyTests(AppTestCase):
         menu = terminal.captures["menu"]
         # The launch puts the composer on the bottom rows, so the menu opens above it, over its top rule.
         top = rule_rows(menu)[0]
-        self.assertTrue(menu[top - 2].startswith(" app.py"), menu)
-        self.assertTrue(menu[top - 1].startswith(" src/"), menu)
+        self.assertTrue(menu[top - 2].startswith("❯ app.py"), menu)  # the highlighted row has the pointer
+        self.assertTrue(menu[top - 1].startswith("  src/"), menu)
         self.assertIn("dir", menu[top - 1])
         accepted = terminal.captures["accepted"]
         self.assertFalse(any(line.startswith(" src/") for line in accepted), accepted)
@@ -2491,7 +2902,7 @@ class KeyTests(AppTestCase):
         self.assert_clean_run(run)
         details = "\n".join(terminal.captures["details"])
         self.assertIn("❯ Reply with exactly the word: ok", details)
-        self.assertIn("┃ ● ok", details)
+        self.assertIn("⚚ Hermes · deepseek-v4.1-flash-ultrafast\n  ok", details)
         self.assertIn("history · ", details)
 
     def test_ctrl_l_redraws_the_session_from_memory(self) -> None:
@@ -2518,13 +2929,218 @@ class KeyTests(AppTestCase):
         )
         terminal = run.terminal
         terminal.script(
-            Step(b"line one\\\rline two\r", when=terminal.idle, label="idle"),
+            Step(TYPED_AHEAD + b"line one\\\rline two\r", when=terminal.idle, label="idle"),
             Step(b"\x04", when=lambda: "later." in terminal.history() and terminal.idle(), label="the reply"),
         )
         self.run_main(run)
         self.assert_clean_run(run)
         (submitted,) = run.calls("prompt.submit")
         self.assertEqual(submitted["params"], {"session_id": LIVE_ID, "text": "line one\nline two"})
+
+
+class LeaderWorkflowTests(unittest.TestCase):
+    def armed(self, text="", *, busy=False):
+        from test_tui_modes import make_app, type_text
+        app, client = make_app(busy=busy)
+        app.composer.set_vim(True)
+        type_text(app, text)
+        app._on_input(Key(ESCAPE))
+        app._on_input(Key(CHAR, " "))
+        self.assertTrue(app.composer.leader)
+        return app, client
+
+    def test_leader_enter_executes_submit(self) -> None:
+        from test_tui_modes import SID
+        app, client = self.armed("a prompt")
+        app._on_input(Key(ENTER))
+        self.assertEqual(client.calls, [("prompt.submit", {"session_id": SID, "text": "a prompt"})])
+        self.assertEqual(app.composer.text, "")
+        self.assertFalse(app.composer.leader)
+        self.assertEqual(app.composer.vim_label, "INSERT")
+        self.assertFalse(app.composer._undo)
+
+    def test_leader_enter_steers_typed_text_during_turn(self) -> None:
+        from test_tui_modes import SID
+        app, client = self.armed("use this", busy=True)
+        app._on_input(Key(ENTER))
+        self.assertEqual(client.calls, [("session.redirect", {"session_id": SID, "text": "use this"})])
+        self.assertFalse(app.composer.leader)
+        self.assertEqual(app.composer.text, "")
+
+    def test_leader_enter_sends_oldest_queued_prompt_now(self) -> None:
+        from test_tui_modes import SID, queue
+        app, client = self.armed(busy=True)
+        queue(app, "first", "second")
+        app._on_input(Key(ENTER))
+        self.assertEqual(client.calls, [("session.redirect", {"session_id": SID, "text": "first"})])
+        self.assertEqual([line.text for line in app.queued], ["second"])
+        self.assertFalse(app.composer.leader)
+
+    def test_leader_enter_leaves_ineligible_queue_head_in_place(self) -> None:
+        from omh.tui.app import QueuedLine
+        app, client = self.armed(busy=True)
+        head = QueuedLine("ls", "!ls", shell=True)
+        app.queued.append(head)
+        app._on_input(Key(ENTER))
+        self.assertEqual(client.calls, [])
+        self.assertEqual(list(app.queued), [head])
+        self.assertFalse(app.composer.leader)
+
+    def test_leader_c_interrupts_turn_and_keeps_draft(self) -> None:
+        from test_tui_modes import SID
+        for text in ("", "keep draft"):
+            with self.subTest(text=text):
+                app, client = self.armed(text, busy=True)
+                app._on_input(Key(CHAR, "c"))
+                self.assertEqual(client.calls, [("session.interrupt", {"session_id": SID})])
+                self.assertTrue(app.interrupting)
+                self.assertEqual(app.composer.text, text)
+                self.assertFalse(app.composer.leader)
+                self.assertEqual(app.composer.vim_label, "NORMAL")
+
+    def test_leader_c_clears_draft_into_local_history_only(self) -> None:
+        app, client = self.armed("draft")
+        recorded = []
+        app.composer.on_record = recorded.append
+        app._on_input(Key(CHAR, "c"))
+        self.assertEqual((app.composer.text, app.composer.history), ("", ["draft"]))
+        self.assertEqual(recorded, [])
+        self.assertEqual(client.calls, [])
+        self.assertIsNone(app.exit_code)
+        self.assertFalse(app.composer.leader)
+
+    def test_leader_c_on_empty_idle_composer_does_not_exit(self) -> None:
+        app, client = self.armed()
+        app._on_input(Key(CHAR, "c"))
+        self.assertEqual(client.calls, [])
+        self.assertEqual(app.composer.text, "")
+        self.assertIsNone(app.exit_code)
+        self.assertFalse(app.composer.leader)
+
+    def test_modified_workflow_followers_are_swallowed_without_actions(self) -> None:
+        for modifier in ("ctrl", "alt", "shift", "reported_shift"):
+            for name, char in ((ENTER, ""), (CHAR, "c")):
+                if (modifier, char) == ("ctrl", "c"):
+                    continue  # Ctrl+C keeps its own meaning (test_ctrl_c_over_an_armed_leader_matches_the_unarmed_press)
+                with self.subTest(modifier=modifier, name=name):
+                    app, client = self.armed("keep", busy=True)
+                    app._on_input(Key(name, char, **{modifier: True}))
+                    self.assertEqual(client.calls, [])
+                    self.assertEqual(app.composer.text, "keep")
+                    self.assertFalse(app.composer.leader)
+
+
+class TallTableCapTests(unittest.TestCase):
+    def test_the_frame_path_gives_the_transcript_the_live_region_height(self) -> None:
+        from test_tui_modes import drawn, make_app
+        from _tui_lines import lines_text
+        from omh.tui.gateway import Event
+
+        app, _client = make_app(busy=True, rows=12)
+        seen: list[int | None] = []
+        flushed: list[str] = []
+        take = app.transcript.take_stable_lines
+
+        def spy(*args: object, **kwargs: int) -> list:
+            seen.append(kwargs.get("live_rows"))
+            lines = take(*args, **kwargs)
+            flushed.extend(lines_text(lines))
+            return lines
+
+        app.transcript.take_stable_lines = spy  # type: ignore[method-assign]
+        app.transcript.apply(Event(type="message.start", session_id=LIVE_ID, payload={}))
+        body = "| N | Value |\n| --- | --- |\n" + "".join(f"| {n} | v{n} |\n" for n in range(1, 16))
+        app.transcript.apply(Event(type="message.delta", session_id=LIVE_ID, payload={"text": body}))
+        drawn(app)
+        self.assertEqual(set(seen), {app.size[1]})
+        self.assertTrue(any("Value" in row for row in flushed), "a tall table was still held at the first frame")
+
+
+def live_record(run: Run) -> dict[str, str]:
+    """The session record `live_sessions` keeps under the run's OMH home: each stored id and its state."""
+    path = Path(run.environ["OMH_HOME"]) / "tui" / LIVE_SESSIONS_FILE
+    return {entry["session_id"]: entry["state"] for entry in json.loads(path.read_text(encoding="utf-8"))["sessions"]}
+
+
+@unittest.skipIf(NO_TERMIOS, "the OMH TUI needs termios")
+class LiveSessionRecordTests(AppTestCase):
+    """How each session ended, as `main` records it for a reopen (`live_sessions`): a hang-up drops it, anything the
+    person did closes it, and the session `/new` moved away from is closed."""
+
+    def test_a_clean_exit_closes_the_session(self) -> None:
+        run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=startup_answers()))
+        run.environ[SESSION_FILE_ENV] = str(run.root / "omh-session.json")
+        run.terminal.script(Step(b"\x04", when=run.terminal.idle, label="the first frame"))
+        self.run_main(run)
+        self.assert_clean_run(run, CLOSED_EXIT)
+        self.assertEqual(live_record(run), {STORED_ID: "closed"})
+        entry = json.loads((Path(run.environ["OMH_HOME"]) / "tui" / LIVE_SESSIONS_FILE).read_text())["sessions"][0]
+        self.assertEqual((entry["hermes_home"], entry["cwd"], entry["owners"]),
+                         (str(run.root), "/fixture/project", []))  # its one owner, this process, left
+        self.assertFalse((Path(run.environ["OMH_HOME"]) / "tui" / PENDING_MARKER).exists())
+
+    def test_a_hang_up_drops_the_session_and_leaves_the_pending_marker(self) -> None:
+        self.addCleanup(signal.signal, signal.SIGHUP, signal.getsignal(signal.SIGHUP))
+        run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=startup_answers()))
+        run.terminal = SignalledTerminal(signal.SIGHUP)
+        run.terminal.script(Step(b"\x04", when=run.terminal.idle, label="the first frame"))
+        with self.assertRaises(SystemExit):
+            self.run_main(run)
+        self.assertEqual(live_record(run), {STORED_ID: "dropped"})
+        self.assertTrue((Path(run.environ["OMH_HOME"]) / "tui" / PENDING_MARKER).is_file())
+
+    def test_new_closes_the_session_it_moves_away_from(self) -> None:
+        fresh = {"result": {"session_id": FRESH_LIVE_ID, "stored_session_id": FRESH_STORED_ID, "message_count": 0,
+                            "messages": [], "info": {"model": "deepseek/deepseek-v4.1-flash-ultrafast"}}}
+        answers = (*startup_answers(), ("session.create", recorded_answer("session", "create")),
+                   ("session.create", fresh), ("session.close", {"result": {"closed": True}}))
+        run = self.prepare(Scenario("session", spans("session", "startup"), answers=answers), cols=200)
+        terminal = run.terminal
+        terminal.script(
+            self.submit(run, "/new"),
+            Step(b"\x04", when=terminal.shows(f"New session {FRESH_STORED_ID}."), label="the new session"),
+        )
+        self.run_main(run)
+        self.assert_clean_run(run)
+        self.assertEqual(live_record(run), {STORED_ID: "closed", FRESH_STORED_ID: "closed"})
+        sessions = json.loads((Path(run.environ["OMH_HOME"]) / "tui" / LIVE_SESSIONS_FILE).read_text())["sessions"]
+        self.assertEqual([entry["session_id"] for entry in sessions], [STORED_ID, FRESH_STORED_ID])
+
+    def test_a_gateway_lost_mid_session_drops_the_session(self) -> None:
+        """Exit 1 from a gateway the TUI lost (`_lose_gateway`) is not the person leaving: the session is `dropped`
+        and the pending marker is armed, by the explicit end reason rather than the exit number."""
+        run = self.prepare(
+            Scenario("session", spans("session", "startup", "create"), answers=startup_answers(), after=EXIT)
+        )
+        self.run_main(run)
+        self.assertEqual(run.code, 1)
+        self.assertEqual(live_record(run), {STORED_ID: "dropped"})
+        self.assertTrue((Path(run.environ["OMH_HOME"]) / "tui" / PENDING_MARKER).is_file())
+
+    def test_leaving_while_the_gateway_restarts_closes_the_session(self) -> None:
+        """Ctrl+C while a respawn waits (`RESPAWN_LEFT_REASON`) is the person leaving, even though it exits 1."""
+        run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=startup_answers()))
+        with patch.object(App, "_step", lambda live: live._lose_gateway(RESPAWN_LEFT_REASON)):
+            self.run_main(run)
+        self.assertEqual(run.code, 1)
+        self.assertEqual(live_record(run), {STORED_ID: "closed"})
+
+    def test_a_protocol_refusal_still_closes_the_session(self) -> None:
+        """Exit 1 from a gateway that answers but refuses the protocol: reopening would meet the same refusal."""
+        answers = (*startup_answers(), ("slash.exec", {"error": {"code": 4000, "message": "extra fields not permitted"}}))
+        run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=answers))
+        run.terminal.script(self.submit(run, "/xyz"))
+        self.run_main(run)
+        self.assertEqual(run.code, 1)
+        self.assertEqual(live_record(run), {STORED_ID: "closed"})
+
+    def test_no_omh_home_writes_no_record(self) -> None:
+        run = self.prepare(Scenario("session", spans("session", "startup", "create"), answers=startup_answers()))
+        omh_home = Path(run.environ.pop("OMH_HOME"))
+        run.terminal.script(Step(b"\x04", when=run.terminal.idle, label="the first frame"))
+        self.run_main(run)
+        self.assert_clean_run(run)
+        self.assertFalse((omh_home / "tui" / LIVE_SESSIONS_FILE).exists())
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@ from omh.routing import chat as chat_module
 from omh.routing import catalog_questions as catalog_questions_module
 from omh.routing import intent as intent_module
 from omh.routing import localization as localization_module
+from omh.plugin_bundle.omh import text_fold as text_fold_module
 from omh.routing import missed_route as missed_route_module
 from omh.routing import recommend as recommend_module
 from omh.routing import policy as policy_module
@@ -229,7 +230,26 @@ class EfficiencyContractTests(unittest.TestCase):
         # says why it exists in its own words and points at its boundary with
         # Hermes' built-in `/plan`. Measured 81,390; the ceiling restores the
         # ~1.6k headroom this gate carried.
-        self.assertLess(core["skill_body"]["bytes"], 83_000)
+        # 83,000 -> 85,000: the Russian trigger pack's phrases join the
+        # routing-signal lines of three core bodies (`plan` +144,
+        # `executor-runtime-readiness` +155, `agent-ops-review` +145). Main
+        # measures 82,816 and this tree 83,260; the ceiling restores the
+        # ~1.6k headroom this gate carried. The pack's review (#2301) drops
+        # its everyday phrases and the tree measures 83,092, still over the old
+        # ceiling, so this one stands.
+        # 85,000 -> 88,000: `plan` (core) now gives each code-change task an id,
+        # dependencies, write scope and done check, ends with a closing gate,
+        # and offers `dag-ulw` after acceptance. Main measures 84,762 and this
+        # tree 86,249 (+1,487); the ceiling leaves ~1.75k headroom, about the
+        # ~1.6k the earlier entries recorded.
+        # 88,000 -> 92,000: the skill audit round grows the core bodies it touches: operations
+        # +1,592 (cancel's stop commands and the checklists of the observability skills), host
+        # readiness +419, coding core +311, memory and Jev +68, plan record +60, business +30.
+        # Main measures 87,926 and the merged tree 90,406 (+2,480); the ceiling restores ~1.6k headroom.
+        # 92,000 -> 115,000: `CORE_PROFILE_SKILLS` rebalanced from 10 (including 4 thin metadata/channel
+        # cards) to 12 high-lift daily skills (adding code-review, verification-gate, app-debugging,
+        # agent-debug, spend-gate, skill-eval). Measured 111,821; ceiling restores ~3k headroom.
+        self.assertLess(core["skill_body"]["bytes"], 115_000)
         # 815,000 -> 825,000: one new installable body (`web-research`) plus the
         # sentence that split `best-practice-research`'s boundary in two. Set to
         # restore the ~10k headroom this gate is meant to carry rather than to
@@ -398,7 +418,7 @@ class EfficiencyContractTests(unittest.TestCase):
 
                 # Evidence boundaries stay inline.
                 for rule in definition.safety_rules:
-                    self.assertIn(rule, content)
+                    self.assertIn(render_module.translate_sibling_mentions(rule, owner=definition.name), content)
                 self.assertIn("Prepared OMH routing", content)
                 self.assertIn("prepared", content.lower())
 
@@ -428,7 +448,11 @@ class EfficiencyContractTests(unittest.TestCase):
         # 1260 -> 1440: the reply line gives the persona the reply language,
         # speech level and endings, and progress updates, with the user's
         # language as the fallback; the rail measured 1434.
-        self.assertLessEqual(len(primer_context), 1440)
+        # 1440 -> 1560: the reply line carries the human-voice pass (result
+        # first, no chatbot openers or closers); the rail measured 1550.
+        # 1560 -> 1677: one sentence for a mid-turn message (one line before the
+        # next tool call); the rail measured 1667.
+        self.assertLessEqual(len(primer_context), 1677)
         self.assertLessEqual(len(awareness_primer_markdown()), _ledger_limit("awareness_primer_markdown_chars"))
         self.assertLessEqual(
             max(workflow_context_lengths.values()), _ledger_limit("awareness_workflow_context_chars_max")
@@ -460,7 +484,7 @@ class EfficiencyContractTests(unittest.TestCase):
         self.assertIn("never quoted to the user", awareness_primer_context())
         # The reply rule names what the persona owns, not only "the host's own
         # voice": that phrase alone left a casual-register Korean persona
-        # answering in English in its interim progress lines (miku,
+        # answering in English in its interim progress lines (mbot,
         # 2026-09-30). The persona owns the reply language too, so a SOUL
         # that sets one wins over the user's; the user's language is only the
         # fallback. Each of those, and OMH's structure-only role, has to
@@ -482,7 +506,7 @@ class EfficiencyContractTests(unittest.TestCase):
             if template.relative_path == "references/skill-common-rail.md"
         )
         self.assertIn("## OMH Context Rail", common_rail)
-        self.assertIn("Generic-tool checkpoint: image->img-summary", common_rail)
+        self.assertIn("Generic-tool checkpoint: image->omh-image-cards", common_rail)
         # The rail's host-voice section says the same thing at length; a
         # regenerated edit that dropped the persona's ownership of the reply
         # language, or the user's language as the fallback, would leave the
@@ -1396,8 +1420,10 @@ class EfficiencyContractTests(unittest.TestCase):
         self.assertGreaterEqual(cache_info.hits, 1)
 
     def test_routing_token_cache_reuses_terms_without_payload_poisoning(self) -> None:
-        localization_module._routing_terms_cached.cache_clear()
-        localization_module._routing_tokens_cached.cache_clear()
+        # The caches live with the tokenizer in the bundle's `text_fold`;
+        # `localization` re-exports the functions that fill them.
+        text_fold_module._routing_terms_cached.cache_clear()
+        text_fold_module._routing_tokens_cached.cache_clear()
 
         first_terms = localization_module.routing_terms("Risky refactor with code-review")
         first_terms.add("mutated")
@@ -1406,14 +1432,14 @@ class EfficiencyContractTests(unittest.TestCase):
         self.assertIn("risky", second_terms)
         self.assertIn("code-review", second_terms)
         self.assertNotIn("mutated", second_terms)
-        terms_cache = localization_module._routing_terms_cached.cache_info()
+        terms_cache = text_fold_module._routing_terms_cached.cache_info()
         self.assertEqual(terms_cache.misses, 1)
         self.assertGreaterEqual(terms_cache.hits, 1)
 
         first_tokens = localization_module.routing_tokens("Risky refactor with code-review", stopwords=set())
         first_tokens.add("mutated")
         second_tokens = localization_module.routing_tokens("Risky refactor with code-review", stopwords=set())
-        tokens_cache = localization_module._routing_tokens_cached.cache_info()
+        tokens_cache = text_fold_module._routing_tokens_cached.cache_info()
 
         self.assertIn("risky", second_tokens)
         self.assertIn("code-review", second_tokens)
@@ -2168,7 +2194,7 @@ class EfficiencyContractTests(unittest.TestCase):
             )
 
     def test_chat_interaction_reuses_executor_target_hint_cache(self) -> None:
-        contract_module._executor_target_from_message.cache_clear()
+        contract_module._executor_choice_from_message.cache_clear()
 
         first, first_resolution = contract_module._resolve_delegate_executor_target(
             "choose",
@@ -2180,7 +2206,8 @@ class EfficiencyContractTests(unittest.TestCase):
             None,
             message="open this in Codex and prepare the coding handoff",
         )
-        cache_info = contract_module._executor_target_from_message.cache_info()
+        # The owner-choice reader (owner cue: "open this in codex") is the cached one the resolver calls.
+        cache_info = contract_module._executor_choice_from_message.cache_info()
 
         self.assertEqual(first, "codex")
         self.assertEqual(second, "codex")

@@ -14,7 +14,9 @@ commands and pitfalls `CLAUDE.md`.
 This repo — a deterministic wrapper orchestration layer installed next to
 Hermes Agent: skill catalog, router, prepared-handoff generator, and
 metadata-only status surfaces. Makes no LLM, API, or network calls outside
-the scoped exceptions `CLAUDE.md` lists under What This Repo Is.
+the scoped exceptions `CLAUDE.md` lists under What This Repo Is, and executes
+work only through Fanout dispatch and the Hermes-native child boundary (both
+under Implementation Boundaries in `AGENTS.md`).
 _Avoid_: Hermes plugin (that is one distribution surface, not the product),
 coding executor, Hermes patch
 
@@ -50,6 +52,20 @@ in chat. Generated from the skill catalog; never hand-edited.
 _Avoid_: slash command, prompt template, OMC skill (that is a different
 product's concept)
 
+**Identity profile**:
+A named prompt definition in the common `omh_role` directory: `builtin:name`
+reads shipped role guidance and `custom:name` reads the user's prompt and
+ordered model chain from `<omh_home>/routing/identities.json`
+(`omh_identity_profiles/v1`). A DAG node's optional `identity` binds prompt
+delivery and routing together; a configured chain supplies models, otherwise
+the node's category does. Origin only selects the loader. Legacy
+`[omh-role:name]`, `[omh-identity:name]`, CLI `--identity` and unit `identity`
+remain their existing explicit-selection adapters. Prepared guidance and
+routing are not evidence that a model ran.
+_Avoid_: confusing identity with DAG role (build/baseline/verify/review), category
+(a work type with a model table), inferring or inheriting an identity across
+sessions
+
 **Hermes skill category**:
 The dashboard group Hermes shows a skill under in its startup banner and skills
 list. Hermes derives it from the SKILL.md's DIRECTORY, not from frontmatter, and
@@ -72,9 +88,11 @@ not evidence that a host loaded or executed it. See [Agent Skills](docs/AGENT-SK
 _Avoid_: managed skill, Hermes plugin, execution adapter
 
 **Skill catalog**:
-The source of truth for every skill and its metadata (`src/skills/catalog.py`
-plus render code). Skills, `docs/WORKFLOWS.md`, `docs/ROLES.md`, and the demo
-cards are byte-exact projections of it.
+The source of truth for every skill and its metadata: the definitions in
+`src/skills/catalog_definitions.py` and the other `src/skills/catalog_*.py`
+tables, the derivations in `src/skills/catalog.py`, and render code. Skills,
+`docs/WORKFLOWS.md`, `docs/ROLES.md`, and the demo cards are byte-exact
+projections of it.
 _Avoid_: editing any generated projection directly
 
 **Skill record**:
@@ -340,8 +358,9 @@ _Avoid_: a second write path, a subprocess from the plugin into the CLI
 **Delegation view**:
 A conversation's delegated work drawn as a graph (`delegation_graph/v1`:
 nodes, edges, layers): frontiers of boxes (title,
-category and model, status, parents), one connector per frontier gap, the
-recorded edges listed exactly under `Dependencies`, and a `Node details` card
+category and model, status, parents), the edges between two frontiers
+drawn where they exist (one centred `╎ ▽` for a gap whose edges cannot be
+drawn exactly: no edge drawn, never an edge implied), the recorded edges listed exactly under `Dependencies`, and a `Node details` card
 per running or stuck node and for `/dag`'s highlighted one; or a compact tree
 when no box fits or the edges loop; the tree nests a node a dag-ulw run added
 (a repair or an extend) under where it came from. The
@@ -424,6 +443,32 @@ Hermes home — plugin readiness, activity rows, the plan todo, display lines.
 Status narration, never execution, review, CI, merge, or token-usage evidence.
 _Avoid_: runtime state (the payload is a read-only projection of it)
 
+### Desktop app
+
+**omher**:
+The desktop app in `apps/omher/` for macOS, Windows and Linux (Tauri shell,
+React UI, a Python bridge), released separately under `omher-v*` tags. The
+name means the app only: "OMH" and "oh-my-hermes" mean the harness this repo
+ships (the `omh` package, plugin, skills and TUI). One Hermes profile is one
+bot; each bot has one main chat, the session titled `Bot Chat`, and omher
+shows its other sessions read-only. The app starts the bridge, which reaches
+the person's own Hermes gateway over loopback through Hermes' `connect_gateway`;
+omher makes no model or API call and is not part of the `omh` Python package.
+Its SESSIONS list starts one of a fixed set of agent programs (`claude`,
+`codex`, `omo`, `dsh`, `omh`, `pi`, `omp`, `grok`) in a folder the person
+picks, as a chat over the agent's structured mode or as a terminal. Boundary:
+`docs/OMHER-BOUNDARY.md`.
+_Avoid_: counting omher as an OMH execution surface, the OMH TUI, a Hermes
+Desktop plugin, "OMH desktop" or "omher" for the harness
+
+**Elsewhere**:
+A session of a bot's Hermes profile whose source is not one of `tui`, `cli`,
+`local`, `desktop`, `acp`, `api_server`, `omher` and which is not the bot's
+main chat: Slack, Discord, Telegram and cron sessions. omher lists them and
+reads their last messages and never sends, answers or interrupts in them.
+_Avoid_: other chats (omher has one chat per bot), shared session, a place to
+type
+
 ### Hermes terminal surfaces
 
 **Classic TUI**:
@@ -447,7 +492,10 @@ The terminal frontend bare `omh` opens (`src/tui/`, installed as `omh.tui`).
 `omh` runs the person's own `hermes --tui` with `HERMES_TUI_DIR` pointing at
 the packaged shim `omh/tui/frontend/dist/entry.js`, so Hermes' launcher still
 resolves the profile, the resume target, the working directory and session
-ownership, then starts the shim in place of its Ink app. The shim hands the
+ownership, then starts the shim in place of its Ink app. A session the person
+closes there exits `CLOSED_EXIT` instead of 0, so the launcher prints no exit
+summary of its own (it does for 0 and 130), and `omh` prints its exit card
+and returns 0. The shim hands the
 terminal to `omh.tui.app.main` on OMH's interpreter, started `-E -P` so the
 launcher's `PYTHONPATH` and the working directory stay off its import path,
 with the directory `omh` imported its own package from (`OMH_TUI_SITE`) put
@@ -465,12 +513,22 @@ child exits on its own with a failure, it spawns it again the same way and
 resumes the open session, at most 3 times in 60 s (an open question closes
 unanswered, a running turn is reported lost and never re-sent), and past that
 it exits as before; Ctrl+Z stops its process group, the gateway child with it, as
-Hermes' own CLI's Ctrl+Z does. Layout, input, rendering and
+Hermes' own CLI's Ctrl+Z does. `/gateway restart`, typed by the person and
+confirmed in the slot, runs Hermes' own `hermes gateway restart` (for a
+named profile the shared gateway serves, that profile alone or the whole
+gateway, as the person picks) and then reattaches to the same session,
+outside that limit. Layout, input, rendering and
 the OMH panels are OMH's; every model call, tool run and approval decision is
 the gateway's. Shift+Tab may turn on Hermes' per-session yolo, so Hermes stops
 asking for approvals in that one session (a `config.set` naming the session,
 never `approvals.mode`), and the TUI sends that session an explicit off before
-it leaves it. Every deny the person gives an approval also interrupts the
+it leaves it. When Hermes' configured default model moves while a session
+runs (the config file's mtime, read at each turn's end and before each prompt
+that starts a turn, then a `model.options` naming no session), the TUI switches
+that session to it at that boundary, before the prompt goes,
+with the session-scoped `config.set model` a `/model` pick sends, and says so
+in one line; a session that runs another model than an unmoved default stays
+on it. Every deny the person gives an approval also interrupts the
 running turn, except its last row's, which denies and sends what the person
 then types into the running turn as a steer; its `always` row, there only when
 Hermes offers it, sends Hermes' own permanent allow, which Hermes saves. It writes no
@@ -487,7 +545,8 @@ right under them (the streaming tail, one slot for the plan or a prompt
 Hermes asked, the composer, the info line under it, and under that the agent
 view, always expanded while there are agents) repaints; the
 composer sits right under the output until the screen fills, then stays on
-the bottom rows, and a slot closing there does not move it. When it cannot start
+the bottom rows, and a slot closing there does not move it (a turn's end gives
+up the rows only the running turn had). When it cannot start
 (an OMH that cannot import itself, gateway unavailable, protocol drift at
 startup) it creates the sentinel file `omh` named for that launch and exits
 75; that exit, and a blocker found before anything starts, has `omh` say why
@@ -638,10 +697,15 @@ alone, so every row in the file is its spend and the rows are summed; the
 result is the `-z` report's vocabulary, which the observation builder already
 reads. The child runs with `--toolsets file --safe-mode`, so no delegate
 subagent opens a row of its own and a context-compression rotation is the only
-source of a second row. The sum equals the `-z` counters only because of that
-restriction: a delegate child writes its own `sessions` row, and the `-z`
-main-loop keys exclude subagent tokens while its cost includes them, so a
-later `--toolsets` widening that admits delegation has to revisit this read.
+source of a second row (the read skips rows the home held before the cell). A
+paired-run arm uses `file,skills`, optionally with `terminal` and `delegation`
+from the run's `--arm-toolsets` opt-in, in its declared arm home. With
+`delegation`, Hermes' own `delegate_task` children each write a `sessions`
+row (`source = 'subagent'`). Their token and API-call counts are per-row
+deltas and are summed with the parent's; their cost is not, because Hermes
+folds a child's cost into the parent's running total, so when any read row
+is a subagent's the usage carries no `estimated_cost_usd`, `cost_status` or
+`cost_source` (unmeasured, never a doubled figure).
 The columns have been in the table since Hermes 2026-04, before the
 `requires_hermes` floor.
 
@@ -655,6 +719,26 @@ empty result as a measured zero, treating a `timed_out` or `cancelled`
 result's usage as complete (the child was killed, deltas still in Hermes'
 daemon token-writer queue are lost, and the read is a lower bound with no
 marker of its own)
+
+**Paired-run cell trace**:
+The same disposable-home `state.db` read for one confirmed paired-run cell
+(`src/coding/hermes_child_trace.py`), taken after the cell's child exits and
+before its arm home is removed, signed into the receipt as `cell_trace`.
+Besides the `sessions` token and `api_call_count` columns it reads
+`messages.tool_calls` of assistant rows for tool names only (a `skill_view`
+argument is parsed only for its `name`), the length of
+`COALESCE(messages.api_content, content)` of the first user row, and the
+length of the system prompt, inline or through `system_prompts.prompt` by
+`sessions.system_prompt_hash`. For Hermes' own `delegate_task` children it
+reads `sessions.source`, `started_at`, `ended_at` and `model`:
+`subagent_session_count`, `subagent_api_call_count`,
+`max_concurrent_subagents` (most child spans open at one instant; null when a
+child has no end) and `session_models` (sorted distinct models of every new
+row, null past ten). Lengths and names leave the read; text never
+does. Same Hermes-private coupling and same quiet-on-shape-change rule as the
+usage ledger above.
+_Avoid_: keeping any message text, counting rows the home held before the
+cell, reading it outside a paired-run arm home, treating a null trace as zero
 
 **Stored prompt identity**:
 The `Model:` line of the identity trailer Hermes ends every system prompt

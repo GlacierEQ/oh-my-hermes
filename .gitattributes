@@ -20,12 +20,27 @@ agent-skills/omh-show-reel/toolkit/** text eol=lf
 src/skills/geospatial_analysis_toolkit/** text eol=lf
 skills/omh-geospatial-analysis/toolkit/** text eol=lf
 agent-skills/omh-geospatial-analysis/toolkit/** text eol=lf
+src/skills/sprite_forge_toolkit/** text eol=lf
+skills/omh-sprite-forge/toolkit/** text eol=lf
+agent-skills/omh-sprite-forge/toolkit/** text eol=lf
+src/skills/frontend_toolkit/** text eol=lf
+skills/omh-frontend/toolkit/** text eol=lf
+agent-skills/omh-frontend/toolkit/** text eol=lf
 src/skills/biomedical_evidence_toolkit/** text eol=lf
 skills/omh-biomedical-evidence/toolkit/** text eol=lf
 agent-skills/omh-biomedical-evidence/toolkit/** text eol=lf
 src/skills/molecular_docking_toolkit/** text eol=lf
 skills/omh-molecular-docking/toolkit/** text eol=lf
 agent-skills/omh-molecular-docking/toolkit/** text eol=lf
+src/skills/data_share_review_toolkit/** text eol=lf
+skills/omh-data-share-review/toolkit/** text eol=lf
+agent-skills/omh-data-share-review/toolkit/** text eol=lf
+src/skills/commit_pr_authoring_toolkit/** text eol=lf
+skills/omh-commit-pr-authoring/toolkit/** text eol=lf
+agent-skills/omh-commit-pr-authoring/toolkit/** text eol=lf
+src/skills/inference_serving_toolkit/** text eol=lf
+skills/omh-inference-serving/toolkit/** text eol=lf
+agent-skills/omh-inference-serving/toolkit/** text eol=lf
 # The pack's digest inventory, copied verbatim as every installer's receipt.
 agent-skills/.omh-agent-skills-manifest.json text eol=lf
 
@@ -37,6 +52,8 @@ agent-skills/.omh-agent-skills-manifest.json text eol=lf
 .claude/install.sh text eol=lf
 .claude/install.ps1 text eol=lf
 .claude/manifest.json text eol=lf
+# Claude Code's own generated pack copy, byte-gated like agent-skills/.
+.claude/agent-skills/** text eol=lf
 .codex/install.sh text eol=lf
 .codex/install.ps1 text eol=lf
 .codex/manifest.json text eol=lf
@@ -49,7 +66,30 @@ agent-skills/.omh-agent-skills-manifest.json text eol=lf
 .pi/install.sh text eol=lf
 .pi/install.ps1 text eol=lf
 .pi/manifest.json text eol=lf
+.antigravity/install.sh text eol=lf
+.antigravity/install.ps1 text eol=lf
+.antigravity/manifest.json text eol=lf
 docs/WORKFLOWS.md text eol=lf
 docs/ROLES.md text eol=lf
 src/plugin_bundle/omh/tools/capability_families.json text eol=lf
 examples/**/*.json text eol=lf
+
+# GitHub archives (the preview `main.zip`, tag and commit archives) substitute
+# the archived commit here, so a generation built from one knows its commit.
+src/omh/_archive_commit.txt export-subst
+
+# The LitQA2 synthetic fixture is pinned by sha256 in tests/test_research_eval_litqa2.py, and
+# `prepare` refuses a digest mismatch, so Windows autocrlf must not rewrite it.
+tests/fixtures/research_eval_litqa2/** text eol=lf
+src/skills/channel_watch_toolkit/** text eol=lf
+skills/omh-automation-blueprint/toolkit/** text eol=lf
+src/skills/pr_watch_toolkit/** text eol=lf
+skills/omh-github-event-ops/toolkit/** text eol=lf
+src/skills/monitor_watch_toolkit/** text eol=lf
+
+# The gateway health fixture is Hermes' log bytes as written (LF); the reader is
+# tested on those bytes on every checkout.
+tests/fixtures/gateway_health/** text eol=lf
+
+# Run by bash in the omher workflow on windows-latest too, where a CRLF checkout breaks it.
+apps/omher/scripts/*.sh text eol=lf

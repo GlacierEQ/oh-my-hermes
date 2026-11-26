@@ -36,6 +36,8 @@ from omh.coding.fanout_dispatch import (  # noqa: E402
     signal_safe_unit_runner,
 )
 from omh.system.paths import OmhPaths  # noqa: E402
+from omh.coding.pi_family_interop import PI_DISTRIBUTION_AGENT_DIR_ENV, PI_DISTRIBUTION_BRAND_ENV, PI_DISTRIBUTION_HOME, PI_DISTRIBUTION_HOST, PI_FORK_HOME, PI_FORK_HOST, RUNTIME_HOME, RUNTIME_SHORT_NAME
+import json
 
 
 def _linked_worktree(root: Path) -> Path:
@@ -99,7 +101,8 @@ class _ConfinedSpawnContract:
             self.assertEqual(confinement.receipt["status"], "observed")
             self.assertTrue(confinement.receipt["enforced"])
             self.assertEqual(confinement.receipt["probe"]["inside_write_exit_code"], 0)
-            self.assertEqual(confinement.receipt["probe"]["outside_write_exit_code"], 1)
+            self.assertIsInstance(confinement.receipt["probe"]["outside_write_exit_code"], int)
+            self.assertNotEqual(confinement.receipt["probe"]["outside_write_exit_code"], 0)
             self.assertIn(self.probe_refusal, confinement.receipt["probe"]["refusal"])
 
     def test_owner_cli_under_a_sensitive_directory_is_really_fenced(self) -> None:
@@ -126,7 +129,8 @@ class _ConfinedSpawnContract:
             self.assertFalse(read_roots_are_safe(confinement.roots))
             self.assertTrue(confinement.receipt["enforced"])
             self.assertEqual(confinement.receipt["probe"]["inside_write_exit_code"], 0)
-            self.assertEqual(confinement.receipt["probe"]["outside_write_exit_code"], 1)
+            self.assertIsInstance(confinement.receipt["probe"]["outside_write_exit_code"], int)
+            self.assertNotEqual(confinement.receipt["probe"]["outside_write_exit_code"], 0)
 
     def test_confined_command_can_exec_a_real_binary_without_widening_writes(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -160,7 +164,7 @@ class _ConfinedSpawnContract:
             )
 
             self.assertEqual(completed.returncode, 0)
-            self.assertEqual(completed.stdout.strip(), "inside_exit=0 outside_exit=1")
+            self.assertRegex(completed.stdout.strip(), r"^inside_exit=0 outside_exit=[1-9][0-9]*$")
             self.assertTrue(inside.is_file())
             self.assertFalse(outside.exists())
 
@@ -339,79 +343,86 @@ class FanoutConfinementPolicyTests(unittest.TestCase):
             self.assertEqual(owner_state_directories("hermes", {}), (home / ".hermes",))
             for host, expected in {
                 "pi": (home / ".pi" / "agent",),
-                "senpi": (home / ".senpi" / "agent",),
+                PI_DISTRIBUTION_HOST: (home / PI_DISTRIBUTION_HOME / "agent",),
+                PI_FORK_HOST: (home / PI_FORK_HOME / "agent",),
                 "opencode": (
                     home / ".local" / "share" / "opencode",
                     home / ".local" / "state" / "opencode",
                 ),
             }.items():
                 with self.subTest(host=host):
-                    with mock.patch("omh.coding.fanout_dispatch.omo_runtime_host", return_value=host):
-                        self.assertEqual(owner_state_directories("omo-runtime", {}), expected)
-            with mock.patch("omh.coding.fanout_dispatch.omo_runtime_host", return_value="pi"):
+                    with mock.patch("omh.coding.fanout_dispatch.pi_family_host", return_value=host):
+                        self.assertEqual(owner_state_directories("pi-family-runtime", {}), expected)
+            with mock.patch("omh.coding.fanout_dispatch.pi_family_host", return_value="pi"):
                 self.assertEqual(
-                    owner_state_directories("omo-runtime", {"PI_CODING_AGENT_DIR": str(home / "pi-override")}),
+                    owner_state_directories("pi-family-runtime", {"PI_CODING_AGENT_DIR": str(home / "pi-override")}),
                     (home / "pi-override",),
                 )
-            with mock.patch("omh.coding.fanout_dispatch.omo_runtime_host", return_value="senpi"):
+            with mock.patch("omh.coding.fanout_dispatch.pi_family_host", return_value=PI_FORK_HOST):
                 self.assertEqual(
-                    owner_state_directories("omo-runtime", {"OMO_CODING_AGENT_DIR": str(home / "omo-state")}),
-                    (home / ".senpi" / "agent",),
+                    owner_state_directories("pi-family-runtime", {"PI_CODING_AGENT_DIR": str(home / "fork-override")}),
+                    (home / "fork-override",),
+                )
+            with mock.patch("omh.coding.fanout_dispatch.pi_family_host", return_value=PI_DISTRIBUTION_HOST):
+                self.assertEqual(
+                    owner_state_directories("pi-family-runtime", {f"{RUNTIME_SHORT_NAME.upper()}_CODING_AGENT_DIR": str(home / "runtime-state")}),
+                    (home / PI_DISTRIBUTION_HOME / "agent",),
                 )
                 self.assertEqual(
-                    owner_state_directories("omo-runtime", {"PI_CODING_AGENT_DIR": str(home / "legacy-pi-override")}),
+                    owner_state_directories("pi-family-runtime", {"PI_CODING_AGENT_DIR": str(home / "legacy-pi-override")}),
                     (home / "legacy-pi-override",),
                 )
                 self.assertEqual(
                     owner_state_directories(
-                        "omo-runtime",
+                        "pi-family-runtime",
                         {
-                            "SENPI_CODING_AGENT_DIR": str(home / "senpi-override"),
+                            PI_DISTRIBUTION_AGENT_DIR_ENV: str(home / "distribution-override"),
                             "PI_CODING_AGENT_DIR": str(home / "ignored-pi-override"),
                         },
                     ),
-                    (home / "senpi-override",),
+                    (home / "distribution-override",),
                 )
         self.assertEqual(owner_state_directories("unassigned", {}), ())
 
-    def test_omo_runtime_child_env_pins_agent_dir_and_scrubs_senpi_brand(self) -> None:
+    def test_pi_family_runtime_child_env_pins_agent_dir_and_scrubs_pi_distribution_brand(self) -> None:
         home = Path("/tmp/fanout-owner-home").resolve()
         cases = {
             "pi": ("PI_CODING_AGENT_DIR", {}, home / ".pi" / "agent"),
-            "senpi": (
-                "SENPI_CODING_AGENT_DIR",
-                {"PI_CODING_AGENT_DIR": str(home / "legacy-senpi-override")},
-                home / "legacy-senpi-override",
+            PI_DISTRIBUTION_HOST: (
+                PI_DISTRIBUTION_AGENT_DIR_ENV,
+                {"PI_CODING_AGENT_DIR": str(home / "legacy-distribution-override")},
+                home / "legacy-distribution-override",
             ),
+            PI_FORK_HOST: ("PI_CODING_AGENT_DIR", {}, home / PI_FORK_HOME / "agent"),
         }
         for host, (environment_variable, overrides, expected) in cases.items():
             with (
                 self.subTest(host=host),
                 mock.patch("omh.coding.fanout_confinement.Path.home", return_value=home),
-                mock.patch("omh.coding.fanout_dispatch.omo_runtime_host", return_value=host),
+                mock.patch("omh.coding.fanout_dispatch.pi_family_host", return_value=host),
             ):
                 child_env = fanout_child_env(
                     {
-                        "SENPI_BRAND": '{"name":"omo","envPrefix":"OMO","configDir":".omo"}',
+                        PI_DISTRIBUTION_BRAND_ENV: json.dumps({"name": RUNTIME_SHORT_NAME, "envPrefix": RUNTIME_SHORT_NAME.upper(), "configDir": RUNTIME_HOME}, separators=(",", ":")),
                         **overrides,
                     },
                     depth=0,
                     fanout_id="fanout",
                     unit_id="unit",
-                    owner="omo-runtime",
+                    owner="pi-family-runtime",
                 )
                 self.assertEqual(child_env[environment_variable], str(expected))
-                self.assertEqual(owner_state_directories("omo-runtime", child_env), (expected,))
-                self.assertNotIn("SENPI_BRAND", child_env)
-        with mock.patch("omh.coding.fanout_dispatch.omo_runtime_host", return_value="opencode"):
+                self.assertEqual(owner_state_directories("pi-family-runtime", child_env), (expected,))
+                self.assertNotIn(PI_DISTRIBUTION_BRAND_ENV, child_env)
+        with mock.patch("omh.coding.fanout_dispatch.pi_family_host", return_value="opencode"):
             child_env = fanout_child_env(
-                {"SENPI_BRAND": "ambient"},
+                {PI_DISTRIBUTION_BRAND_ENV: "ambient"},
                 depth=0,
                 fanout_id="fanout",
                 unit_id="unit",
-                owner="omo-runtime",
+                owner="pi-family-runtime",
             )
-        self.assertEqual(child_env["SENPI_BRAND"], "ambient")
+        self.assertEqual(child_env[PI_DISTRIBUTION_BRAND_ENV], "ambient")
 
     def test_probe_writes_every_owner_state_root(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -625,10 +636,91 @@ class FanoutConfinementPolicyTests(unittest.TestCase):
 
         environment = confinement.command_environment({"PATH": "/usr/bin", "OMH_MARK": "present"})
 
+        scratch = worktree / ".omh" / "confinement-tmp"
         self.assertEqual(
             environment,
-            {"PATH": "/usr/bin", "OMH_MARK": "present", "TMPDIR": str(worktree / ".omh" / "confinement-tmp")},
+            {
+                "PATH": "/usr/bin",
+                "OMH_MARK": "present",
+                "TMPDIR": str(scratch),
+                "TMPPREFIX": str(scratch / "zsh"),
+                "UV_CACHE_DIR": str(scratch / "uv-cache"),
+                "CLAUDE_CODE_TMPDIR": str(scratch / "claude-code"),
+            },
         )
+
+    def _scratch_confinement(self, worktree: Path, *, enforced: bool = True) -> FanoutFilesystemConfinement:
+        child = ChildContext(
+            worktree, worktree, worktree, worktree, worktree,
+            worktree / "request", worktree / "artifact", "fanout-filesystem-confinement",
+        )
+        return FanoutFilesystemConfinement(
+            selected="sandbox-exec",
+            roots=(worktree,),
+            write_roots=(worktree,),
+            write_literals=(),
+            child=child,
+            environment={"PATH": "/usr/bin"},
+            backend_digest="digest",
+            executables={},
+            receipt={"enforced": enforced},
+        )
+
+    def test_zsh_and_uv_scratch_follow_tmpdir_only_for_an_enforced_fence(self) -> None:
+        with TemporaryDirectory() as temporary:
+            worktree = Path(temporary).resolve() / "worktree"
+            worktree.mkdir()
+            scratch = worktree / ".omh" / "confinement-tmp"
+
+            enforced = self._scratch_confinement(worktree).command_environment({"PATH": "/usr/bin"})
+            unenforced = self._scratch_confinement(worktree, enforced=False).command_environment({"PATH": "/usr/bin"})
+
+            self.assertEqual(enforced["TMPPREFIX"], str(scratch / "zsh"))
+            self.assertEqual(enforced["UV_CACHE_DIR"], str(scratch / "uv-cache"))
+            self.assertEqual(enforced["CLAUDE_CODE_TMPDIR"], str(scratch / "claude-code"))
+            claude_temp = Path(enforced["CLAUDE_CODE_TMPDIR"])
+            (claude_temp / "claude-501" / "project").mkdir(parents=True)
+            (claude_temp / "cc-socks").mkdir()
+            self.assertEqual(unenforced, {"PATH": "/usr/bin"})
+
+    def test_caller_uv_cache_and_tmpprefix_are_kept_only_inside_a_write_root(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            worktree = root / "worktree"
+            worktree.mkdir()
+            scratch = worktree / ".omh" / "confinement-tmp"
+            confinement = self._scratch_confinement(worktree)
+            inside = str(worktree / "cache" / "uv")
+            outside = str(root / "home" / ".cache" / "uv")
+
+            kept = confinement.command_environment(
+                {"UV_CACHE_DIR": inside, "TMPPREFIX": str(worktree / "zsh-tmp" / "zsh")}
+            )
+            replaced = confinement.command_environment({"UV_CACHE_DIR": outside, "TMPPREFIX": "/tmp/zsh"})
+            relative = confinement.command_environment({"UV_CACHE_DIR": "cache/uv"})
+            # TMPPREFIX is a file-name prefix: `<root>` itself writes `<root>XXXX` beside the root.
+            root_prefix = confinement.command_environment({"TMPPREFIX": str(worktree)})
+            self.assertEqual(root_prefix["TMPPREFIX"], str(scratch / "zsh"))
+
+            self.assertEqual(kept["UV_CACHE_DIR"], inside)
+            self.assertEqual(kept["TMPPREFIX"], str(worktree / "zsh-tmp" / "zsh"))
+            self.assertEqual(replaced["UV_CACHE_DIR"], str(scratch / "uv-cache"))
+            self.assertEqual(replaced["TMPPREFIX"], str(scratch / "zsh"))
+            self.assertEqual(relative["UV_CACHE_DIR"], str(scratch / "uv-cache"))
+            for configured, expected in (
+                (str(worktree / "claude-temp"), str(worktree / "claude-temp")),
+                (str(worktree), str(worktree)),
+                (str(root / "outside"), str(scratch / "claude-code")),
+                ("relative/claude", str(scratch / "claude-code")),
+            ):
+                with self.subTest(claude_temp=configured):
+                    environment = confinement.command_environment({"CLAUDE_CODE_TMPDIR": configured})
+                    self.assertEqual(environment["CLAUDE_CODE_TMPDIR"], expected)
+            unenforced = self._scratch_confinement(worktree, enforced=False)
+            self.assertEqual(
+                unenforced.command_environment({"CLAUDE_CODE_TMPDIR": "/outside"}),
+                {"CLAUDE_CODE_TMPDIR": "/outside"},
+            )
 
     def test_seatbelt_profile_adds_only_the_preference_read_ipc_and_no_write(self) -> None:
         # #1996: Codex fails startup when CFPreferencesAppSynchronize returns
@@ -657,6 +749,8 @@ class FanoutConfinementPolicyTests(unittest.TestCase):
         added = (
             '(allow mach-lookup (global-name "com.apple.cfprefsd.daemon"))'
             '(allow mach-lookup (global-name "com.apple.cfprefsd.agent"))'
+            '(allow mach-lookup (global-name "com.apple.trustd.agent"))'
+            '(allow mach-lookup (global-name "com.apple.trustd"))'
             '(allow ipc-posix-shm-read-data (ipc-posix-name-prefix "apple.cfprefs."))'
         )
         self.assertEqual(policy.count(added), 1)
@@ -672,7 +766,7 @@ class FanoutConfinementPolicyTests(unittest.TestCase):
             inherit_environment=True,
             write_paths_resolved=True,
         )[2]
-        # Removing exactly the three rules restores the previous profile, so no
+        # Removing exactly these five rules restores the previous profile, so no
         # file-write, process, or other IPC allowance moved with them.
         self.assertEqual(policy.replace(added, ""), without_preferences)
         # cfprefsd refuses a write from a client whose sandbox lacks this.
@@ -752,6 +846,27 @@ class FanoutFilesystemConfinementTests(_ConfinedSpawnContract, unittest.TestCase
             self.assertTrue(source.is_file())
             self.assertFalse((linked_outside / "file").exists())
             self.assertFalse((unrelated_repo / "file").exists())
+
+    @unittest.skipUnless(Path("/usr/bin/sandbox-exec").exists() and Path("/bin/zsh").exists(), "needs sandbox-exec and zsh")
+    def test_zsh_heredoc_runs_inside_the_fence(self) -> None:
+        # zsh puts heredoc temp files under TMPPREFIX (default /tmp/zsh), which
+        # the fence denies; Codex writes every multi-line edit this way.
+        argv = ("/bin/zsh", "-c", "cat <<'EOF'\nok\nEOF")
+        with TemporaryDirectory() as temporary:
+            worktree = Path(temporary).resolve() / "worktree"
+            worktree.mkdir()
+            confinement = prepare_fanout_filesystem_confinement(
+                worktree, {"PATH": "/usr/bin:/bin", "TMPPREFIX": "/tmp/zsh"}, (argv,)
+            )
+            self.assertTrue(confinement.receipt["enforced"])
+            command = confinement.command(argv)
+            assert command is not None
+            completed = subprocess.run(
+                command, cwd=worktree, env=confinement.command_environment(),
+                text=True, capture_output=True, check=False,
+            )
+
+            self.assertEqual((completed.returncode, completed.stdout), (0, "ok\n"), completed.stderr)
 
     def test_preferences_synchronize_inside_the_fence_and_preference_writes_stay_refused(self) -> None:
         # #1996: the exact CoreFoundation call Codex makes at startup, after the

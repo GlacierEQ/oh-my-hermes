@@ -19,7 +19,7 @@ from _local_package import load_local_package
 
 load_local_package()
 
-from _delegation_graphs import dag_export_run, owner_mock, parallel, with_tokens  # noqa: E402
+from _delegation_graphs import dag_export_run, lane, owner_mock, parallel, with_tokens  # noqa: E402
 from _tui_lines import lines_text  # noqa: E402
 from omh.plugin_bundle.omh import delegation_view  # noqa: E402
 from omh.plugin_bundle.omh.delegation_view import render_delegation_view  # noqa: E402
@@ -65,6 +65,19 @@ def panel(graph: dict, rows: int, cols: int) -> list[str]:
 
 
 class TreeTests(unittest.TestCase):
+    def test_an_outside_lane_stays_out_of_the_tree_and_draws_under_its_own_group(self) -> None:
+        # A ledger child the drawn dag run does not own is no tree lane: its own `outside DAG` group after the tree.
+        run = dag_export_run()
+        run["nodes"].append({**lane("s:sa-free", "Fix the typo", "quick", "glm-5.3-flash", "low", "done",
+                                    order=6), "outside_dag": True})
+        drawn = panel(run, 24, 100)
+        text = "\n".join(drawn)
+        self.assertIn("outside DAG", text)
+        self.assertIn("Fix the typo", text)
+        typo = next(row for row in drawn if "Fix the typo" in row)
+        self.assertGreater(drawn.index(typo), drawn.index(next(row for row in drawn if "outside DAG" in row)))
+        self.assertNotIn("layer", typo)
+
     def test_every_common_size_gets_the_tree_and_never_a_box(self) -> None:
         for name, graph in GRAPHS.items():
             for rows, cols in SIZES:
@@ -133,7 +146,9 @@ class LayoutCacheTests(unittest.TestCase):
         self.assertEqual(widths[0], widths[1])
 
 
-def with_hud(app, graph: dict | None, received_at: float | None = None) -> None:
+def with_hud(app, graph: dict | None, received_at: float | None = 0.0) -> None:
+    """`app.hud` as a HUD snapshot of `graph`, read at `received_at` (None: a payload with no read time, which the
+    `/dag` pager dates by its own clock)."""
     payload = {"privacy": "metadata_only"}
     if graph is not None:
         payload["delegation_graph"] = graph
@@ -165,7 +180,7 @@ class DagCommandTests(unittest.TestCase):
         self.assertEqual(rows[0], "OMH / DAG · 5 tasks")
         self.assertIn("│ [-] > Export button", "\n".join(rows), "it opens on the running node")
         self.assertIn("Node details", rows)
-        self.assertEqual(rows[-2:], [f" {DAG_KEYS}", " delegation graph · rows 1-40/40"])
+        self.assertEqual(rows[-2:], [f" {DAG_KEYS}", " delegation graph · rows 1-42/42"])
         self.assertNotIn("Runs", rows[-2], "one graph per conversation: no other run to switch to")
         spans = [span for line in app.pager.lines for span in line if span.text.strip()]
         self.assertTrue(all(span.style.depth == TRUECOLOR for span in spans))
@@ -216,7 +231,7 @@ class DagCommandTests(unittest.TestCase):
         with_hud(app, dag_export_run())
         send(app, "/dag")
         rows = screen(app)
-        self.assertEqual(app.pager.top, 4, "the running node it opens on is scrolled whole into the 14 rows")
+        self.assertEqual(app.pager.top, 5, "the running node it opens on is scrolled whole into the 14 rows")
         self.assertTrue(rows[8].startswith("┌") and rows[9].startswith("│ [-] > Export button")
                         and rows[13].startswith("└"), rows)
         rows = press(app, SHIFT_TAB, SHIFT_TAB)  # Export button, then back past Export API to Verify export
@@ -257,7 +272,7 @@ class DagCommandTests(unittest.TestCase):
     def test_a_drawing_kept_after_the_graph_is_gone_says_it_is_not_live(self) -> None:
         now = [100.0]
         app, _client = make_app(rows=60, cols=100, wall_clock=lambda: now[0])
-        with_hud(app, dag_export_run())
+        with_hud(app, dag_export_run(), received_at=100.0)
         send(app, "/dag")
         rows = screen(app)
         self.assertEqual(rows[0], "OMH / DAG · 5 tasks", "live: no note")
@@ -279,7 +294,7 @@ class DagCommandTests(unittest.TestCase):
         and the note says so, not 10 s (the redraw)."""
         now = [100.0]
         app, _client = make_app(rows=60, cols=100, wall_clock=lambda: now[0])
-        with_hud(app, dag_export_run())
+        with_hud(app, dag_export_run(), received_at=None)  # no read time: dated when first drawn, not at each redraw
         send(app, "/dag")
         screen(app)
         now[0] = 200.0

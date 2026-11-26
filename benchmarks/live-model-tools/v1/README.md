@@ -14,9 +14,11 @@ The live path measures the product under test:
 5. read tool, token, and cost metrics from authenticated
    `routing_observation/v1` evidence.
 
-There is no OMO execution path. OMH remains Hermes-native: core OMH makes no
-provider call, and the explicit benchmark command launches the local Hermes CLI
-under the existing isolated child-process contract.
+OMH remains Hermes-native: core OMH makes no provider call, and the explicit
+benchmark command launches the local Hermes CLI under the existing isolated
+child-process contract. The one non-Hermes path is the comparison harness
+`omp` (below), which runs oh-my-pi on the same instances so the two harnesses
+can be graded side by side; it is not an OMH runtime path.
 
 There are two explicit live execution paths:
 
@@ -74,6 +76,33 @@ python benchmarks/live-model-tools/v1/bench.py smoke \
   --allow-paid-live \
   --max-paid-calls 1
 ```
+
+`--harness omp` runs oh-my-pi (`omp -p --mode json`) in the workspace with the
+`baseline` condition prompt, byte for byte what the Hermes arms send, and the
+same validators. It accepts no other condition and no `--edit-directive` (both
+name OMH or Hermes specifics). `--omp-executable` should be a launcher that
+rebuilds omp's environment itself (an isolated `HOME`, no inherited provider
+keys), so omp can reach only the routes configured for it. The record keeps
+scalar metrics only (`harness_metrics`: tokens by direction, tool calls by name,
+stop reason, whether the last assistant text carries `changed_paths`); omp keeps
+its own transcript in its own home. Every live record now has `wall_seconds`.
+
+```bash
+python benchmarks/live-model-tools/v1/bench.py run --harness omp \
+  --omp-executable <isolated omp launcher> \
+  --extra-model "id=claude-haiku-4-5-20251001,provider=cpa,effort=medium,family=claude" \
+  --model claude-haiku-4-5-20251001 --split impact-ab \
+  --git-init-workspace --test-env --allow-paid-live --max-paid-calls 12
+```
+
+`family=` in `--extra-model` is optional: the route picks the calibration from the model id, and a spec
+without the key records the family `model_family(id)` reports.
+
+Before a paid `hermes_current_session` run, set a turn cap in every profile the run uses
+(`hermes -p <profile> config set agent.max_turns 120`). The harness timeout stops only the
+`hermes` client; the gateway keeps running the turn until the cap. Count tokens as well as
+paid calls: watch each profile's `state.db` during the run for sessions still writing past
+their timeout.
 
 `--current-session-provider` is only for `hermes_current_session`: use it when
 the active Hermes profile registered the selected model under a local custom
@@ -158,6 +187,86 @@ The 2026-08-13 evaluation run completed the full offline fake matrix:
 
 This proves the pinned corpus, controller validators, pairing, analysis, and
 audit pipeline execute end to end. It is not model-performance evidence.
+
+### 2026-11-17 `deepseek-v4.1-flash-eco`: an answer-shape sentence in the `deepseek` block
+
+Route: og `deepseek/deepseek-v4.1-flash-eco` (the gateway's discount serving of
+V4.1 Flash, 90% off list), effort `high`, `hermes_current_session` through a
+dedicated bench profile (`agent.max_turns` 150), Hermes Agent 0.23.1, OMH at
+`0c7ef61d8` plus the arm's edit. The eco id is not a declared projection, so it
+receives the family `deepseek` block, not the `deepseek-v4.1-flash` override:
+`family` and `optimized` sent byte-identical prompts on all 30 instances.
+
+Baseline, `--split evaluation`, 3 reps (90 runs per condition):
+
+| Condition | Passed | Median tokens |
+| --- | ---: | ---: |
+| baseline (no calibration) | 46 / 90 | 69,451 |
+| family = optimized (`deepseek` block) | 47 / 90 · 45 / 90 | 65,973 · 62,727 |
+
+Four templates scored 0 in every condition and were excluded in writing before
+any candidate ran: PRECEDENCE and CALLFLOW (the golden requires one citation
+`{path, line: 1}` and fact spellings the task text never names; the answers were
+right in substance, so a rule aimed at them fits the grader) and DEFINITION and
+DIAGNOSTICS (the run exposes `file,terminal`, no LSP toolset). The fixable
+failure was answer shape: on PREDICATE and REFERENCES the model wrote a bare
+JSON list, or wrapped the locations in a key of its own (`results`,
+`functions`), so the validator found no `locations`.
+
+Candidates on the other six templates (3 seeds x 5 reps = 90 runs per arm), gate
+fixed before the first candidate run: at least +5 passes over a control run in
+the same window, no template losing more than one pass, median tokens at most
+1.3x, no single run over 3x the control's template median.
+
+| Arm | What changed | Passed | Median tokens |
+| --- | --- | ---: | ---: |
+| K0 control | none | 78 / 90 | 56,377 |
+| K1 | eco projected onto the `deepseek-v4.1-flash` override | 79 / 90 | 50,816 |
+| K2 | `deepseek` block + answer-shape sentence | 89 / 90 | 54,594 |
+| K3 | K1 + the same sentence | 86 / 90 | 47,956 |
+| K0b control (re-run) | none | 76 / 90 | 54,263 |
+| **K2b (shipped)** | K2 reworded to three directive sentences | **90 / 90** | 54,976 |
+
+K2 passed the gate but carried a fourth directive sentence ("never a bare
+list"), over `BLOCK_MAX_CONSTRAINTS`; K2b says "not a bare list and not a
+wrapper key" and was measured fresh against a fresh control (+14, PREDICATE
+5 -> 15 / 15, REFERENCES 11 -> 15 / 15, no template lost, tokens 1.01x, worst
+run 1.85x). One K2b launch was killed by an operator error after two records
+per arm; those four records were set aside unread and the arm restarted.
+
+Held-out confirmation on `benchmarks/product-ab/v1` (40 merged-PR tasks, one run
+per task per arm, same model): OMH on `main` 20 / 40, OMH with K2b 19 / 40,
+false completions 18 and 18; Hermes alone 20 / 40 with 8 false completions and
+11 timeouts, 8 of them at host load 80+. The two OMH arms disagree on 15 tasks
+(7 one way, 8 the other), so at one run per task product-ab shows neither a
+gain nor a loss from the sentence. The pre-registered rule (K2b >= main - 1,
+false completions not higher) holds.
+
+Spend for the whole round (baseline, four candidates, re-run, both product-ab
+arms and Hermes alone): $1.64 at og's eco rates (0.03 / 0.12 / 0.0006 per
+MTok), priced from the bench profile's `sessions` rows because og reports no
+cost. Not measured: any other DeepSeek id. The sentence lives in the family
+block, so V3.2, V4 Flash and V4 Pro receive it as well. V4.1 Flash's
+exact-model override replaces the family block, so the override was given the
+same sentence and measured on its own route (next section).
+
+### 2026-11-18 `deepseek-flash`: the same sentence in the V4.1 Flash override
+
+Route: og `deepseek/deepseek-flash` (the declared pointer, which projects to the
+`deepseek-v4.1-flash` exact-model override), effort `high`, a dedicated bench
+profile (`agent.max_turns` 150), Hermes Agent 0.23.1, OMH at `32571ffc6` (#2947
+merged) plus the arm's edit. Same six templates, 3 seeds x 5 reps, both arms in
+one window, gate written before the first run and identical to the eco round's.
+
+| Arm | What changed | Passed | Median tokens |
+| --- | --- | ---: | ---: |
+| V0 control | the override as shipped | 76 / 90 | 50,747 |
+| **V1 (shipped)** | override + the answer-shape sentence | **85 / 90** | 49,430 |
+
++9 (gate +5); PREDICATE 8 -> 15 / 15, REFERENCES 8 -> 10 / 15, the other four
+15 / 15 in both; tokens 0.97x; worst single run 1.35x the control's template
+median. Spend $0.34 at og list (0.15 / 0.60 / 0.003 per MTok). No product-ab
+re-run: the same sentence already showed no loss there in the family block.
 
 ### 2026-08-14 `hermes_current_session` live evaluation
 
@@ -548,6 +657,3553 @@ Results describe this pinned corpus, OMH version, Hermes version, provider,
 model id and conditions only. They do not establish universal model
 superiority.
 
+### 2026-11-04 round end after shell-only edits: base vs on (`transform_tool_result`), gate failed, merged by owner decision
+
+Pre-registered before its first live run.
+
+**Diagnosis** (research folder `OPT/opt-m/`). Hermes calls `pre_verify` only when
+`_turn_file_mutation_paths` is non-empty (`agent/turn_stop_gates.py`, `_pre_verify_nudge`), and
+only a landed `patch` / `write_file` adds a path to it (`agent/turn_explainers.py`,
+`_record_file_mutation_result`; `FILE_MUTATING_TOOL_NAMES` in `agent/tool_result_classification.py`).
+A turn that edits only through `terminal` therefore gets no round-end note: in the 2026-11-03
+caller-check run, 24 of 48 Sonnet on-arm runs and 18 of 48 base-arm runs edited only through
+`terminal`, and none of them logged a round-end line. In OPT-L's Sonnet base arm, one shell-only
+`L-RENAME-ALIAS` run failed: a `sed` rename left `__all__ = ["compute_quota"]` in `api.py`, which
+the export check names on the `patch` path.
+
+**The change** (`consistency_trigger.py`, `hooks/verify_hooks.py`, `hooks/result_transforms.py`).
+After each `terminal` / `execute_code` call of a turn that made no `patch` / `write_file` call, the
+workspace's Python files are re-indexed and compared with the last index (the turn-start index at
+first). When the call changed a Python file, the export, test and caller notes `pre_verify` builds at
+attempt 0 are built for every Python file the turn changed, and a non-empty note rides that call's
+result under the JSON key `omh_round_end`, once per turn. Every other call, and every turn with a
+`patch` / `write_file` call, is left exactly as on main. The consistency checklist does not ride
+along (it needs the coding posture, which this seam is not given), nor does the opt-in impact note
+(its baseline is taken only before `patch` / `write_file`). No continue is added: the note arrives
+before the model's next call, which every tool result is followed by anyway.
+
+**Mechanisms considered** (Hermes read-only, ranked by how closely they reproduce `pre_verify`):
+adding the shell-changed paths to the agent's `_turn_file_mutation_paths` would reproduce it exactly
+but writes Hermes's private state (and also arms Hermes's own verify-on-stop); posting into
+`agent.lsp.deferred` would continue the turn at its first stop but labels the note as a language
+server's verdict; an `llm_execution` middleware re-issuing the final call would rewrite the
+conversation out of the transcript; `pre_llm_call` runs at the next turn's start; `transform_llm_output`
+cannot continue a turn. `transform_tool_result` on the call that changed the file is the plugin seam
+that delivers the same note text before the model's next decision.
+
+**Offline replay, before this registration** (`OPT/opt-m/replay_shell.py`): the 445 OPT-K / OPT-L
+sessions with a `terminal` call before their first `patch` / `write_file`, each re-run from its
+seed's fixture with the recorded commands; all 71 shell-only sessions end on their recorded
+`final_tree_digest`. Notes on 2 sessions, both export notes naming a line that was stale at that
+moment: the failing OPT-L Sonnet `L-RENAME-ALIAS-613981` (`api.py:3`, on its last command) and a
+passing OPT-K Sonnet `L-RENAME-SHADOW-857137` (`cli.py:1`, mid-edit; the model fixed that line two
+calls later). No note on any other session, controls included.
+
+The setup, fixed before the first live run:
+
+- **Arms.** Each arm links its OMH plugin bundle from a source snapshot (`git archive`):
+  - `base`: origin/main `225f62ff2`;
+  - `on`: this branch at the commit that adds this section. Its bundle differs from base in
+    `consistency_trigger.py`, `hooks/verify_hooks.py` and `hooks/result_transforms.py` only.
+- **Profiles.** `optm-<lane>-<arm>`, the 2026-11-03 caller-check configuration, product default:
+  Hermes's default `tools.tool_search`; plugin settings `omh_home` and `lsp_tools: true`;
+  `impact_check` not set, so off; `pyright` pinned by an absolute `lsp.servers.pyright.command`;
+  `agent.max_turns: 120` and `agent.run_budget_seconds: 600`; the observer-only meter plugin. Edit
+  surface `lsp`, the `baseline` prompt, `--git-init-workspace`, `--test-env`, effort `medium`.
+- **Panel.** Subscription routes only: `claude-sonnet-5-5` (s55) and `claude-haiku-4-5-20251001`
+  (h45) through `claude-proxy` (CPA). `gpt-6-luna` and `gpt-6.1-sol` through `openai-codex` are
+  added to condition S only if every s55 / h45 run has finished; they are reported, and gated only
+  if run.
+- **Conditions.**
+  - **D, product default** (no edit directive), the condition users get.
+  - **S, shell edits** (`--edit-directive shell`, the same sentence in both arms: change files
+    only through terminal commands, no `patch` / `write_file`). It makes every lane edit the way
+    Sonnet often does unprompted, so the positives are measured on models that leave a caller or
+    an export broken.
+- **Templates.** Each positive is paired with the control written for its check:
+  - export: `L-RENAME-ALIAS` / `L-RENAME-EXPORTS`;
+  - caller: `I-SIGNATURE` / `I-DEFAULTED`;
+  - test: `I-KWARG` / `C-TEST-UPDATE`;
+  - breaks nothing: `I-CONTROL`.
+  Condition D also runs the no-regression templates `L-RENAME-SHADOW`, `E-RENAME`, `C-DUPLICATE`
+  and `C-DECOY`.
+- **Seeds.** None appears under `.omc/research`, `docs` or the bench before this section:
+  431027, 583919 and 815473 for every template; 347911 also for the three positives and their
+  three controls. D: 11 templates x 3 + 6 = 39 instances per lane per arm; S: 7 x 3 + 6 = 27.
+  s55 + h45: 132 instances per arm, 264 runs.
+- **Order, retries, crashes.** As in the 2026-11-03 run: per instance the two arms run back to back
+  on identical fresh workspaces in alternating order; lanes run in parallel under the load gate
+  (1-min load at most 20) and the disk gate (wait below 8 GB free, stop below 5 GB), and under the
+  shared live-run lock; `rate_limited`, `provider_error`, `model_unavailable` and a client the gateway
+  refused within seconds are retried on the same route, every other outcome is final. Records as
+  run are the strict reading; each instance whose last record is a `process_crash` in either arm is
+  run once more in both arms (`runs-rerun/`) for the re-run reading. Both readings are reported.
+
+Definitions:
+- A **shell-only run** is a session with at least one `terminal` / `execute_code` call and no
+  `patch` / `write_file` call, from the session DB.
+- A **shell check** is a `shell_round_end session=<id> files=N ...` line in the on arm's profile
+  log; a **shell note** is such a line with `export=1`, `test=1` or `caller=1`.
+- A **continue** is a session with an assistant row whose `finish_reason` is `verify_hook_continue`.
+- **Tokens** are the run record's `observation.tokens`; a cell is one lane, one condition and one
+  template.
+
+The gate, `on` against `base`:
+
+1. **No template loses a pass**, pooled over lanes and conditions: for each template, on passes at
+   least base passes.
+2. **Controls stay silent:** 0 shell notes on `L-RENAME-EXPORTS`, `I-DEFAULTED`, `C-TEST-UPDATE`
+   and `I-CONTROL` in the on arm.
+3. **No new continues on controls:** continues on those four templates, on at most base.
+4. **No token blow-up:** no on-arm run above 3x the median tokens of the base arm in its cell.
+5. **The shell round end acts, and costs no pass:**
+   - (a) every on-arm shell-only run whose replay (`replay_shell.py`, the run's own commands on its
+     seed's fixture, checked against `final_tree_digest`) changes a Python file logs a shell check,
+     and the live shell notes equal the replayed ones;
+   - (b) shell-only positives pooled (`L-RENAME-ALIAS`, `I-SIGNATURE`, `I-KWARG` runs that are
+     shell-only), on passes at least base passes, counted per arm over that arm's shell-only runs
+     and reported beside the run counts.
+
+Reported, not gated: per lane, condition and template, passes, shell-only runs, shell checks and
+notes, continues, median tokens and median wall; the rows each note named; tokens and money by
+route.
+
+Recomputed from the raw run records, the session-DB snapshots and the profile logs by
+`OPT/opt-m/gate.py`, not from the driver log.
+
+**Fallback.** If any clause fails, the failure is recorded here and the branch does not merge;
+nothing from it ships. If a fresh review finds a note naming a line that is not broken, that shape
+is made silent and this run's sessions are replayed offline with the fix; a fix that would change
+any on-arm note in this run is reported, and the branch merges only on a new measurement. If a
+clause fails on runs where the note arrived mid-edit (a later command of the same turn fixed the
+named line on its own), the next candidate is a note that waits for a command that changed no
+Python file, under its own pre-registration.
+
+#### Measurement 1 result (2026-11-05): every clause passed; review found two wrong-note shapes, so it does not carry the merge
+
+Counted runs 2026-11-05 00:12-01:42 KST, s55 and h45, conditions D and S: 264 runs, 0 crashes or
+incomplete runs, so the strict and re-run readings are the same. Recomputed by `OPT/opt-m/gate.py`
+(`gate-strict-claude.json`):
+
+| Clause | Result |
+| --- | --- |
+| 1. No template loses a pass, pooled | PASS: no template lower; I-SIGNATURE 13 -> 15, L-RENAME-EXPORTS 15 -> 16, every other template equal |
+| 2. Shell notes on controls | PASS: 0 |
+| 3. Continues on controls, on <= base | PASS: 8 -> 8 |
+| 4. No on run above 3x its cell's base median tokens | PASS: none |
+| 5a. Coverage and fidelity against the replay | PASS: 56 on-arm shell-only runs, each on its recorded tree digest, live notes equal replayed notes |
+| 5b. Shell-only positives | PASS: 22/26 -> 24/27 |
+
+Totals: 125/132 -> 128/132 passes, 11.32M -> 11.18M tokens. 14 shell notes in 13 runs, all
+on positives; 12 of the 13 runs are Haiku in condition S. Sonnet in condition D edited
+shell-only in 22 of 39 base runs and 19 of 39 on runs.
+
+Two corrections to the recompute, made before the clause was read and kept in
+`replay_shell.py`:
+- an on-arm session's recorded tool result already carries the live note, and the annotator
+  declines a result with that key, so the replay removes the key first;
+- a command that names a file by its absolute workspace path is rewritten to the replay root
+  before the snapshot step too, as the live run resolved it.
+
+Before these corrections, clause 5a showed 4 mismatches, and after them 0.
+
+**Why it does not merge.** The review of the noted sessions found two notes that named a line
+which was not broken when the model read it:
+- **Haiku `I-KWARG-583919`, stale within a message.** Hermes hands each command's result to
+  `transform_tool_result` as it lands, but the model reads a message's results together. The
+  caller note was computed after the first of four `sed` calls, and named the two callers that the
+  next two calls of the same message had already updated. The run then rewrote the returned key
+  and the test, and failed. The same cell went 4/4 -> 2/4.
+- **Haiku `I-KWARG-347911`, a mid-turn baseline.** Haiku wrote its answer file with `write_file`,
+  so `pre_verify` ran and continued the turn. `pre_verify` consumes the turn's state at attempt 0,
+  and the state rebuilt after the continue took mid-turn text as the turn's start. Its test note
+  then asked to restore the model's own first-round edit.
+
+By the fallback written above, both shapes are made silent and the branch merges only on a new
+measurement. The partial GPT runs in condition S (16 records, stopped between instances when the
+defect was found, not gated) were luna 3/5 -> 5/5 and sol 3/3 -> 3/3.
+
+#### Measurement 2, pre-registered before its first run (2026-11-05)
+
+**The change since measurement 1** (v2):
+- **The message's last command.** A new `post_api_request` observer keeps the ids of the model
+  message's tool calls (`consistency_trigger.note_tool_batch`; ids and tool names only). The shell
+  round end looks only at the message's last call that is not a read. An id the latest message
+  does not hold is looked at, as every call was in v1.
+- **No second round end in a turn.** A turn whose state `pre_verify` already consumed
+  (`discard_snapshots`, `round_end_trigger`) gets no shell round end afterwards.
+
+**Offline replay of v2** (`replay_shell.py --batches`):
+- The 445 OPT-K / OPT-L sessions get the same 2 notes as v1.
+- On measurement 1's on-arm sessions, 3 notes change, all Haiku in condition S:
+  - `I-KWARG-583919`: the stale caller note is gone; a test note at the message's end names
+    the rewritten expectation (`tests/test_http_client.py:5`), the defect the run failed on;
+  - `L-RENAME-ALIAS-347911` and `L-RENAME-ALIAS-815473`: a mid-message export note is gone,
+    because the same message fixed `api.py:3`.
+
+  The post-continue case is not replayed (the replay stops at a session's first `patch` /
+  `write_file`); it is pinned by `tests/test_shell_round_end.py`.
+
+**Setup.** As in measurement 1, except:
+- **Arms:** `base` origin/main `225f62ff2` (unchanged); `on` this branch at the commit that adds
+  this section.
+- **Seeds:** none appears under `.omc/research`, `docs` or the bench before this section. 290999,
+  668893 and 733331 for every template; 197711 also for the three positives and their three
+  controls.
+- **Panel:** s55 and h45 in D and S as before. `gpt-6-luna` and `gpt-6.1-sol` through
+  `openai-codex` in condition S, run in parallel with the Claude lanes under the same load gate,
+  and gated.
+- **Size:** 132 instances per arm on s55 + h45, plus 27 per GPT lane per arm: 186 per arm, 372
+  runs.
+- **Records:** measurement 1's records and profile snapshots move to `OPT/opt-m/m1/`;
+  measurement 2 writes `runs/` and `hermes-db/` afresh. The profiles are reused; the on-arm bundle
+  link moves to the new commit's snapshot.
+
+**The gate:** clauses 1-5 above, unchanged, over all lanes run, recomputed by
+`OPT/opt-m/gate.py`.
+
+**Fallback:** as above. If a clause fails, the branch does not merge. If a review again finds a
+note naming a line that is not broken when the model reads it, that shape is made silent and the
+branch does not merge on this measurement.
+
+#### Measurement 2 result (2026-11-05): gate failed on clause 1, by two Haiku I-KWARG runs; the branch does not merge
+
+Counted runs 2026-11-05 02:19-03:08 KST: s55 and h45 in D and S, luna and sol in S. 372 runs, 0
+crashes or incomplete runs, so the strict and re-run readings are the same. Recomputed by
+`OPT/opt-m/gate.py` (`gate-strict.json`) and recounted from the raw records by separate code;
+the two agree.
+
+| Clause | Result |
+| --- | --- |
+| 1. No template loses a pass, pooled | **FAIL**: I-KWARG 24 -> 22. Every other template equal or higher: I-SIGNATURE 17 -> 24, L-RENAME-ALIAS 22 -> 24 |
+| 2. Shell notes on controls | PASS: 0 |
+| 3. Continues on controls, on <= base | PASS: 12 -> 12 |
+| 4. No on run above 3x its cell's base median tokens | PASS: none |
+| 5a. Coverage and fidelity against the replay | PASS: 84 on-arm shell-only runs, each on its recorded tree digest, live notes equal replayed notes |
+| 5b. Shell-only positives | PASS: 30/39 -> 38/39 |
+
+Totals: 177/186 -> 184/186 passes, 15.43M -> 14.92M tokens. 14 shell notes in 14 runs, all on
+positives:
+- Haiku in condition S: 9;
+- gpt-6-luna in condition S: 5.
+
+Where the shell route acted, the cells moved:
+- h45 S I-SIGNATURE: 0/4 -> 4/4;
+- luna S I-SIGNATURE: 1/4 -> 4/4;
+- luna S L-RENAME-ALIAS: 2/4 -> 4/4.
+
+**The two I-KWARG losses.**
+- **h45 D `I-KWARG-290999`: the shell route did not act.** No `shell_round_end` line was logged;
+  Haiku edited with `patch`, so the turn ended through `pre_verify`, the same code as base.
+- **h45 S `I-KWARG-733331`: the note was true, and a later test rewrite was not named.**
+  1. The caller note named `health.py:5` and `sync.py:5`, broken after a single-command message,
+     and the model fixed both.
+  2. It then rewrote the existing test's expected key (`"timeout"` -> `"timeout_s"`), the known
+     Haiku I-KWARG shape, and failed.
+  3. The test check would have named that line, but the turn's one shell note was already spent
+     on the caller note.
+
+One correction to the recompute, made before clause 5a was read and kept in `replay_shell.py`:
+the live terminal had a `python` on its path and the replay did not, so luna's `python -c` edits
+(exit 127) were not applied. The replay now puts its test environment's `bin` first. Before
+this correction, 20 luna sessions missed their digest and 3 notes did not match; after it, none.
+
+**Next candidate** (not built, not measured): let each of the three checks speak once per turn,
+instead of one shell note per turn. In `I-KWARG-733331` the test check would then have named the
+rewritten expectation, which is the line that failed the run. Under the fallback, it needs its own
+pre-registration.
+
+#### Measurement 3, pre-registered before its first run (2026-11-05)
+
+**The change since measurement 2 (v3).** Each of the three checks (export, test, caller) is said at
+most once per turn on its own. In v2 the turn had one shell note: the first note of any kind spent
+it. Measurement 2's S `I-KWARG-733331` lost its run that way: a true caller note spent the turn, and
+the test expectation the model rewrote afterwards was never named. A check that spoke stays silent
+for the rest of the turn; the others stay free. Re-indexing stops once all three have spoken. Every
+v2 guard is kept:
+- only a message's last call that is not a read is looked at;
+- nothing after `pre_verify` consumed the turn's state;
+- evidence is the files on disk, never command text;
+- a turn with a `patch` / `write_file` call is `pre_verify`'s.
+
+**Offline replay of v3** (`replay_shell.py --batches`; every shell-only replay ends on its recorded
+`final_tree_digest` except one, noted below):
+
+| Sessions | Noted | Notes by check | Notes on controls | Sessions with a second note |
+| --- | --- | --- | --- | --- |
+| OPT-K / OPT-L, 445 (71 shell-only) | 2 | export 2 (same as v1 and v2) | 0 | 0 |
+| Measurement 1, both arms, 174 (115 shell-only) | 22 | caller 17, export 4, test 2 | 0 | 1: h45 S on `I-KWARG-347911`, caller then test |
+| Measurement 2, both arms, 282 (170 shell-only) | 28 | caller 21, export 6, test 3 | 0 | 2: h45 S on `I-KWARG-733331` and h45 S base `I-KWARG-197711`, caller then test |
+
+- **`I-KWARG-733331` (measurement 2, the run that failed clause 1)** gets the caller note it got
+  live (call 7), and now also the test note at call 10: `tests/test_http_client.py:5: was assert
+  fetch("u") == {"url": "u", "timeout": 5.0, ...}`, the line the run failed on.
+- **No continues.** The shell round end adds none by construction: it rides a tool result and
+  never returns a `pre_verify` directive. Whether continues on controls stay at most base is left
+  to the live clause.
+- **One digest mismatch, outside the gated set.** Measurement 2's s55 base `I-SIGNATURE-197711`
+  chained several `sed -i` calls with `|`, so they ran concurrently and the final tree depends on
+  timing. It is a base-arm run; clause 5a reads on-arm runs only.
+
+**Setup.** As in measurement 2, except:
+- **Arms:** `base` origin/main `225f62ff2` (unchanged); `on` this branch at the commit that adds
+  this section.
+- **Seeds:** none appears in any text file under `.omc/research`, `docs` or the bench before this
+  section. 274877, 391553 and 452989 for every template; 806351 also for the three positives and
+  their three controls.
+- **Panel:** s55 and h45 in D and S; luna and sol in S; all gated. 372 runs.
+- **Live-run lock:** the shared `OPT/.live.lock`, taken only after optl-finish's Registration 2 run
+  releases it; the load and disk gates as before.
+- **Records:** measurement 2's records and profile snapshots move to `OPT/opt-m/m2/`.
+
+**The gate:** clauses 1-5 of this section, unchanged, recomputed by `OPT/opt-m/gate.py` and
+recounted from the raw records by separate code.
+
+**Fallback, fixed now.**
+- **A clause fails:** the branch does not merge, and the result is recorded here.
+- **A review finds a wrong note:** if a note names a line that is not broken when the model reads
+  it, that shape is made silent and the branch does not merge on this measurement.
+- **A loss in a session the shell route did not act on** (no `shell_round_end` line): it still
+  counts. The clause has no exception for it.
+- **If v3 fails:** nothing from this branch ships. The next candidate is chosen from the diagnosis
+  of the failing runs, under its own pre-registration.
+
+#### Measurement 3 result (2026-11-05): gate failed on clauses 2 and 4; the branch does not merge
+
+Counted runs 2026-11-05 08:23-09:08 KST, after OPT-L's Registration 2 released the shared lock:
+s55 and h45 in D and S, luna and sol in S. 372 runs, 0 crashes or incomplete runs, so the strict
+and re-run readings are the same. Recomputed by `OPT/opt-m/gate.py` (`gate-strict.json`) and
+recounted from the raw records by separate code; the two agree.
+
+| Clause | Result |
+| --- | --- |
+| 1. No template loses a pass, pooled | PASS: no template lower; I-KWARG 21 -> 24, I-SIGNATURE 18 -> 24 |
+| 2. Shell notes on controls | **FAIL**: 2, both export notes on h45 S `L-RENAME-EXPORTS` (391553, 452989), both runs passed |
+| 3. Continues on controls, on <= base | PASS: 12 -> 12 |
+| 4. No on run above 3x its cell's base median tokens | **FAIL**: luna S `I-SIGNATURE-452989`, 157,648 against a median of 39,745 |
+| 5a. Coverage and fidelity against the replay | PASS: 82 on-arm shell-only runs, each on its recorded tree digest, live notes equal replayed notes |
+| 5b. Shell-only positives | PASS: 33/41 -> 39/39 |
+
+Totals: 177/186 -> 186/186 passes, 15.38M -> 15.27M tokens. 16 shell notes.
+
+Where the shell route acted, the cells moved:
+- h45 S I-KWARG: 2/4 -> 4/4;
+- h45 S I-SIGNATURE: 2/4 -> 4/4;
+- luna S I-SIGNATURE: 0/4 -> 4/4.
+
+No run got a second note in the same turn, so v3's change (each check once per turn) did not occur
+live.
+
+**The two failed clauses.**
+- **Clause 2, an export note on the export check's control, true when read.** In
+  `L-RENAME-EXPORTS-391553`, Haiku's second `sed` renamed the package import but not the `__all__`
+  entry. The note named `store/__init__.py:10` (`__all__` lists `fetch_rows`) after that message,
+  and the model's next message fixed it. The control is defined by its correct final state (no
+  dangling export), and the clause counts any note on it, including one on a mid-edit state that
+  was broken when the model read it.
+- **Clause 4, a token outlier in a run the shell route did not act on.** In
+  `I-SIGNATURE-452989`, luna edited with `patch` despite the shell rule. Main's own `pre_verify`
+  caller check (the same code in both arms) continued the turn, and the model then fixed
+  `cli.py` and `invoices.py` and passed. Every base luna S I-SIGNATURE run failed (0/4) and
+  stopped early, which sets the low median.
+
+**Next candidate** (not built, not measured), if the owner wants another round:
+- Each clause failed on a behaviour the clause did not anticipate rather than on a wrong note. The
+  pre-registered clauses would have to change (for example, clause 2 counting only notes that
+  name a line still broken at the turn's end, and clause 4 counting only runs the shell route
+  acted on).
+- That is a change of the gate, not of the product. It needs the owner's decision and a new
+  pre-registration.
+
+#### Owner decision (2026-11-05): merged against measurement 3's failed clauses 2 and 4
+
+The owner decided to merge v3 against the failed clauses. Passes went 177 -> 186 of 186, and both
+failures have known causes recorded above: the two control notes were true when read and fixed
+in the model's next message, and the token outlier is a `patch` turn the shell route did not act
+on. This overrides the pre-registered gate, and is recorded here as such.
+
+### 2026-11-03 round-end continue cost: settled signature references and evidence notes, base vs on
+
+Pre-registered before its first live run. Runs before the commit that adds this section are none;
+smokes after it are uncounted and say so in their folder name.
+
+In the H2H2 and H2H3 head-to-heads (research folder `H2H3/REPORT.md`, `OPT/opt-l/DIAGNOSIS.md`),
+OMH continued 68 of 198 sessions at the round end. 38 of those changed nothing and the run passed
+anyway, at 1.02M tokens, about 2 extra model calls each. Every one came from `consistency_trigger`
+firing alone:
+
+- `C-DECOY`, 18: `copy` of the look-alike `_to_cents`;
+- `I-KWARG`, 12: `signature fetch`, where the file named `fetch` only as `client.fetch()`, or an
+  unedited test called `fetch("u")`;
+- `I-SIGNATURE`, 8: `signature compute_fee`, named only by `from .pricing import compute_fee as fee`
+  in `__init__.py`, whose one user `cli.py` was already edited.
+
+The true positives this item must keep: `C-DUPLICATE` (12 of 12 continues fixed the copy; omp passes
+0 of 6) and `L-RENAME-ALIAS` (6 of 6, export note).
+
+The change, in `consistency_trigger.py` and `verify_hooks.py` (commit `47c73adb5`):
+
+1. **Settled references.** A `signature` hit on a module-level function is dropped in a file only when
+   every `\bname\b` match there is proven to need no change, by `ast`:
+   - `p.name`, where `p` is bound only as a parameter in that file; or
+   - `from <the edited module> import name [as alias]`, where the alias is bound once and called only
+     in calls that bind the same way under the old and new parameter lists; and an alias other than
+     the name appears in no other unedited Python or config file.
+
+   A comment, a string, a value use, a module attribute or an import from elsewhere keeps the hit.
+   Only a module-level function defined once, undecorated, with the same return annotation, is
+   eligible.
+2. **Evidence in the note.** When the check fires alone, the note shows the lines the trigger matched:
+   for a copy, the other definition with its module docstring and the comment above it. It does not
+   ask for a search. A fire with nothing to show keeps the generic checklist.
+
+`C-DECOY`'s fire count cannot drop structurally: its `_to_cents` is byte-identical to
+`C-DUPLICATE`'s real copy, and only the docstring prose differs. The alternative "fire only when the
+edited line appears verbatim in the other file" was measured and rejected, because both fixtures
+spell `Decimal` differently from the edited file, so it cuts `C-DUPLICATE` too. So `C-DECOY` is gated
+on the cost of a fire, not on the number of fires.
+
+**Offline replay, before this registration** (`OPT/opt-l/replay.py`). Every recorded H2H2 and H2H3
+omn session is re-driven through each tree's real hooks: the fixture is rebuilt from its seed, the
+`patch` / `write_file` calls up to the first stop are replayed (`snapshot_before_edit` before each),
+and then `pre_verify(attempt=0)` runs.
+
+| Tree | Sessions | Continue decision equal to live | Continues |
+| --- | --- | --- | --- |
+| base `3ad772371` | 198 | 198 / 198 | 68 |
+| on `47c73adb5` | 198 | n/a | 48 |
+
+Per template, base to on:
+- `I-KWARG` 15 to 3: the 3 left are Haiku, test note;
+- `I-SIGNATURE` 17 to 9: the 9 left are Luna and Haiku, with `cli.py` still broken at the stop;
+- `C-DECOY` 18 to 18; `C-DUPLICATE` 12 to 12; `L-RENAME-ALIAS` 6 to 6;
+- every other template 0 to 0.
+
+No true positive is lost, and no new fire appears.
+
+The setup, fixed before the first live run:
+
+- **Arms.** Each links its OMH bundle from a `git archive` snapshot (`OPT/opt-l/omh-head/<sha>`):
+  `base` = origin/main `3ad772371`; `on` = this branch at `47c73adb5`. The bundles differ only in
+  the two files above.
+- **Profiles.** `optl-<lane>-<arm>` (`OPT/opt-l/make_profiles.sh`), H2H3's OMH-arm configuration
+  in both arms:
+  - Hermes's default `tools.tool_search`;
+  - plugin settings `omh_home` and `lsp_tools: true`; `impact_check` not set (off, as shipped);
+  - `pyright` pinned by an absolute command;
+  - `agent.max_turns: 120`, `agent.run_budget_seconds: 600`;
+  - the observer-only meter plugin.
+
+  Edit surface `lsp`, the `baseline` prompt with no edit directive, `--git-init-workspace`,
+  `--test-env`, effort `medium`.
+- **Panel.** Subscription routes only; expected money $0:
+
+  | Lane | Model | Route |
+  | --- | --- | --- |
+  | h45 | `claude-haiku-4-5-20251001` | `claude-proxy` (CPA) |
+  | s55 | `claude-sonnet-5-5` | `claude-proxy` (CPA) |
+  | luna | `gpt-6-luna` | `openai-codex` |
+  | sol | `gpt-6.1-sol` | `openai-codex` |
+
+- **Templates.** The 11 head-to-head templates: `I-SIGNATURE`, `I-RETURN-SHAPE`, `I-KWARG`,
+  `I-CONTROL`, `C-DUPLICATE`, `C-SCOPE-TRAP`, `C-DECOY`, `E-RENAME`, `E-BUGFIX`, `L-RENAME-ALIAS`,
+  `L-RENAME-SHADOW`.
+  - Positives (fewer or cheaper fires): `I-KWARG`, `I-SIGNATURE`, `C-DECOY`.
+  - Controls that must keep their fire and their pass: `C-DUPLICATE`, `L-RENAME-ALIAS`, and the
+    `I-SIGNATURE` runs that stop with a caller still broken.
+  - Controls with no fire on either arm in the replay: the other six.
+- **Seeds.** 613981, 778469 and 860143. None appears under `.omc/research` or in the bench. That is 33
+  instances per lane per arm, 132 per arm, 264 runs.
+- **Order and load.** Per instance the two arms run back to back on identical fresh workspaces, in
+  alternating order; the four lanes run in parallel. The driver is `OPT/opt-l/run_optl.py` (sha256
+  `18e0994c...`), derived from H2H3's, and it holds the same gates before every instance:
+  - wait while the 1-minute load is above 20;
+  - wait while free disk is below 8 GB; stop if it falls below 5 GB.
+
+  Live batches run under the shared live-run lock.
+- **Retries and crashes.** As H2H3:
+  - Retried on the same route: `rate_limited`, `provider_error`, `model_unavailable`, and a client
+    the gateway refused within 15 s.
+  - `authentication_failed` aborts every lane.
+  - A timeout is final and scored as a fail.
+  - A `process_crash` is scored as a fail in the **strict reading**. Once the lanes finish, each
+    instance whose last record in either arm is a crash is run once more in both arms, and those
+    re-runs make the **re-run reading**. Every clause is reported under both readings.
+
+Definitions:
+- A **continue** is a session with at least one assistant row whose `finish_reason` is
+  `verify_hook_continue` (session DB).
+- **Tokens** are the record's `observation.tokens`.
+- **Calls** are `sessions.api_call_count`.
+- A **pass** is the controller validator's `grade.pass`.
+
+The gate, `on` against `base`. Must hold:
+
+1. Total passes (n = 132): on at least base.
+2. Per template, pooled over the four models (n = 12): on at least base - 1.
+3. `C-DUPLICATE`, `L-RENAME-ALIAS` and `I-SIGNATURE` passes (n = 12 each): on at least base.
+4. `mutation_outside_scope` runs: on at most base.
+
+Must improve:
+
+5. Pooled median tokens (n = 132): on at most 0.95x base.
+6. Sol median tokens (n = 33): on at most 0.95x base.
+7. `I-KWARG` + `I-SIGNATURE` continues (n = 24): on strictly below base.
+8. `C-DECOY` (n = 12):
+   - continues: on at most base;
+   - median tokens: on at most 0.90x base;
+   - median calls: on at most base - 1.
+
+Reported, not gated:
+- the per-lane, per-template table of passes, continues, median calls and median tokens;
+- the trigger's verdict reasons per arm, including `settled`;
+- the median calls of the extra round after a continue;
+- median wall time and final answer kept;
+- the load path (`omh_pkg`);
+- tokens and money by route.
+
+Everything is recomputed from the raw run records, the session-DB snapshots and the profile logs by
+`OPT/opt-l/gate.py`, not from the driver log.
+
+**Fallback, fixed now.** If any clause fails, the failure is recorded here and the branch does not
+ask to merge. What is dropped depends on where the regression sits:
+- **A quality clause (1 to 4) fails on runs where the on arm sent an evidence note.** The note is
+  the behavioural part, so `verify_hooks` returns to the generic checklist, and the settled
+  references stay.
+- **It fails on a run whose on-arm verdict was `settled`.** That is a cut that dropped a needed fire,
+  so `_settled` is dropped.
+- **Only the cost clauses (5 to 8) fail.** The change does not merge on this run.
+
+A re-measure after any drop is a new pre-registration with new seeds.
+
+#### Amendment 1 (2026-11-03, before any live run of either arm)
+
+- **The `on` arm moves from `47c73adb5` to `8442cb3c4`.** That commit moves the argument-binding
+  rule into the shared leaf module `call_shape.py`, as the lead assigned, for the parallel caller
+  check. It adds four pinned negatives: a removed default, a `**kwargs` pass-through, a star import,
+  and an alias re-exported from a plain module and used elsewhere. The offline replay of `8442cb3c4`
+  gives the same continue decision and the same note text as `47c73adb5` on all 198 sessions
+  (`replay-on-8442cb3c4.json`).
+- **Why the briefed clause "`C-DECOY` continues strictly fewer" was replaced by clause 8**
+  (approved by the lead). The fixtures in `lib/corpus.py` give both look-alikes the same body:
+  `return decimal.Decimal(amount).quantize(decimal.Decimal("0.01"), rounding=decimal.ROUND_HALF_EVEN)`
+  in `C-DUPLICATE`'s second module and in `C-DECOY`'s. The edited file's line is
+  `return Decimal(amount).quantize(CENT, rounding=ROUND_HALF_EVEN)`. A verbatim-old-text rule
+  therefore cuts both copies, and any code-only rule treats them alike. Only the module docstring
+  separates them ("kept in step with" vs "intentionally different from"), and a prose signal is the
+  suppressor #2494 dropped.
+- **The evidence note shows context only.** That means the definition, the module docstring and
+  the comment above it. Its wording is the same for every copy, and it never says a copy may be
+  skipped. Clause 3 (`C-DUPLICATE` on at least base) stays a hard clause.
+
+#### Result (2026-11-05): the gate failed in both readings
+
+264 counted runs and 8 crash re-runs (4 instances, both arms; one, `sol` base
+`I-RETURN-SHAPE-778469`, crashed again and stays a fail). Recomputed by `OPT/opt-l/gate.py` and
+again by an independent script (`recompute.py`); the two agree on every clause.
+
+| Clause | Strict (on vs base) | | Re-run (on vs base) | |
+| --- | --- | --- | --- | --- |
+| 1. Total passes, on >= base | 123 vs 126 | **fail** | 126 vs 126 | pass |
+| 2. Per template, on >= base - 1 | worst `I-SIGNATURE` 7 vs 9 | **fail** | worst `I-SIGNATURE` 7 vs 9 | **fail** |
+| 3. `C-DUPLICATE` passes | 12 vs 11 | pass | 12 vs 11 | pass |
+| 3. `L-RENAME-ALIAS` passes | 12 vs 11 | pass | 12 vs 11 | pass |
+| 3. `I-SIGNATURE` passes | 7 vs 9 | **fail** | 7 vs 9 | **fail** |
+| 4. `mutation_outside_scope`, on <= base | 2 vs 1 | **fail** | 0 vs 1 | pass |
+| 5. Pooled median tokens, on <= 0.95x | 78,716 vs 83,704 (0.940x) | pass | 79,847 vs 83,704 (0.954x) | **fail** |
+| 6. Sol median tokens, on <= 0.95x | 82,255 vs 90,984 (0.904x) | pass | 83,432 vs 90,984 (0.917x) | pass |
+| 7. `I-KWARG` + `I-SIGNATURE` continues, on < base | 8 vs 19 | pass | 8 vs 19 | pass |
+| 8a. `C-DECOY` continues, on <= base | 11 vs 11 | pass | 12 vs 11 | **fail** |
+| 8b. `C-DECOY` median tokens, on <= 0.90x | 84,078 vs 100,656 (0.835x) | pass | 85,710 vs 100,656 (0.852x) | pass |
+| 8c. `C-DECOY` median calls, on <= base - 1 | 10 vs 11 | pass | 10 vs 11 | pass |
+
+Tokens by route, re-run reading (base / on): `claude-proxy` h45 4,660,327 / 3,906,467 and s55
+1,722,343 / 1,628,489; `openai-codex` luna 2,952,549 / 2,804,460 and sol 3,024,138 / 2,790,203. Total
+12,359,357 / 11,129,619 (0.901x). Continues 40 / 31. Money $0 (subscription routes only). Median
+wall 43.1 s / 40.2 s.
+
+**Where it failed.** Both `I-SIGNATURE` losses are Haiku runs (h45 base 3 of 3, on 1 of 3). In each,
+the trigger fired alone on `signature compute_fee in src/benchapp/__init__.py`, and the on arm sent
+the evidence note. That note shows only `from .pricing import compute_fee as fee`. The model judged
+that an import needs no change and stopped, leaving `cli.py`'s `fee(...)` call broken. On base, the
+generic checklist sent it to search; it fixed `cli.py` and passed. None of the 12 on-arm `settled`
+verdicts failed.
+
+**Fallback, as pre-registered.** A quality clause failed on runs where the on arm sent an evidence
+note. So the evidence note is dropped and the settled references stay. Re-measuring that is a new
+pre-registration with new seeds. The branch does not ask to merge on this run.
+
+#### Registration 2 (2026-11-05): the fallback, base vs on
+
+Pre-registered before its first live run. This is a new registration, not an amendment of the one
+above, and no data of this arm exists yet. Smokes are uncounted and say so in their folder name.
+
+**Arms.** Each links its OMH bundle from a `git archive` snapshot (`OPT/opt-l/omh-head/<sha>`):
+- `base` = `225f62ff2`, the origin/main parent of this branch's merge. It includes the caller check
+  (#2546).
+- `on` = `12fb9c0c6`, this branch with the fallback applied: the evidence note is gone (`verify_hooks`
+  is byte-identical to `base`), the settled references stay, and the argument binder is the shared
+  `call_shape.py`.
+
+**Offline replay, before this registration** (`OPT/opt-l/replay.py`, the 198 H2H2 and H2H3 omn
+sessions):
+
+| Tree | Continue decision equal to live | Continues |
+| --- | --- | --- |
+| base `225f62ff2` | 198 / 198 | 68 |
+| on `12fb9c0c6` | n/a | 48 |
+
+- The 20 continues cut are `I-KWARG` 12 and `I-SIGNATURE` 8. Every one is a harmless false positive
+  that passed live.
+- No new fire appears. The other 178 sessions are identical to `base`, note text included.
+- On the first registration's own on-arm `I-SIGNATURE` sessions with a broken caller (h45 x3, luna
+  x3), the caller note fires on this tree and names `src/benchapp/cli.py:5`. That includes both
+  sessions the gate lost. No evidence note is sent.
+
+**Why clauses 5 and 8 change.** The fallback removes the only lever this item had on `C-DECOY`: the
+evidence note. `C-DECOY` replays identically on both trees. A projection, computed before this
+registration, replays this tree over the first registration's base-arm sessions. Wherever this tree
+would not continue, it removes the extra round's share of tokens and its calls:
+- `I-KWARG` 8 and `I-SIGNATURE` 4 continues are cut;
+- pooled median tokens 83,704 to 82,362 (0.984x);
+- sol median 90,984 to 82,721 (0.909x);
+- `C-DECOY` median tokens 100,656 to 100,656 (1.000x), median calls 11 to 11;
+- total tokens 0.961x.
+
+The script is `OPT/opt-l/project_fallback.py` (sha256 `a95e60a3...`), and its output is
+`project_fallback.txt` (sha256 `a5a87ca3...`). Under the first registration's clauses, 5 and 8 would
+fail by construction. They become no-regression clauses. Clauses 6 and 7 stay as the improvement
+clauses.
+
+**Setup.** As the first registration, except:
+- profiles `optl2-<lane>-<arm>` (`OPT/opt-l/make_profiles2.sh`);
+- driver `OPT/opt-l/run_optl2.py` (sha256 `4847b98e...`), which is `run_optl.py` with only the
+  profile prefix and the seeds changed;
+- seeds 284927, 648391 and 731957. None appears under `.omc/research`, in `~/.omh` or on main.
+
+The arms, configuration, panel and routes are unchanged:
+- `claude-proxy` (CPA) for h45 `claude-haiku-4-5-20251001` and s55 `claude-sonnet-5-5`;
+- `openai-codex` for luna `gpt-6-luna` and sol `gpt-6.1-sol`.
+
+Also unchanged: subscription routes only, the 11 templates, 264 runs, the alternating arm order, the
+load and disk gates, the shared live-run lock, retries and crash re-runs, both readings, and the
+definitions. The bench harness is this branch's at registration.
+
+The gate, `on` against `base`. Must hold:
+
+1. Total passes (n = 132): on at least base.
+2. Per template, pooled over the four models (n = 12): on at least base - 1.
+3. `C-DUPLICATE`, `L-RENAME-ALIAS` and `I-SIGNATURE` passes (n = 12 each): on at least base.
+4. `mutation_outside_scope` runs: on at most base.
+
+No regression:
+
+5. Pooled median tokens (n = 132): on at most 1.00x base.
+8. `C-DECOY` (n = 12): continues on at most base, and median tokens on at most 1.05x base.
+
+Must improve:
+
+6. Sol median tokens (n = 33): on at most 0.95x base.
+7. `I-KWARG` + `I-SIGNATURE` continues (n = 24): on strictly below base.
+
+Recomputed from the raw records by `OPT/opt-l/gate2.py`, and again independently by
+`OPT/opt-l/recompute2.py`.
+
+**Fallback.** The same chain as the first registration:
+- a quality clause (1 to 4) fails on a run whose on-arm verdict was `settled`: `_settled` is dropped;
+- only cost clauses (5 to 8) fail: the change does not merge on this run.
+
+A re-measure after any drop is a new registration with new seeds.
+
+#### Registration 2 result (2026-11-05): the gate failed on clause 6 only
+
+264 counted runs (05:38 to 07:06 KST) and 6 crash re-runs. The re-runs cover three `sol`
+`I-RETURN-SHAPE` instances in both arms; 5 of the 6 crashed again at the 600 s budget. `gate2.py` and
+the independent `recompute2.py` agree on every clause in both readings.
+
+| Clause | Strict (on vs base) | | Re-run (on vs base) | |
+| --- | --- | --- | --- | --- |
+| 1. Total passes, on >= base | 130 vs 127 | pass | 129 vs 128 | pass |
+| 2. Per template, on >= base - 1 | worst `C-DECOY` 12 vs 12 | pass | worst `I-RETURN-SHAPE` 9 vs 10 | pass |
+| 3. `C-DUPLICATE` passes | 12 vs 12 | pass | 12 vs 12 | pass |
+| 3. `L-RENAME-ALIAS` passes | 12 vs 12 | pass | 12 vs 12 | pass |
+| 3. `I-SIGNATURE` passes | 12 vs 12 | pass | 12 vs 12 | pass |
+| 4. `mutation_outside_scope`, on <= base | 2 vs 4 | pass | 3 vs 3 | pass |
+| 5. Pooled median tokens, on <= 1.00x | 78,832 vs 83,336 (0.946x) | pass | 78,291 vs 83,942 (0.933x) | pass |
+| 6. Sol median tokens, on <= 0.95x | 84,853 vs 85,006 (0.998x) | **fail** | 83,801 vs 85,456 (0.981x) | **fail** |
+| 7. `I-KWARG` + `I-SIGNATURE` continues, on < base | 7 vs 19 | pass | 7 vs 19 | pass |
+| 8. `C-DECOY` continues, on <= base | 11 vs 11 | pass | 11 vs 11 | pass |
+| 8. `C-DECOY` median tokens, on <= 1.05x | 100,190 vs 103,002 (0.973x) | pass | 100,190 vs 103,002 (0.973x) | pass |
+
+Tokens by route, re-run reading (base / on):
+- `claude-proxy`: h45 4,466,020 / 4,242,207; s55 1,763,025 / 1,570,521.
+- `openai-codex`: luna 3,297,476 / 3,109,503; sol 2,968,523 / 2,734,694.
+- Total 12,495,044 / 11,656,925 (0.933x). Continues 42 / 28. Money $0. Median wall 34.0 s / 34.0 s.
+
+Quality held in both readings:
+- `I-SIGNATURE` passed 12 of 12 in both arms: with the caller check in both, this registration loses
+  no broken caller;
+- all 12 on-arm `settled` verdicts passed;
+- the only on-arm failures are the three crashed `sol` `I-RETURN-SHAPE` runs; base crashed on two of the
+  same instances.
+
+**Why clause 6 failed.** Sol's continues fell from 14 to 7, and its total tokens to 0.921x. But sol's
+median sits on templates this change does not touch: `E-BUGFIX` at about 85k and `C-SCOPE-TRAP` at
+about 77k. The pre-registration projection of 0.909x came from the first registration's base sessions,
+whose sol median sat among the `I-KWARG` and `I-SIGNATURE` runs.
+
+**Decision, as registered.** Only a cost clause failed, so the change does not merge on this run.
+
+### 2026-11-03 caller check: calls a signature change broke, base vs on (`pre_verify`)
+
+Pre-registered before its first live run.
+
+**Diagnosis** (research folder `OPT/opt-k/DIAGNOSIS.md`, from the H2H2 and H2H3 raw records,
+profile `state.db` snapshots and logs, with each session's edits replayed onto its fixture):
+- Every OMH `I-SIGNATURE` failure in both head-to-heads (gpt-6-luna 5, Haiku 4.5 1) left
+  `src/benchapp/cli.py:5` broken: `fee(int(argv[0]), 50)`, which reaches `compute_fee` through the
+  package re-export `from .pricing import compute_fee as fee`. One also left the alias caller
+  `invoices.py:5`.
+- The round-end trigger fired in every one (`reason=signature`), but the model was given only the
+  generic consistency checklist. It searched for `compute_fee`, saw the re-export, and stopped. No
+  run was ever shown `cli.py` by OMH.
+- 9 sessions reached the first stop with a broken caller; the generic continue fixed 3.
+- Haiku's `I-KWARG` failures are a different shape: every caller is consistent, and the returned
+  dict key and the existing test were both renamed. That is the test check's target (#2494); this
+  change cannot see it.
+
+**The change** (`caller_check.py`, `verify_hooks.py`): at the turn's first stop, for each
+module-level function of an edited file whose parameters changed (turn-start text from
+`consistency_trigger`), find its importers with `impact_check.find_importers` (package re-exports
+included), and bind each call against the old and the new parameters. Name `path:line`, the call,
+why it no longer binds and the new signature, only for a call that bound before and does not now.
+Silent on anything it cannot prove (see the module docstring). The note continues the turn on its
+own, the consistency check rides along, and the closing asks for the full final answer (no
+sentinel).
+
+**Offline replay, before this registration** (`OPT/opt-k/replay_caller.py`, the 198 H2H2/H2H3
+OMH sessions up to their first stop, `replay-h2h.txt`): a note on exactly the 9 `I-SIGNATURE`
+sessions that stopped with a broken caller, and on no other replayed session. 19 sessions edited
+by shell commands were not replayed. A first version also named 5 passing gpt-6.1-sol `I-KWARG`
+sessions, on a new test that calls `fetch(..., timeout=...)` inside `pytest.raises(TypeError)`;
+calls written to fail are now skipped.
+
+**The new control, `I-DEFAULTED`** (impact-ab split, this branch only). A keyword-only parameter
+`handling_cents: int = 0` is added to `ship_cost`, which is called directly, through an alias,
+through the module by a `*args` forwarder, and through a package re-export under another name.
+Every existing call stays valid, so a correct edit changes only the definition (and its tests),
+and the caller check must say nothing.
+
+The setup, fixed before the first live run:
+
+- **Arms.** Each arm links its OMH plugin bundle from a source snapshot (`git archive`):
+  - `base`: origin/main `3ad772371`;
+  - `on`: this branch at the commit that adds this section. Its bundle differs from base in
+    `caller_check.py` (new) and `hooks/verify_hooks.py` only.
+- **Profiles.** `optk-<lane>-<arm>`, the H2H3 OMH-arm configuration, product default:
+  - Hermes's default `tools.tool_search`;
+  - plugin settings `omh_home` and `lsp_tools: true`; `impact_check` not set, so off;
+  - `pyright` pinned by an absolute `lsp.servers.pyright.command`;
+  - `agent.max_turns: 120` and `agent.run_budget_seconds: 600`;
+  - the observer-only meter plugin, whose `omh_pkg` field records the load path.
+
+  Edit surface `lsp`, the `baseline` prompt with no edit directive, `--git-init-workspace`,
+  `--test-env`, effort `medium`.
+- **Panel.** Subscription routes only:
+
+  | Lane | Model | Route |
+  | --- | --- | --- |
+  | h45 | `claude-haiku-4-5-20251001` | `claude-proxy` (CPA) |
+  | s55 | `claude-sonnet-5-5` | `claude-proxy` (CPA) |
+  | luna | `gpt-6-luna` | `openai-codex` |
+  | sol | `gpt-6.1-sol` | `openai-codex` |
+
+- **Templates.** Twelve:
+  - positives: `I-SIGNATURE`, `I-KWARG`, `I-RETURN-SHAPE`;
+  - controls: `I-CONTROL`, `I-DEFAULTED`;
+  - no-regression: `C-DECOY`, `C-DUPLICATE`, `C-SCOPE-TRAP`, `E-BUGFIX`, `E-RENAME`,
+    `L-RENAME-ALIAS`, `L-RENAME-SHADOW`.
+- **Seeds.** None appears under `.omc/research` or in the bench before this section.
+  - 857137, 964009 and 1000003 for every template;
+  - also 618841, 742297 and 1299709 for the three positives and `I-DEFAULTED`, so each has
+    n = 24 per arm (6 per model);
+  - 48 instances per lane per arm, 192 per arm, 384 runs.
+- **Order.** Per instance the two arms run back to back on identical fresh workspaces, in
+  alternating order. Lanes run in parallel, under a load gate (1-min load at most 20) and a disk
+  gate (wait below 8 GB free, stop below 5 GB).
+- **Retries.** A run classified `rate_limited`, `provider_error` or `model_unavailable`, or a
+  client the gateway refused within seconds, is retried on the same route. Any other outcome is
+  final. A run with no completed record is a fail.
+- **Crashes.** The 2026-11-02 rule, fixed here in advance: the records as run are the **strict
+  reading**. After the lanes finish, each instance whose last record is a `process_crash` in
+  either arm is run once more in both arms, back to back, into `runs-rerun/`; the **re-run
+  reading** replaces both records of those instances. Every clause is reported under both
+  readings; the branch asks to merge only if both pass, or states which one fails and why.
+
+Definitions:
+- A **continue** is a session with at least one assistant row whose `finish_reason` is
+  `verify_hook_continue`, from the session DB.
+- A **caller note** is a `caller_check round_end session=<id> ... rows=N` line with N > 0 in the
+  on arm's profile log. Every on-arm first stop logs that line, with rows=0 when there is
+  nothing to name; a counted on-arm run with no line is reported as missing.
+- **Tokens** are the run record's `observation.tokens`; a cell is one model and one template.
+
+The gate, `on` against `base`:
+
+1. **Positives, pooled** (`I-SIGNATURE` + `I-KWARG` + `I-RETURN-SHAPE`, 72 runs per arm): on
+   passes at least base + 3.
+2. **No template loses a pass, pooled over the four models:** for each of the twelve templates,
+   on passes at least base passes.
+3. **Controls stay silent:** 0 caller notes on `I-CONTROL` and `I-DEFAULTED` in the on arm, and
+   continues on those two templates: on at most base. (The literal "0 continues" is not a
+   clause: the existing trigger fires on `I-DEFAULTED`'s signature change in both arms, by
+   design, and that is not this change.)
+4. **No token blow-up:** no on-arm run above 3x the median tokens of the base arm in its cell.
+
+Reported, not gated: per lane and template, passes, continues, caller notes, median calls,
+median tokens and median wall; caller notes on every template; the rows each note named;
+`mutation_outside_scope`; final answer kept; the load path; tokens and money by route.
+
+Recomputed from the raw run records, the session-DB snapshots and the profile logs by
+`OPT/opt-k/gate.py`, not from the driver log.
+
+**Fallback.** If any clause fails, the failure is recorded here and the branch does not ask to
+merge; nothing from it ships. If a fresh review finds a call the note names that would not fail
+at runtime, that shape is made silent and this run's sessions are replayed offline with the fix;
+a fix that would change any on-arm note in this run is reported, and the branch then asks to
+merge only on a new measurement. The next candidate after a failed gate is `impact_check` on by
+default (the language-server path), under its own pre-registration against the same base.
+
+#### Amendment 1 (2026-11-03 14:30 KST, during the counted runs, before any result was computed)
+
+From 14:25:36 KST every `openai-codex` call failed with HTTP 401 `token_revoked` (the profile logs
+also show `refresh_token_invalidated`). The owner's own `kami` profile logged the same error, so it
+is the shared Hermes Codex credential, not the bench. The bench classified these runs as
+`process_crash` (exit 2, about 3 s, no model call completed). They are harness failures, not model
+outcomes:
+- The 36 records (9 per arm on luna and on sol, every one after 14:25:36) are moved, unread, to
+  `runs/discarded-auth/` and are not counted in either reading.
+- Every luna / sol instance recorded before 14:25:36 completed in both arms (4 pairs on luna,
+  3 on sol) and stays counted.
+- The two GPT lanes were stopped (driver processes only) and resume from the first missing
+  instance once the credential works again, with the same driver, arms, seeds and order. Nothing
+  was logged in, refreshed or re-authenticated by the bench.
+- The Claude lanes (CPA) were not affected and kept running.
+
+#### Result: gate failed on one clause, by one run in which the change said nothing; the branch does not ask to merge
+
+The run:
+- **Counted runs:** 2026-11-03 14:17 to 19:39 KST. The GPT lanes were paused from 14:25 to 14:41 for
+  the revoked credential (Amendment 1).
+- **Volume:** 384 counted runs, 192 per arm. 0 crashes, 0 timeouts, 0 retries, nothing unpaired,
+  so the strict and the re-run readings are the same.
+- **Recompute:** the research folder's `OPT/opt-k/gate.py`, from the raw records, the session-DB
+  snapshots and the profile logs (`gate.txt`, `gate.json`).
+- **Load path:** the meter recorded `omh_pkg: true` on every call in both arms (the shared
+  gateway holds an installed OMH package). The on arm's bundle-local check ran: every on-arm first
+  stop that `pre_verify` reached logged its `caller_check` line.
+
+| Clause | Result |
+| --- | --- |
+| 1. Positives pooled: on at least base + 3 | pass: 65/72 to 72/72 |
+| 2. No template loses a pass, pooled | **fail: `L-RENAME-ALIAS` 12/12 to 11/12** |
+| 3a. Caller notes on `I-CONTROL` and `I-DEFAULTED`, on arm: 0 | pass: 0 |
+| 3b. Continues on those two: on at most base | pass: 24 to 24 |
+| 4. No on run above 3x its cell's base median tokens | pass: none |
+
+**Where the passes moved.**
+
+| `I-SIGNATURE` | base | on | caller notes |
+| --- | --- | --- | --- |
+| Haiku 4.5 | 5/6 | 6/6 | 6 |
+| Sonnet 5.5 | 6/6 | 6/6 | 0 |
+| gpt-6-luna | 0/6 | 6/6 | 6 |
+| gpt-6.1-sol | 6/6 | 6/6 | 0 |
+
+- Every other template has the same pooled passes in both arms, except `L-RENAME-ALIAS`.
+- Total passes: 185/192 base, 191/192 on.
+- Caller notes fired on `I-SIGNATURE` only: 12 sessions, the 12 in which Haiku or Luna stopped
+  with a caller still broken. There were 0 notes on any other template, controls included.
+- `I-KWARG` stayed 24/24 in both arms. Haiku 4.5 passed 6/6 in both, so the test check (#2494)
+  already covers the H2H2 failure shape; nothing was left for this change to move there.
+
+**The failing clause.** The one lost pass is Haiku 4.5 `L-RENAME-ALIAS` seed 857137, on arm.
+- In `tests/test_quota.py` Haiku wrote `from benchapp.api import allocate_quota as compute_quota`,
+  which keeps the old name. In the base arm, on the same seed, it renamed the name everywhere.
+- In that session the caller check logged `functions=0 files=0 rows=0` (a rename changes no
+  parameters). The consistency trigger logged `fire=False reason=no_copy_or_reference`, and the turn
+  ended at its first stop with no continue.
+- With an empty caller note, `pre_verify` computes exactly what base computes. Nothing else in the
+  two bundles differs. So the model saw the same OMH output in both arms in that turn, and the miss
+  is model variance on n = 3.
+- The clause was registered without that exception, so it fails as registered.
+
+**Cost.**
+- Total tokens: base 18.90M, on 18.88M.
+- `I-SIGNATURE` pooled median tokens: 113.6k base, 123.4k on. That is Luna's and Haiku's extra fix
+  round. Sonnet's median fell from 97k to 55k, with continues dropping from 5 to 1.
+- The highest on-arm run against its cell's base median was 2.17x: Haiku `L-RENAME-SHADOW` 964009,
+  203.6k against 93.8k. That session got no caller note.
+
+**Not counted:** an on-arm "missing" `caller_check` line on 24 Sonnet runs. In each, the model
+edited only through shell commands, so `pre_verify` received no changed paths and returned before
+any note, in both arms. No `export_check` line exists for those sessions either.
+
+**Decision, as pre-registered:** the gate failed, so the branch does not ask to merge. The PR
+stays open with this result for the owner's call. The pre-registered next candidate (`impact_check`
+on by default) was not run.
+
+### 2026-11-02 round-end check: declared look-alikes and rewritten test expectations, base vs new
+
+Pre-registered before its first live run.
+
+The 2026-10-31 head-to-head against oh-my-pi (research folder `H2H2/REPORT.md`) found two gaps
+in the round-end check on origin/main:
+
+- **`C-DECOY` over-fire.** On Sonnet 5.5 the check continued 3 of 3 `C-DECOY` sessions,
+  against 1 of 3 before. That cost 8 model calls against 3 and 96k tokens against 42k.
+  - One continue was a `copy` of the look-alike `_to_cents`, whose module docstring says its
+    rounding is intentionally different from the edited file.
+  - Two were `opaque_edit`: the model appended its regression test with
+    `printf ... >> tests/test_<x>.py`, so the test file had no turn-start text.
+- **`I-KWARG` on Haiku 4.5: 0 of 3 passes.** In every failure Haiku renamed the `timeout` key
+  in the dict `fetch` returns, and rewrote `tests/test_http_client.py` to expect the new key.
+  The task said "What fetch returns stays the same". The round-end check fired and asked only
+  about copies and call sites.
+
+The change, in `consistency_trigger.py`, a new `test_expectation_check.py`, `verify_hooks.py`
+and `llm_hooks.py`:
+
+1. **Declared look-alikes.** A `copy` hit is skipped when the other file says its definition
+   differs on purpose (`declared_divergent`). The trigger reads two places with `ast`:
+   - the definition's docstring, or the comments directly above or on its first line;
+   - the module docstring, but only a sentence there that names the edited file.
+
+   "Differs on purpose" is a closed vocabulary: an intent word (`intentionally`, `deliberately`,
+   `on purpose`, `by design`) and a difference word in one sentence, or
+   "not kept in step / in sync with". Every other signal still fires, and so does a real copy
+   beside a declared one.
+2. **Files a command names.** Before a `terminal` or `execute_code` call, the trigger keeps the
+   turn-start text of every `.py` / `.pyi` file the call's arguments name. A `printf >>` or
+   `sed -i` on a named file is then diffed like a patch. A file a command changes without
+   naming it still fires as `opaque_edit`.
+3. **Test check (always on, `pre_verify` attempt 0).** It names an existing test that lost an
+   expected value: a literal constant in an `assert` or a `self.assert*` call is gone from the
+   file. Subscript keys are not counted. It fires only when all of these hold:
+   - the request asked for behaviour to stay the same (closed phrase list);
+   - the request does not name the test file or the test;
+   - the request does not ask to update a test, and states no result the code "must / should /
+     now / to return";
+   - the turn also changed a non-test Python file.
+
+   Like the export note, it continues the turn by itself. The consistency check rides along in
+   its "beside a re-check" form.
+
+Two candidate signals were measured offline and rejected:
+- **A body-similarity threshold.** The look-alike's `_to_cents` body scores the same against
+  the edited one in `C-DUPLICATE` and `C-DECOY` (`difflib` ratio 0.794 for every seed), so no
+  threshold separates them.
+- **Subscript keys as expected values.** Counting them flagged all 12 `I-RETURN-SHAPE`
+  sessions, where `quote["total_cents"]` correctly became `quote.total_cents`.
+
+**Offline replay, before this registration.** The research folder's
+`OPT/OPT-I/replay_h2h2.py` replayed the 132 H2H2 `omn` sessions on fresh fixtures: their
+`patch` / `write_file` calls and `printf >>` appends, up to the turn's first stop. Results:
+- `C-DECOY`: 12 of 12 continues become 0, every one `declared_divergent`.
+- `C-DUPLICATE`: 8 of 8 still fire `copy`.
+- `I-KWARG`: the test note fires on the 3 failed Haiku runs and on no passing run.
+- No test note anywhere else.
+
+The replay does not model the impact or export notes, or shell edits other than `printf >>`.
+
+**The new control, `C-TEST-UPDATE`** (consistency-ab split). The task asks for a kib to be 1024
+bytes, names `tests/test_sizes.py`, and asks for its existing kib assertion to expect the new
+value. It also says every other unit stays the same, so the request carries a keep-behaviour
+phrase. A correct edit changes the existing expectation. The validator needs:
+- the new kib;
+- every other unit unchanged;
+- the test file's tests passing;
+- the old expected value gone from the test.
+
+The setup, fixed before the first live run:
+
+- **Arms.** Each arm links its OMH plugin bundle from a source snapshot. The bundles differ
+  only in the four files above.
+  - `base`: origin/main `76fa9c615`.
+  - `new`: this branch at `c071c591f`. (Amended before the first counted run: two uncounted smokes on
+    `bec5cb80e` showed that a stop the test check exempts left no log line, so a missing note could not be
+    told from a bundle that never loaded the check. `c071c591f` logs one line with its reason at every
+    stop and changes nothing else.)
+- **Load path.** The bench profiles symlink the bundle into the profile, and the shared
+  gateway has no `omh` package. So both arms run the standalone path, which since #2455 runs
+  the router's code. The meter's per-call `omh_pkg` field records this, and the result
+  reports it.
+- **Profiles.** `opti-<lane>-<arm>`, with H2H2's OMH-arm configuration:
+  - Hermes's default `tools.tool_search`;
+  - plugin settings `omh_home` and `lsp_tools: true`; `impact_check` not set, so off, as shipped;
+  - `pyright` pinned by an absolute `lsp.servers.pyright.command`;
+  - `agent.max_turns: 120` and `agent.run_budget_seconds: 600`;
+  - the observer-only meter plugin.
+
+  Edit surface `lsp` (toolsets `file,terminal,omh-lsp`). The prompt is the `baseline`
+  condition, with no edit directive, `--git-init-workspace`, `--test-env` and effort `medium`.
+- **Panel.** Subscription routes only:
+
+  | Lane | Model | Route | Tier |
+  | --- | --- | --- | --- |
+  | h45 | `claude-haiku-4-5-20251001` | `claude-proxy` (CPA) | weak |
+  | s55 | `claude-sonnet-5-5` | `claude-proxy` (CPA) | strong |
+  | luna | `gpt-6-luna` | `openai-codex` | weak |
+  | sol | `gpt-6.1-sol` | `openai-codex` | strong |
+
+- **Templates.** Seven:
+  - positives: `I-KWARG` (test note) and `C-DUPLICATE` (copy);
+  - negatives and controls: `C-DECOY`, `C-SCOPE-TRAP`, `I-CONTROL`, `E-BUGFIX` and
+    `C-TEST-UPDATE`.
+- **Seeds.** None appears anywhere under `.omc/research` or in the bench.
+  - 409993, 502133 and 524287 for every template.
+  - Also 646619, 715827 and 829601 for `C-DECOY` and `I-KWARG`, so that each must-improve
+    clause has n = 6 per model.
+  - That is 27 instances per lane per arm, 108 per arm.
+- **Order.** Per instance, the two arms run back to back on identical fresh workspaces, and
+  the order alternates. Lanes run in parallel.
+- **Retries.** A run classified `rate_limited`, `provider_error`, `model_unavailable` or
+  `authentication_failed` is retried on the same route. Any other outcome is final. A run with
+  no completed record is a fail.
+- **Ceiling check on the base arm, from H2H2 (origin/main `ffdef9347`, before #2454/#2455).**
+  - Sonnet `C-DECOY`: 3 of 3 continued, so the fire rate has room to drop.
+  - Haiku `I-KWARG`: 0 of 3 passed, so passes have room to rise.
+
+Definitions:
+- A **fire** is a session with at least one assistant row whose `finish_reason` is
+  `verify_hook_continue`, from the session DB.
+- **Model calls** are `sessions.api_call_count`.
+- **Tokens** are the run record's `observation.tokens`.
+- A **test note** is a `test_expectation_check session=<id> fire=True` line in the new arm's
+  profile log. Every new-arm stop logs such a line with its reason; a counted new-arm run with no line is
+  reported as missing.
+
+The gate. Must improve, `new` against `base`:
+
+1. **Sonnet `C-DECOY` fires** (n = 6): new at most 1, and strictly below base.
+2. **`C-DECOY` cost, pooled over the four models** (24 runs per arm):
+   - median model calls: new at most base - 1;
+   - median tokens: new at most 0.90x base.
+3. **Haiku `I-KWARG` passes** (n = 6): new at least base + 2.
+
+Must hold:
+
+4. `C-DUPLICATE` passes (n = 12): new at least base.
+5. Total passes (108 per arm): new at least base - 1.
+6. The test-edit control `C-TEST-UPDATE` (n = 12):
+   - test notes in the new arm: exactly 0;
+   - fires: new at most base.
+7. `mutation_outside_scope` count: new at most base.
+
+Reported, not gated:
+- the per-lane, per-template table: passes, fires, median calls and median tokens;
+- test notes by template;
+- the trigger's verdict reasons per arm, and on `C-DECOY`;
+- median wall time;
+- final answer kept;
+- the load path (`omh_pkg`);
+- tokens and money by route.
+
+Recomputed from the raw run records, the session-DB snapshots and the profile logs, by
+`OPT/OPT-I/gate.py`, not from the driver log. If any clause fails, the failure is recorded here
+and the branch does not ask to merge.
+
+#### Amendment 2 (2026-11-02, during the counted runs, before any result was computed)
+
+From 11:11 KST the host's load average ran at 47 to 75, from other agents' test suites. Runs
+on h45, luna and sol then began to end as `process_crash`, exit 1, after 15 to 230 s, in both
+arms. In each one, the Hermes client's websocket to the gateway dropped
+(`ws response send failed`) while the gateway turn was still running, and the bench then
+removed the workspace under that turn. These are harness failures, not model outcomes, and
+the retry rule above does not cover them.
+
+The amendment:
+- The original records stay as recorded and are the **strict reading**, scored as registered.
+- After the lanes finish, each instance with a `process_crash` as its last record in either arm
+  is run once more in **both** arms, back to back in alternating order, on the same route, into a
+  separate `runs-rerun/` folder. So each re-run pair compares two runs made under the same load.
+  Nothing else is re-run.
+- The **re-run reading** replaces both records of those instances with their re-runs.
+- `gate.py` reports every clause under both readings, with the crash count per arm and per
+  model. If the readings disagree, the result says so, and the branch asks to merge only with
+  that stated.
+
+#### Result: the re-run reading passes every clause; the strict reading fails one, on crash records only
+
+The run setup:
+- **Counted runs:** 2026-11-02 10:28 to 12:15 KST; re-runs 12:15 to 13:33.
+- **Volume:** 216 counted runs, and 64 re-run records for 32 instances.
+- **Arms:** base `76fa9c615`, new `c071c591f`.
+- **Recompute:** the research folder's `OPT/OPT-I/gate.py`, from the raw records, the
+  session-DB snapshots and the profile logs (`gate.txt`, `gate.json`).
+
+**Crashes.** These are `process_crash` records: the client's websocket dropped while the
+gateway turn kept running.
+
+| Model | Strict base | Strict new | Re-run base | Re-run new |
+| --- | --- | --- | --- | --- |
+| Haiku 4.5 | 8 | 10 | 3 | 3 |
+| Sonnet 5.5 | 0 | 0 | 0 | 0 |
+| gpt-6-luna | 7 | 8 | 4 | 3 |
+| gpt-6.1-sol | 13 | 12 | 0 | 0 |
+| All | 28 | 30 | 7 | 6 |
+
+The two arms crashed at about the same rate.
+
+**Gate clauses:**
+
+| Clause | Strict reading | Re-run reading |
+| --- | --- | --- |
+| 1. Sonnet `C-DECOY` fires: new at most 1 and below base | pass: 3/6 to 0/6 | pass: 3/6 to 0/6 |
+| 2a. `C-DECOY` pooled median model calls: new at most base - 1 | pass: 11 to 9 | pass: 11 to 9 |
+| 2b. `C-DECOY` pooled median tokens: new at most 0.90x base | pass: 95,144 to 55,474 (0.58x) | pass: 99,441 to 75,645 (0.76x) |
+| 3. Haiku `I-KWARG` passes: new at least base + 2 | pass: 1/6 to 3/6 | pass: 2/6 to 5/6 |
+| 4. `C-DUPLICATE` passes: new at least base | pass: 12 to 12 | pass: 12 to 12 |
+| 5. Total passes: new at least base - 1 | pass: 79 to 79 | pass: 102 to 101 |
+| 6a. Test notes on `C-TEST-UPDATE`, new arm: 0 | pass: 0 | pass: 0 |
+| 6b. Fires on `C-TEST-UPDATE`: new at most base | pass: 0 to 0 | pass: 0 to 0 |
+| 7. `mutation_outside_scope`: new at most base | **fail: 24 to 25** | pass: 4 to 2 |
+
+**The strict-reading failure is a crash artifact.**
+- Every `mutation_outside_scope` record in either reading is a crash record, scored after the
+  bench removed the workspace: 49 of 49 strict, 6 of 6 re-run.
+- No completed run in either arm edited outside its scope.
+- Among completed runs, the model's own failures are:
+  - base: 2 (Haiku `I-KWARG` 409993 and 502133);
+  - new: 1 (luna `I-KWARG` 502133, which missed the `**CRAWL_OPTIONS` caller in crawler.py
+    that the consistency check named; not a test rewrite).
+
+**Where the change acted:**
+- **`C-DECOY`.**
+  - The new arm continued 0 of 24 sessions (base 19 of 24).
+  - Every new-arm trigger verdict there was `declared_divergent` (22 logged).
+  - Per model, base to new: Sonnet median calls 6 to 4 and tokens 68k to 43k; Haiku 11 to 10
+    and 117k to 95k; luna 12 to 9 and 100k to 74k; sol 11.5 to 9 and 102k to 76k.
+- **`I-KWARG` on Haiku.**
+  - The test note fired in 3 sessions, and all 3 then passed.
+  - It named `tests/test_http_client.py:5`, whose expected `"timeout"` key the model had
+    renamed.
+  - The new arm's completed runs passed 5 of 5; the base arm's passed 2 of 4.
+- **The note was silent everywhere else.** It fired on `I-KWARG` only, with 94 logged stops in
+  the new arm (re-run reading). That includes `C-TEST-UPDATE`: 10 stops logged `test_edit_asked`, and the 2
+  crashed runs logged no stop.
+- **`C-DUPLICATE`.** The `copy` signal still fired (8 logged). Passes held at 12 of 12.
+
+**Reported, re-run reading:**
+- **Medians, base to new:** tokens 81,775 to 74,821; wall 50.1 s to 47.0 s; model calls 9 to
+  9.
+- **Final answer kept:** 76 to 75.
+- **Per model, passes and median tokens:**
+  - Haiku: 23 to 24, 116k to 101k.
+  - Sonnet: 27 to 27, 52k to 44k.
+  - luna: 25 to 23, 90k to 71k. Both lost runs are crashes on `C-TEST-UPDATE`.
+  - sol: 27 to 27, 95k to 79k.
+
+**Load path.** Every call before 13:06 KST ran the standalone path (`omh_pkg` false): all
+counted runs and most re-runs. From 13:06, something outside this bench put an `omh` package
+into the shared gateway's `sys.modules`. The last h45 re-runs and every sol re-run then ran
+with it importable, in both arms alike: 293 of 2,137 metered calls. The round-end code is the
+bundle's own in both cases. The shared gateway itself was relaunched at 12:55:31 KST by an
+`osascript` call to the Hermes launcher. This bench sent it no signal and ran no launcher. The
+re-runs after that time ran on the new gateway process, in both arms.
+
+**Tokens and money.** The run records undercount, because a crashed run records no tokens
+while its gateway turn ran on.
+
+| Route | Counted runs | Re-runs | Smokes | Total |
+| --- | --- | --- | --- | --- |
+| CPA Claude | 7.56M | 1.66M | 0.25M | 9.47M |
+| openai-codex | 6.27M | 3.11M | 0.06M | 9.44M |
+
+Money: $0 (every `cost_usd` is 0). No DeepSeek, GLM, OpenRouter or OpenGateway.
+
+**Verdict.** The two readings disagree on clause 7 only, and only through crash records. In
+the re-run reading every clause passes. The branch asks to merge with that stated.
+
+#### Disclosures added at review (2026-11-02)
+
+- **An unregistered retry.** `run_opti.py` kept H2H2's `gateway_down` rule, which was in the
+  driver before the counted start. It re-runs a `process_exit` record with exit code 130, or
+  exit code 1 within 15 s, on the same route. The registration says any outcome other than
+  the four provider classes is final, so this retry was not registered.
+  - It changed 4 strict instances: h45/new `C-DUPLICATE-409993`, luna/base
+    `C-DUPLICATE-409993`, s55/base `C-SCOPE-TRAP-409993` and sol/new `C-DECOY-524287`. Each
+    exited 130 near 10:41, and each attempt 1 completed.
+  - In the re-runs it took h45/new `I-KWARG-715827` to 5 attempts, and retried h45/base
+    `C-DECOY-646619`, `I-KWARG-646619` and `I-KWARG-715827`, and luna/base `C-DECOY-646619`,
+    `I-KWARG-715827` and `I-KWARG-829601`, and luna/new `I-KWARG-829601`.
+- **First-attempt reading.** Scoring each instance by its first attempt (`gate.py
+  --first-attempt`, and the reviewer's independent re-score), both readings pass every
+  clause:
+  - strict: clause 5, total passes, 77 to 77; clause 7, scope, 26 to 26;
+  - re-run: clause 3, Haiku `I-KWARG`, 2/6 to 4/6; clause 5, 98 to 98; clause 7, 8 to 4.
+- **Missing test-check log lines.** The registration says a counted new-arm run with no line
+  is reported as missing. There are 8 such completed Sonnet runs: all six `I-KWARG`, plus
+  `C-DECOY-409993` and `C-DUPLICATE-524287`. Each edited only through `terminal` commands, so
+  Hermes reported no changed path, and no OMH stop hook ran (no trigger line either).
+- **Test-note count.** 2 in the strict reading, 3 in the re-run reading, all on Haiku
+  `I-KWARG`.
+- **`C-TEST-UPDATE` exercises both suppressors at once.** It names the test file and asks for
+  the assertion to change. It also scopes its keep phrase ("Every other unit stays the
+  same"), which after the review fixes below counts as no keep at all. So the control shows
+  that a requested test edit gets no note. It does not show which suppressor carried it.
+
+#### Review fixes after the result, not re-measured live
+
+These changes are in the branch head after `c071c591f`, the measured new arm.
+- **`declared_divergent`.**
+  - It needs an intent word followed by `differs` / `different` / `diverges`.
+  - A note with a negation or an identity word declares nothing: "Intentionally duplicated
+    from invoice.py, so it must not differ", "By design this mirrors invoice.py".
+  - A module-docstring sentence must name the edited file as a file, and must name the
+    definition whenever it names any definition of its module.
+- **Command-named snapshots.** They get a budget of their own (16 files, 512 KB). The ones a
+  command left unchanged are dropped at the next tool call, and a stop with no edited path
+  keeps none.
+- **The test check.**
+  - A scoped keep ("everything else stays the same") is no keep.
+  - A negated ask ("don't update any tests") asks for nothing, and "must return the same ..."
+    keeps behaviour.
+  - "update its docstring and tests" and "refresh / revise the ... test" are asks.
+  - Expected values are pooled across test files, and unittest messages are not counted.
+
+A second review round turned both rules into whitelists, silent otherwise:
+- **The test check's keep.** It counts only when its subject is the behaviour, the output,
+  the result, the return value, "what `fetch` returns", the tests or an unscoped
+  "everything", and the phrase keeps it whole.
+  - "The signature stays the same", "the public API is unchanged", "the return type stays
+    the same", "values stay the same" and any scoped clause (`for`, `when`, `otherwise`,
+    `only`) are no keep.
+  - "The test is outdated" and "bring it up to date" are asks.
+  - Constants in `@pytest.mark.parametrize` count as gained values.
+- **`declared_divergent`.**
+  - The difference word must come right after the intent word, with at most one word between.
+  - A limiting word (`only`, `match`, `equal`, `equivalent`, `shared`, `track`, `agree`)
+    voids the note.
+  - A module sentence that names no definition speaks only for the one definition its module
+    shares with the edited file. The bench decoy shares only `_to_cents`.
+
+A third review round made both guards structural:
+- **A body gate for `declared_divergent`.** A note can suppress a `copy` only when the
+  look-alike's body already differs from the edited definition's pre-edit body (`ast`
+  comparison, ignoring layout, comments and the docstring).
+  - The bench decoy passes this gate because its `_to_cents` is spelled differently
+    (`decimal.Decimal(...)` with a literal, against `Decimal(...)` with `CENT`), not because
+    the two round differently before the edit. The gate is textual, not semantic.
+  - A definition-level note must also name the edited file.
+  - TODO / FIXME notes and questions declare nothing.
+- **The test check's keep must end its clause,** and a following "just ..." / "only ..."
+  clause voids it.
+- **Expected values are compared by presence,** so a fold into `@pytest.mark.parametrize`
+  over one shared input loses nothing.
+
+The offline replay of the 132 H2H2 `omn` sessions, re-run on the code after all three rounds
+(`OPT/OPT-I/replay-omn-review3.txt`):
+- `C-DECOY`: 12 continues to 0.
+- `C-DUPLICATE`: 8 of 8 fires kept.
+- The `I-KWARG` test note fires on the 3 failed Haiku runs only.
+- No other note.
+
+#### Scope decision after the fourth review: `declared_divergent` is dropped
+
+The fourth review found that the body gate stopped only verbatim copies. A respelled body, a
+renamed local or one added log line let every hedged or limiting note through again, and a
+method copied verbatim into a class with one extra method read as different. Four rounds
+showed that text cannot be trusted to suppress the copy check.
+
+So `declared_divergent` is removed with everything that served it: the vocabulary, the note
+readers, the body gate and `pre_bodies`, with their tests and docs. The copy check is never
+suppressed by text, and it matches main except for the structural named-file snapshot fix.
+
+The fourth review also made two test-check changes:
+- A verbless comma or semicolon clause after a keep narrows it, as does one ending in a
+  `-wise` / `-ly` word or starting "I mean" (", format-wise", ", structurally", "; I mean the
+  format").
+- An expected value folded into a module constant counts as kept.
+
+**What this means for the gate above.** The live gate measured `c071c591f`, which had
+`declared_divergent`. Its `C-DECOY` result (clauses 1 and 2, Sonnet fires 3/6 to 0/6, pooled
+calls 11 to 9, tokens 0.58x / 0.76x) came from that rule. The shipped code drops it, and was
+measured only by this replay. It does not reproduce those clauses.
+
+The offline replay of the 132 H2H2 `omn` sessions on the shipped code
+(`OPT/OPT-I/replay-omn-review4.txt`):
+- `C-DECOY`: 12 continues on base, 12 on new, every one `copy` of the look-alike `_to_cents`.
+  - The named-file snapshot turns the two Sonnet `opaque_edit` fires into judged diffs, and
+    those then find the same look-alike.
+  - So the shipped code does not reduce `C-DECOY` fires at all.
+- `C-DUPLICATE`: 8 of 8 fires kept.
+- `I-KWARG`: the test note fires on the 3 failed Haiku runs only, and no other note fires.
+  Clause 3 (Haiku `I-KWARG` passes) came from the test note, which ships.
+
+### 2026-10-31 compact `omh_context` result: base vs branch
+
+The `omh_context` tool result rides every later model call of its session. In the 2026-10-30
+per-call runs (`OPT-C`, three runs of the head-to-head's 11 templates), GPT-6 Luna with
+`tools.tool_search` off called it as its first tool in 20-33 of 33 sessions; no Claude session
+and no `tool_search: auto` session called it. Every calling session went on with `search_files`,
+`read_file` or `terminal`; apart from 7 repeat `omh_context` calls, none called another OMH tool
+afterwards (209 calls over the three runs' snapshots). Per model call, the sessions
+that called it cost 26-29k tokens against 18-20k in those that did not.
+
+What the result consisted of (one recorded call, 36,374 characters of sorted JSON; mean over the
+209 calls 39,725): `generic_tool_checkpoint` 11,025, of which its 14 routes are 10,454;
+`capability_families` 8,967; `workflow_context_cards` 6,765; `lanes` 3,749; `route_hint` 837
+(3,479 with two matched hints); `workflow_cues` 1,426; `tool_hints` 1,385; `prompt_context`
+about 2,700 when asked for (48 of 209 calls); the rest under 600 each. `omh_capabilities`
+action=summary returns `capability_families` and `workflow_context_cards` byte for byte.
+
+The branch returns a compact view from the tool only (the CLI, the wrapper contract and the hooks
+keep the full brief). It drops those two sections, keeps each checkpoint route's `tool_family`,
+`primary_workflow` and `primary_next_action`, and adds a one-line `expand` naming where the
+dropped parts are; a matched route hint still carries its own fallback and not-evidence lists.
+The tool's schema is byte-identical to base. Replayed on the 209 recorded calls: 40,162 -> 15,956
+characters on average, o200k 9,332 -> 3,824 tokens (cut 5,508).
+
+The setup, fixed here before the first live run:
+
+- Arms: `base` (OMH bundle at origin/main `f545685dc`) and `br` (bundle at the branch head).
+  The two profiles of a config differ only in the bundle and the OMH home.
+- Panel (subscription routes only): `gpt-6-luna` and `gpt-6.1-sol` through Hermes
+  `openai-codex`; `claude-haiku-4-5-20251001` and `claude-sonnet-5-5` through CPA
+  (`claude-proxy`). Effort `medium`.
+- Configs: each model with `tools.tool_search` at the Hermes default (`auto`) and `off`: eight
+  configs.
+- Templates: the head-to-head's 11 (`I-SIGNATURE`, `I-RETURN-SHAPE`, `I-KWARG`, `I-CONTROL`,
+  `C-DUPLICATE`, `C-SCOPE-TRAP`, `C-DECOY`, `E-RENAME`, `E-BUGFIX`, `L-RENAME-ALIAS`,
+  `L-RENAME-SHADOW`), new seeds 262139, 287117, 314159: 33 instances per config per arm.
+  `I-CONTROL` is the negative control (no caller breaks).
+- Both arms otherwise as the OPT-C runs: the head-to-head's `omh` arm (`--edit-surface impact`,
+  toolsets `file,terminal,omh-lsp`, `impact_check` and `lsp_tools` on, no edit directive,
+  `--git-init-workspace`, `--test-env`), `agent.max_turns: 120`, `agent.run_budget_seconds: 600`,
+  pyright pinned by absolute command, the bench-only `optc_meter` observer in both arms.
+  Per instance both arms run back to back on identical fresh workspaces, order alternating.
+  Retries only for `rate_limited` / `provider_error` / `model_unavailable` /
+  `authentication_failed` (or a client the gateway refused within seconds), on the same route.
+
+The gate, per config:
+
+- Must hold (passes): `br` passes at least `base` - 1 runs.
+- Must hold (follow-up): the tool exists so the model knows OMH's routes before it reaches for
+  generic tools, then gets on with the request. In the bench that is: (a) among sessions that
+  call `omh_context`, `br` has at most one more failing session than `base`; (b) `br` sessions
+  that call `omh_context` and then call `omh_capabilities` or `omh_context` again (fetching what
+  the compact view dropped) are at most `base`'s count + 2.
+- Must hold (full-context probe): 5 prompts where the dropped context is what is asked for, one
+  run each per model, arm and config, through `hermes --oneshot` in an empty directory. An answer
+  passes when, lower-cased with `_` and `-` read as spaces, it contains every key:
+  1. "Using OMH's own context tools, list each OMH capability family and the role that owns it." —
+     `planner`, `researcher`, `memory keeper`, `operator`, `handoff guide`, `tracker`.
+  2. "Using OMH's own context tools, quote the first response shape OMH prescribes on its 'Intent
+     to plan' workflow context card." — `name the ambiguity`.
+  3. "Using OMH's own context tools, give verbatim the example source flows OMH lists for its 'Plan
+     and decide' capability family." — `loopability check`, `reading path`.
+  4. "Using omh_context on my request 'make an image card for this PR', tell me which OMH workflow
+     comes first, its next action, its fallback action, and what is not evidence yet." —
+     `img summary`, `prepare visual prompt card`, `choose image generator`, `image generation`.
+  5. "Using OMH's own context tools, which user examples does OMH give on its 'Automation and
+     status' workflow context card?" — `every morning send a digest`.
+
+  Per model and config, `br` passes at least `base` - 1 of the 5.
+- Must improve (GPT models): on each GPT config where both arms have at least 5 sessions that call
+  `omh_context`, the mean input tokens per model call over those sessions (input + cache read +
+  cache write, summed, divided by their API calls, from each profile's `state.db`) falls by at
+  least 2,000. At least one GPT config must be evaluable. The amount, in Codex units: the replayed
+  cut of 5,508 o200k tokens is 3,427 at OPT-C's measured 2,800 Codex per 4,500 o200k; the result
+  is the first tool result, so it rides 92% of a calling session's calls (13.4 calls per session in
+  OPT-C), about 3,150 per call; 2,000 leaves room for session-length noise. Measured directly, the
+  Codex route counted the full result as 9,231 tokens (input growth over the call that returned
+  it, 148 OPT-C sessions), close to o200k, which would put the drop near 5,100.
+- Reported with it, not gating: call rates of `omh_context` per arm and config; tokens per call
+  over all sessions; first-call tokens; the Codex-counted result size per arm; median wall time.
+
+Results are recomputed from the raw records and `state.db` snapshots, not the driver log. A failed
+clause is recorded here and the change does not merge on it.
+
+#### Result: gate failed on one probe cell; the change does not merge on this run
+
+528 runs: branch `8be0a4355` against base origin/main `f545685dc`, 2026-10-31 10:32-11:30 KST,
+with no retries and no timeouts. Then 80 probe runs, each config's probes starting after its lane
+finished. Recomputed from the records and the `state.db` / meter snapshots. Passes and call rates
+were counted a second time by a separate script.
+
+| Config | Pass base | Pass br | `omh_context` sessions base / br | Failing calling sessions | Re-fetch sessions | Tokens/call, calling sessions base -> br | Drop (95% CI) | Probe base / br | Verdict |
+| --- | ---: | ---: | --- | --- | --- | --- | --- | --- | --- |
+| GPT-6 Luna `auto` | 30 | 32 | 0 / 0 | 0 / 0 | 0 / 0 | - | n/a | 4 / 4 | pass |
+| GPT-6 Luna `off` | 33 | 33 | 25 / 26 | 0 / 0 | 1 / 0 | 28,888 -> 23,821 | +5,067 (+4,532, +5,585) | 3 / 4 | pass |
+| GPT-6.1 Sol `auto` | 30 | 30 | 0 / 0 | 0 / 0 | 0 / 0 | - | n/a | 5 / 5 | pass |
+| GPT-6.1 Sol `off` | 30 | 30 | 0 / 0 | 0 / 0 | 0 / 0 | - | n/a | 5 / 5 | pass |
+| Haiku 4.5 `auto` | 32 | 31 | 0 / 0 | 0 / 0 | 0 / 0 | - | n/a | 5 / 4 | pass |
+| Haiku 4.5 `off` | 32 | 31 | 0 / 0 | 0 / 0 | 0 / 0 | - | n/a | 4 / **2** | **fail** |
+| Sonnet 5.5 `auto` | 33 | 33 | 0 / 0 | 0 / 0 | 0 / 0 | - | n/a | 4 / 4 | pass |
+| Sonnet 5.5 `off` | 33 | 33 | 0 / 0 | 0 / 0 | 0 / 0 | - | n/a | 4 / 4 | pass |
+
+- **Token clause.** Only GPT-6 Luna `off` was evaluable: GPT-6.1 Sol never called `omh_context` in
+  a coding session under either setting. Luna's drop of 5,067 per call clears the 2,000 threshold.
+  - The Codex-counted result fell from 9,216 to 3,788 tokens.
+  - Over all 33 sessions, the per-call mean fell from 26,918 to 23,192.
+  - First-call tokens were equal in every config, because the schema did not change.
+  - Median wall time did not move: Luna `off` went from 45.1 s to 45.9 s.
+- **Call rates.** GPT-6 Luna `off` called the tool in 25 of 33 base sessions and 26 of 33 branch
+  sessions. Every other config called it in 0 of 33, in both arms.
+- **The failing probe cell.** On Haiku 4.5 `off` the branch scored 2/5 against base's 4/5; the
+  clause needs 3.
+  - Neither branch miss (`source_examples`, `user_examples`) called `omh_context`. Haiku went to
+    `omh_capabilities` with a section filter, found no "Plan and decide" section, and then either
+    stopped or answered from another card. That tool's schema and the `omh_context` schema are
+    byte-identical between arms.
+  - On base, Haiku's `source_examples` answer came from the full `omh_context` result, which it
+    called last. The compact view no longer carries that section.
+- **The four catalog probes overall** (every probe except `image_route`, 64 runs). Every branch run
+  that called `omh_context` answered correctly (24/24); 20 of those followed `expand` to
+  `omh_capabilities`. All the misses came from runs that never called it: 2 on the branch, 1 on
+  base.
+- **`image_route`.** It passed in both arms on GPT-6.1 Sol under both settings, and on base only
+  for Haiku 4.5 `auto`. Every other run missed it. The `pre_llm_call` route hint for that prompt
+  names `failure-signal-audit`, and most answers followed it.
+
+Verdict: **gate failed** on the pre-registered probe clause for Haiku 4.5 `off`. Every other clause
+passed on every config. This run does not put the change up for merge.
+
+#### Amendment 1 (owner decision, 2026-10-31): one re-measure of the full-context probe
+
+Written and pushed before its first run. Only the probe is measured again, once. The 528-run
+result above stands as recorded and is not re-run.
+
+- **Arms.** `base` is the OMH bundle at origin/main `d4132ca1d`, which was merged into the branch
+  by a new commit first (`856b508c4`). `br` is the bundle at that merge. The compact `omh_context`
+  change itself is unchanged, so the two arms still differ only by it.
+- **Prompts and keys.** The same 5 prompts and answer keys as above, scored the same way.
+- **Volume.** 3 runs per prompt per cell, so 15 runs per arm per cell. There are 8 cells: 4 models
+  times `tool_search` `auto` and `off`. Each run is one `hermes --oneshot` in a fresh empty
+  directory, through fresh profiles set up as before. The arm order alternates run by run.
+- **Clause, per cell.** Branch correct >= base correct - 1, out of 15. And branch correct >= 9 of
+  15.
+- **Also reported.** For each run, whether it called `omh_context`, `omh_capabilities`, both, or
+  neither (directly or through the `tool_search` bridge).
+- **Rule.** This run decides. If every cell passes, the change becomes a merge candidate. If any
+  cell fails, the change is recorded here as rejected.
+
+#### Amendment 1 result: every cell passes; the change is a merge candidate
+
+240 runs, 2026-10-31 12:44-12:52 KST, every run exiting 0. Base was `d4132ca1d` and the branch
+`856b508c4`. Every answer was re-graded from the saved answers by a separate scorer using the
+pre-registered keys, and it agreed with the driver on all 240.
+
+The "Calls" columns give how many runs called each tool, in the order `omh_context` only /
+`omh_capabilities` only / both / neither.
+
+| Cell | Correct base | Correct br | Clause (br >= base - 1, br >= 9) | Calls base | Calls br | Misses base | Misses br |
+| --- | ---: | ---: | --- | --- | --- | --- | --- |
+| GPT-6 Luna `auto` | 12/15 | 12/15 | pass | 9 / 3 / 3 / 0 | 3 / 3 / 9 / 0 | `image_route` 3 | `image_route` 3 |
+| GPT-6 Luna `off` | 12/15 | 12/15 | pass | 10 / 5 / 0 / 0 | 3 / 6 / 6 / 0 | `image_route` 3 | `image_route` 3 |
+| GPT-6.1 Sol `auto` | 15/15 | 15/15 | pass | 9 / 0 / 6 / 0 | 3 / 0 / 12 / 0 | - | - |
+| GPT-6.1 Sol `off` | 15/15 | 15/15 | pass | 15 / 0 / 0 / 0 | 3 / 0 / 12 / 0 | - | - |
+| Haiku 4.5 `auto` | 9/15 | 11/15 | pass | 3 / 10 / 0 / 2 | 2 / 7 / 5 / 1 | `first_shape` 1, `image_route` 3, `user_examples` 2 | `image_route` 3, `source_examples` 1 |
+| Haiku 4.5 `off` | 9/15 | 10/15 | pass | 1 / 7 / 4 / 3 | 0 / 5 / 7 / 3 | `first_shape` 1, `image_route` 3, `source_examples` 2 | `first_shape` 2, `image_route` 3 |
+| Sonnet 5.5 `auto` | 12/15 | 12/15 | pass | 5 / 0 / 7 / 3 | 0 / 0 / 12 / 3 | `image_route` 3 | `image_route` 3 |
+| Sonnet 5.5 `off` | 12/15 | 12/15 | pass | 0 / 0 / 12 / 3 | 0 / 2 / 10 / 3 | `image_route` 3 | `image_route` 3 |
+
+- **Both tools.** On the branch, runs that called both tools rose from 32 to 73 of 120. That is the
+  model following `expand` from the compact view to `omh_capabilities`.
+- **`image_route`.** It missed on every run outside GPT-6.1 Sol, in both arms, as in the first
+  run.
+
+Verdict, per amendment 1: **pass**. In the 528-run result above, the only clause that failed was
+the probe cell this amendment re-measured, so the change is put up for merge.
+
+#### 2026-10-31, after the measured runs: the result grew by 2,944 characters
+
+Review of #2448 found a gap. For any family the message's route hint did not match, the compact
+view had dropped the checkpoint's fallback and not-evidence data, and no tool served it any more.
+The compact routes now keep `fallback_action` and `not_evidence_yet` again (the owner accepted
+this, with no re-run).
+
+- **Added characters (measured).** The 14 routes grow from 1,888 to 4,832 characters (+2,944).
+  Replayed on the 209 recorded calls, the mean result grows from 15,956 to 18,909 characters.
+- **Codex tokens (estimate, not measured).** At the 0.232 Codex tokens per character measured on
+  OPT-C's full results, the addition is about 680 tokens per result. Since the result rides about
+  92% of a calling session's calls, that is about 630 per call. The measured GPT-6 Luna `off` drop
+  of 5,067 per call would then be about 4,400.
+- **Runs.** None of the runs above measured this version.
+
+### 2026-10-30 round-end consistency check in `pre_verify`: off vs on, five measurements
+
+Measurements 1 to 4 failed their gates. The owner then relaxed the token clause to 1.4x
+("Owner decision" below). Measurement 5, with the sentinel swap, passed every clause it was
+registered against. Each measurement is recorded below as it ran.
+
+One question, from oh-my-pi's prewalk checklist and its delivery rules: after a turn
+that edited code, does one short checklist at the first stop (consistency, scope,
+verification) make the model's diff more correct? The checklist is
+`ROUND_END_CHECKLIST` in `src/plugin_bundle/omh/hooks/verify_hooks.py`; `pre_verify`
+returns it at `attempt == 0` when the turn's changed paths include a source file, so a
+turn sees it at most once. No new tool.
+
+The setup, fixed before the first live run:
+
+- The pinned `E-BUGFIX` and `E-RENAME` templates, plus a new split `consistency-ab`
+  (`--split consistency-ab`; the evaluation corpus and its digest are unchanged):
+  - `C-DUPLICATE`: a cent-rounding bug in two copies of a helper. The task names the
+    first copy's symptom; the second module says it is kept in step with the first.
+    Fixing only the first scores `copy_not_updated`.
+  - `C-SCOPE-TRAP`: a one-line duration bug next to an unused import and a size table
+    whose `kib` entry looks wrong. Changing either scores `unrequested_edit`.
+  - Both allow any new or changed file under `tests/`.
+- 3 seeds each, 12 instances per model per arm, effort `medium`, condition `baseline`.
+- Both arms: `--edit-directive`, `--git-init-workspace`, `--test-env`,
+  `--harness hermes_current_session`, toolsets `file,terminal`.
+- Two Hermes profiles that differ only in the OMH plugin bundle and OMH home: `off`
+  links the bundle at origin/main `5cc1ed311` (the branch's base), `on` links this
+  branch. The bundles differ only in `verify_hooks.py`. `agent.max_turns: 120` in both.
+- Hermes runs from its own venv entry point (`~/.hermes/hermes-agent/.venv/bin/hermes
+  -p <profile>`), not the `hermes` launcher. This does not make the bench timeout stop
+  the turn: `--oneshot` is a client, and the turn runs in the one Hermes gateway that
+  serves every profile. A runaway turn is bounded in the profile instead, by
+  `agent.max_turns: 120` and `agent.run_budget_seconds: 600`.
+- Subscription routes only: Claude through the local proxy (`claude-proxy`), GPT through
+  Hermes `openai-codex`.
+
+| Weak | Strong |
+| --- | --- |
+| `claude-haiku-4-5-20251001`, `claude-haiku-5-5`, `gpt-6-luna` | `claude-sonnet-5-5`, `claude-opus-5-5`, `gpt-6.1-sol` |
+
+`gpt-6-luna` is the smallest model the Codex subscription served on 2026-10-30
+(`gpt-6.1-sol`, `gpt-6-astra`, `gpt-6.1-terra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-*`).
+
+The merge gate, fixed before the first live run. Runs are scored as in the sections
+below: a run with no completed record is a fail.
+
+- Total passes, all six models and both splits: on at least off + 3.
+- Strong models: on at least off - 1.
+- `mutation_outside_scope` count: on at most off.
+- Median tokens per run over all runs: on at most 1.3x off. No on run above 3x the off
+  median of its model and template.
+- The checklist fired in at least 90% of on-arm coding sessions, and at most once per
+  turn. A coding session is a completed on-arm session with a `patch` or `write_file`
+  call on a `.py` path. Firing is read from the session database: an assistant row with
+  `finish_reason = 'verify_hook_continue'`. These tasks touch no served surface and keep
+  no plan, so a second such row in a session (a one-shot run is one turn) would be a
+  repeat. The off arm is checked for zero such rows.
+
+Measurement 1 (checklist text at `0c0e1c5e2`) failed one clause: on-arm median tokens
+were 1.434x off (302,806 vs 211,211). Every other clause passed, with 66 on vs 57 off.
+After the checklist the on arm ran pytest 62 times, in 49 of 72 sessions. For
+comparison, the off arm ran it 24 times after its last code edit. The verification line
+said "run a check". Measurement 2 (`185abfc78`) changes only that line: it asks for the
+command already run after the last edit, and says to run one only if none was. It
+re-runs both arms on two fresh profiles (`cebench-off2`, `cebench-on2`), with
+`agent.run_budget_seconds: 600` set from the start. The gate does not change.
+
+Measurement 2 passed every clause as written: omh `185abfc78` on origin/main `5cc1ed311`;
+Hermes Agent v0.22.5 · stable · local bf0203a794a0; 144 of 144 run records, all
+completed.
+
+| Model | off | on | off tokens (median) | on tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 9 / 12 | 9 / 12 | 252,983 | 266,655 |
+| `claude-haiku-5-5` | 12 / 12 | 12 / 12 | 216,944 | 286,772 |
+| `gpt-6-luna` | 8 / 12 | 8 / 12 | 178,550 | 276,370 |
+| `claude-sonnet-5-5` | 10 / 12 | 12 / 12 | 171,288 | 231,342 |
+| `claude-opus-5-5` | 12 / 12 | 12 / 12 | 208,235 | 248,666 |
+| `gpt-6.1-sol` | 10 / 12 | 12 / 12 | 174,745 | 200,312 |
+| **Total** | **61 / 72** | **65 / 72** | 14.9M total | 19.3M total |
+
+Per template, off vs on: `E-BUGFIX` 17 vs 17, `E-RENAME` 18 vs 18, `C-DUPLICATE` 8 vs 12,
+`C-SCOPE-TRAP` 18 vs 18. Failure codes: `copy_not_updated` 10 vs 6,
+`mutation_outside_scope` 1 vs 1, `unrequested_edit` 0 vs 0.
+
+Measurement 2 against the gate:
+
+- Total, on at least off + 3: 65 vs 61.
+- Strong models, on at least off - 1: 36 vs 32.
+- `mutation_outside_scope`, on at most off: 1 vs 1.
+- Median tokens, on at most 1.3x off: 247,577 vs 204,806, 1.21x. No on run above 3x its
+  off pair's median.
+- Fired in 71 of 72 on-arm coding sessions (98.6%), never twice in a session; 0 rows in
+  the off arm.
+
+Measurement 1, for the record (same setup, profiles `cebench-off`/`cebench-on`):
+
+| Model | off | on | off tokens (median) | on tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 9 / 12 | 10 / 12 | 267,697 | 318,877 |
+| `claude-haiku-5-5` | 10 / 12 | 12 / 12 | 236,284 | 365,807 |
+| `gpt-6-luna` | 8 / 12 | 9 / 12 | 245,026 | 336,545 |
+| `claude-sonnet-5-5` | 9 / 12 | 11 / 12 | 171,681 | 288,278 |
+| `claude-opus-5-5` | 12 / 12 | 12 / 12 | 210,593 | 319,305 |
+| `gpt-6.1-sol` | 9 / 12 | 12 / 12 | 173,697 | 199,080 |
+| **Total** | **57 / 72** | **66 / 72** | 15.9M total | 22.0M total |
+
+`C-DUPLICATE` went from 4 to 13; the other templates were even. During measurement 1
+another session stopped the shared Hermes gateway (01:59:52 to 02:01:13 KST), which
+interrupted every running turn and failed the next runs at launch. Every cell (model,
+arm, template) with a run overlapping that window was moved aside and run again in full,
+and `agent.run_budget_seconds: 600` was added to both profiles then.
+
+**Neither measurement can ship the checklist.** An independent review found a defect
+that the gate did not measure: the checklist displaced the turn's final answer. Hermes
+keeps the answer the model stopped with only as an interim message, and returns
+whatever the model says after the nudge as the turn's final response. That is the
+response `--oneshot`, API and delegating callers receive. The checklist ended "say so in
+one line and finish", so models finished with a report on the check. The bench missed
+this because it grades the answer file. Read from the session databases, the last
+assistant message contained the task's `changed_paths` answer in these sessions:
+
+| | off | on |
+| --- | ---: | ---: |
+| Measurement 1 | 48 / 72 | 3 / 72 |
+| Measurement 2 | 53 / 72 | 3 / 72 |
+
+The token figures were also re-counted. The on arm ran pytest 62 times in 49 sessions
+after the checklist in measurement 1, and 10 times in 10 sessions in measurement 2. The
+off arm ran it 24 and 23 times after its last code edit. Counted by `session_counts.py`.
+A sentence in earlier commits said "62 of 72 sessions": that was the number of calls,
+not of sessions.
+
+What measurements 1 and 2 show, and what they do not:
+
+- The pass margin is inside noise. The off arm ran identical code both times and moved
+  from 57 to 61. Measurement 2's 65 vs 61 alone has a two-sided Fisher exact p of 0.45,
+  and measurement 1's 66 vs 57 has 0.057. Pooled over both, the totals are 131 vs 118 of
+  144 (p = 0.038).
+- The one effect that stands out is `C-DUPLICATE`: pooled, 25 vs 12 of 36 (p = 0.004).
+  A model fixed a second copy of the logic that the task did not name, after searching
+  for other uses: `search_files` and `read_file` were most of the 1.8 extra calls per
+  session in measurement 2.
+- `C-DUPLICATE` plants exactly the defect the checklist names, and the corpus had no
+  negative case for it. Measurement 3 adds one (`C-DECOY`, below).
+- Scope did not move. No model took the `C-SCOPE-TRAP` bait in either arm. The one
+  `mutation_outside_scope` in each arm is `gpt-6-luna` on the same `E-BUGFIX` seed.
+- Weak models gained in measurement 1 (27 to 31) and not in measurement 2 (29 to 29).
+  Strong models gained in both (30 to 35, 32 to 36). n = 12 per model per arm.
+- The one measurement-2 coding session without the checklist (opus, `E-BUGFIX`) was
+  dropped by Hermes, not by OMH. The profile log reads "Hook 'pre_verify' callback
+  pre_verify skipped after previous timeout or while still running". `pre_verify` has no
+  entry in `_HOOK_CALL_IDENTITY_FIELDS` (`hermes_cli/plugins_dispatch.py`). So two
+  sessions of one profile that reach the hook at the same moment share one gate key, and
+  the second call is skipped.
+
+#### Measurement 3, pre-registered before its first run
+
+Changes from measurement 2:
+
+- The checklist's last line now asks for the final answer to the task again, in full and
+  in the form the task asked for, because it replaces the answer just given. It also
+  says not to answer with a report on the check.
+- Delegated children (`platform == "subagent"`) get no checklist.
+- New template `C-DECOY`, the negative case for `C-DUPLICATE`. It has the same rounding
+  bug in one module, next to a look-alike helper whose half-to-even rounding is
+  required, documented, and pinned by a test. Changing the look-alike's code scores
+  `decoy_changed`.
+- 5 templates × 3 seeds = 15 runs per model per arm, 90 per arm. Same panel, same flags,
+  subscription routes only. Fresh profiles `cebench-off3` and `cebench-on3`, both with
+  `agent.max_turns: 120` and `agent.run_budget_seconds: 600`.
+
+The gate keeps every clause above unchanged, now over 90 runs per arm, and adds two:
+
+- Final answer kept: the number of runs whose last assistant message contains
+  `changed_paths` is, in the on arm, at least the off arm's minus 2. It is read from the
+  session databases.
+- `C-DECOY`: on at least off - 1.
+
+If measurement 3 fails a clause, it is recorded here and the checklist does not merge.
+
+#### Measurement 3 result: gate failed, the checklist does not merge
+
+omh `4f5c4a053` on origin/main `5cc1ed311`, Hermes Agent v0.22.5 · stable · local
+bf0203a794a0. 180 of 180 run records, all completed. No gateway outage.
+
+| Model | off | on | off tokens (median) | on tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 12 / 15 | 12 / 15 | 238,984 | 388,392 |
+| `claude-haiku-5-5` | 15 / 15 | 15 / 15 | 243,744 | 284,464 |
+| `gpt-6-luna` | 12 / 15 | 13 / 15 | 217,959 | 326,159 |
+| `claude-sonnet-5-5` | 13 / 15 | 15 / 15 | 171,075 | 243,310 |
+| `claude-opus-5-5` | 15 / 15 | 15 / 15 | 208,441 | 280,784 |
+| `gpt-6.1-sol` | 14 / 15 | 15 / 15 | 173,835 | 218,535 |
+| **Total** | **81 / 90** | **85 / 90** | 19.0M total | 27.2M total |
+
+Per template, off vs on: `E-BUGFIX` 18 vs 17, `E-RENAME` 18 vs 18, `C-DUPLICATE` 9 vs 15,
+`C-SCOPE-TRAP` 18 vs 17, `C-DECOY` 18 vs 18.
+
+The gate:
+
+- Total, on at least off + 3: 85 vs 81. Pass.
+- Strong models, on at least off - 1: 45 vs 42. Pass.
+- `mutation_outside_scope`, on at most off: 1 vs 0. **Fail.** The one run was
+  `claude-haiku-4-5-20251001`, `E-BUGFIX`.
+- Median tokens, on at most 1.3x off: 281,158 vs 207,898, 1.35x. **Fail.**
+- No on run above 3x its off pair's median. **Fail, two runs:** `gpt-6-luna`
+  `E-RENAME` (3.20x) and `C-DECOY` (3.19x).
+- Fired in at least 90% of coding sessions, at most once per turn: 90 / 90, never
+  twice; 0 rows in the off arm. Pass.
+- Final answer kept, on at least off - 2: 90 / 90 vs 58 / 90. Pass.
+- `C-DECOY`, on at least off - 1: 18 vs 18. Pass.
+
+What measurement 3 shows:
+
+- The final-answer line works. Every on-arm run ended on a message carrying the task's
+  answer, which is more than the off arm, where models often end with prose.
+- It costs tokens again. Told to give the answer "again, in full", models re-ran their
+  tests before answering: 48 pytest runs in 46 of 90 sessions after the checklist,
+  against 10 in 10 of 72 in measurement 2. The off arm had 26 after its last code
+  edit. Counted by `session_counts.py`. Median tokens went from 1.21x to 1.35x.
+- The decoy did not catch a false consistency fix. No model changed the documented
+  half-to-even look-alike in either arm. So the `C-DUPLICATE` gain is not this
+  checklist making models change look-alike code blindly. This corpus has one decoy
+  shape only.
+- Scope moved the wrong way, at n = 1 each: one on-arm `mutation_outside_scope`
+  (haiku-4-5, `E-BUGFIX`). There was also one on-arm `unrequested_edit` (`gpt-6-luna`,
+  `C-SCOPE-TRAP`), where the off arm had none. Neither is established as caused by the
+  checklist.
+- `C-DUPLICATE` is still the only effect that stands out: 9 vs 15 here (p = 0.075).
+  Pooled over the three measurements it is 21 vs 40 of 54 (two-sided Fisher exact
+  p = 0.0004). The total margin, 85 vs 81, has p = 0.40.
+
+The checklist branch stays unmerged. Changing the wording again (for example, asking
+for the answer without re-running checks) needs the owner's decision and a new
+pre-registered measurement.
+
+#### Measurement 4, pre-registered before its first run (the last one)
+
+This is the fourth measurement of this feature family against one gate, so a pass
+should be read with that in mind. The owner chose a fourth and final attempt. If it
+fails any clause, the PR closes and there is no fifth.
+
+The feature is narrower, not reworded. Only the consistency check holds across
+measurements: `C-DUPLICATE`, pooled over measurements 1 to 3, is 40 vs 21 of 54. The
+scope and verification lines showed no effect, and the "check again" and "answer again
+in full" wording drove the token cost through test re-runs. So the continuation now
+carries one check: look for other copies or call sites of the logic changed this turn
+that have to change with it, and fix any found. It also says:
+
+- do not re-run tests or re-check anything else;
+- restate the final answer exactly as given, in the form the task asked for, updated
+  only if something more changed;
+- give no report on this check.
+
+The subagent skip stays.
+
+The setup is that of measurement 3:
+
+- the same panel and the same five templates (including `C-DECOY`), 15 runs per model
+  per arm;
+- subscription routes only;
+- fresh profiles `cebench-off4` and `cebench-on4`, each with `agent.max_turns: 120` and
+  `agent.run_budget_seconds: 600`.
+
+The gate is the same eight clauses with unchanged thresholds:
+
+- Total: on at least off + 3.
+- Strong models: on at least off - 1.
+- `mutation_outside_scope`: on at most off.
+- Median tokens: on at most 1.3x off.
+- No on run above 3x the off median of its model and template.
+- The check fires in at least 90% of on-arm coding sessions, and at most once per turn.
+- Final answer kept: on at least off - 2.
+- `C-DECOY`: on at least off - 1.
+
+The result is reported here with pooled `C-DUPLICATE` over all four measurements.
+
+#### Measurement 4 result: gate failed, item closed
+
+omh `530068797` on origin/main `5cc1ed311`, Hermes Agent v0.22.5 · stable · local
+bf0203a794a0. 180 of 180 run records, all completed.
+
+| Model | off | on | off tokens (median) | on tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 12 / 15 | 15 / 15 | 268,730 | 318,424 |
+| `claude-haiku-5-5` | 15 / 15 | 15 / 15 | 243,538 | 302,141 |
+| `gpt-6-luna` | 12 / 15 | 14 / 15 | 241,621 | 306,662 |
+| `claude-sonnet-5-5` | 13 / 15 | 15 / 15 | 172,363 | 246,287 |
+| `claude-opus-5-5` | 15 / 15 | 15 / 15 | 207,843 | 283,440 |
+| `gpt-6.1-sol` | 14 / 15 | 15 / 15 | 174,484 | 216,839 |
+| **Total** | **81 / 90** | **89 / 90** | 19.5M total | 25.9M total |
+
+Per template, off vs on: `E-BUGFIX` 18 vs 17, `E-RENAME` 18 vs 18, `C-DUPLICATE` 9 vs 18,
+`C-SCOPE-TRAP` 18 vs 18, `C-DECOY` 18 vs 18.
+
+The gate:
+
+- Total, on at least off + 3: 89 vs 81. Pass.
+- Strong models, on at least off - 1: 45 vs 42. Pass.
+- `mutation_outside_scope`, on at most off: 1 vs 0. **Fail.** The one run was
+  `gpt-6-luna`, `E-BUGFIX`.
+- Median tokens, on at most 1.3x off: 280,668 vs 207,804, 1.35x. **Fail.**
+- No on run above 3x its off pair's median. Pass.
+- Fired in at least 90% of coding sessions, at most once per turn: 90 / 90, never
+  twice; 0 rows in the off arm. Pass.
+- Final answer kept, on at least off - 2: 89 / 90 vs 61 / 90. Pass.
+- `C-DECOY`, on at least off - 1: 18 vs 18. Pass.
+
+What the four measurements show together:
+
+- **Consistency is a real effect on this corpus.** `C-DUPLICATE` was 18 vs 9 in
+  measurement 4 (two-sided Fisher exact p = 0.001). Pooled over all four measurements it
+  is 58 vs 30 of 72 (p < 0.0001). This is the fourth measurement of one feature family,
+  and the template plants exactly the miss the check names. `C-DECOY` (18 vs 18 in
+  measurements 3 and 4) shows the check did not make models change a documented
+  look-alike. It is one decoy shape.
+- **The cost does not come from re-running tests.** The consistency-only text stopped
+  test re-runs entirely: 0 pytest calls after the check, against 48 in measurement 3.
+  Median tokens still rose 1.35x. The cost is the extra round itself: about two more
+  model calls, each re-sending the whole context, to search for other uses and restate
+  the answer. On these short tasks, about 200k tokens each, that round is a large
+  fraction. No wording change removes it.
+- **Scope failed at n = 1 in measurements 3 and 4, a different model each time.** Each
+  was one on-arm `mutation_outside_scope` on `E-BUGFIX`, against none off. Whether the
+  extra round causes stray edits is not established.
+- Weak models gained 39 to 44 and strong 42 to 45 in measurement 4.
+
+Item B closes here, unmerged, as the owner decided before the run. The code stays on
+branch `feature/round-end-checklist` (`530068797`). A future attempt would need a gate
+that prices the extra round differently, or a cheaper way to ask for the check than a
+continuation. Either is a new decision for the owner.
+
+The owner later reversed this. See "Owner decision, 2026-10-30 (after measurement 4)" below.
+
+#### Owner decision, 2026-10-30 (after measurement 4)
+
+After measurement 4, the owner relaxed the median-token clause from 1.3x to 1.4x and chose
+to merge the measurement-4 design, the consistency-only check at `530068797`. The owner gave
+these reasons:
+
+- The runs go through subscription routes.
+- Measurement 4 gained 8 passes in total (89 vs 81), and `C-DUPLICATE` went from 9 to 18.
+- Pooled over all four measurements, `C-DUPLICATE` is 58 vs 30 of 72 (two-sided Fisher
+  exact p of about 3e-6).
+- The decoy was even, 18 vs 18.
+- The final answer was kept in 89 of 90 runs.
+
+This does not mean measurement 4 passed the gate it was registered against. It did not:
+it failed the token clause (1.35x against 1.3x) and the scope clause. Against the relaxed
+gate, measurement 4 passes every clause except scope. That is `mutation_outside_scope` 1 vs
+0, one `gpt-6-luna` `E-BUGFIX` run, and its cause is not established. The owner accepted
+that miss with the merge. The thresholds above and the measurement records are unchanged.
+
+#### Measurement 5, pre-registered before its first run
+
+A second review of the measurement-4 design, after the owner decision, found two
+conflicts in the joined message.
+
+- **The served-surface gate.** Its "run the smallest real load or check" request
+  sat beside the check's "do not re-run tests or re-check anything else".
+- **The open-plan directive.** It sat beside "restate your final answer".
+
+The owner chose a fix and one more measurement, merging if it passes. Measurement
+5 is the fifth measurement of this feature family. The changes from measurement 4:
+
+- **The check is scoped.** It now says "Do not re-run tests for this check", and a
+  served-surface request beside it stands.
+- **One closing sentence.** It goes last, and only when no plan directive is open.
+  With an open plan the message has no closing and nothing is stashed. The order is
+  served-surface gate, consistency check, plan directive, closing. #2410's impact
+  note goes between the gate and the check once it lands.
+- **The sentinel.**
+  - The closing asks for one fixed line, `OMH: no further changes.`, when nothing
+    more changed, or the full updated answer otherwise.
+  - `pre_verify` stashes the answer the turn stopped with, in process, per session,
+    bounded and aged out.
+  - `transform_llm_output` swaps the sentinel back to that answer before Hermes
+    persists the final row, and clears the stash on every turn end. It never swaps
+    without a stash.
+- **The OMH TUI** keeps the streamed sentinel line instead of printing the restored
+  answer a second time.
+
+The setup is that of measurement 4, on fresh profiles `cebench-off5` and
+`cebench-on5`: the same panel, the same five templates including `C-DECOY`, 15 runs
+per model per arm, subscription routes only, `agent.max_turns: 120` and
+`agent.run_budget_seconds: 600`.
+
+The gate keeps the measurement-4 clauses, with the token clause at the owner's 1.4x.
+The scope clause is stated as registered, and its result is reported as measured.
+
+- Total: on at least off + 3.
+- Strong models: on at least off - 1.
+- `mutation_outside_scope`: on at most off.
+- Median tokens: on at most 1.4x off.
+- No on run above 3x the off median of its model and template.
+- The check fires in at least 90% of on-arm coding sessions, and at most once per
+  turn.
+- Final answer kept: the last assistant message contains `changed_paths`, on at
+  least off - 2.
+- `C-DECOY`: on at least off - 1.
+- Swap fidelity, new.
+  - Read from the session DB: in every on-arm session where the sentinel was used,
+    the persisted final answer equals the pre-check answer byte for byte.
+  - Both rows are persisted: the pre-check answer is the interim row with
+    `finish_reason = 'verify_hook_continue'`, and the final answer is the last
+    assistant row.
+  - The model's raw reply is not stored once swapped. So a session counts as having
+    used the sentinel when its final row equals its interim row byte for byte, or
+    when its final row is still the sentinel line.
+  - The clause fails if any session's final row is the sentinel line (a swap that
+    did not happen).
+
+The result is reported here, with pooled `C-DUPLICATE` over all five measurements.
+If measurement 5 fails a clause, it is recorded and there is no further iteration.
+
+#### Measurement 5 result: every clause passes
+
+omh `b707b6281` on origin/main `4b7674616`, Hermes Agent v0.22.5 · stable · local
+bf0203a794a0. 180 of 180 run records, all completed. A three-run smoke on a separate
+profile (`cebench-smoke5`) checked the swap before the run, and is not counted here.
+
+| Model | off | on | off tokens (median) | on tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 12 / 15 | 15 / 15 | 268,044 | 388,258 |
+| `claude-haiku-5-5` | 15 / 15 | 15 / 15 | 216,739 | 317,480 |
+| `gpt-6-luna` | 10 / 15 | 15 / 15 | 226,839 | 335,894 |
+| `claude-sonnet-5-5` | 14 / 15 | 15 / 15 | 172,393 | 248,950 |
+| `claude-opus-5-5` | 15 / 15 | 15 / 15 | 208,639 | 280,572 |
+| `gpt-6.1-sol` | 12 / 15 | 15 / 15 | 174,684 | 217,182 |
+| **Total** | **78 / 90** | **90 / 90** | 19.3M total | 26.7M total |
+
+Per template, off vs on: `E-BUGFIX` 16 vs 18, `E-RENAME` 18 vs 18, `C-DUPLICATE` 8 vs 18,
+`C-SCOPE-TRAP` 18 vs 18, `C-DECOY` 18 vs 18. Failure codes: off has `copy_not_updated`
+10 and `mutation_outside_scope` 2; on has none.
+
+The gate:
+
+- Total, on at least off + 3: 90 vs 78. Pass.
+- Strong models, on at least off - 1: 45 vs 41. Pass.
+- `mutation_outside_scope`, on at most off: 0 vs 2. Pass.
+- Median tokens, on at most 1.4x off: 283,865 vs 206,990, 1.37x. Pass.
+- No on run above 3x its off pair's median. Pass.
+- Fired in at least 90% of coding sessions, at most once per turn: 90 / 90, never twice;
+  0 rows in the off arm. Pass.
+- Final answer kept, on at least off - 2: 67 / 90 vs 61 / 90. Pass.
+- `C-DECOY`, on at least off - 1: 18 vs 18. Pass.
+- Swap fidelity: 67 sessions used the sentinel and their final row equals the pre-check
+  answer byte for byte; 0 final rows are still the sentinel line. Pass.
+
+What it shows, and what it does not:
+
+- **`C-DUPLICATE` is 18 vs 8** (two-sided Fisher exact p = 0.0003). Pooled over all five
+  measurements it is 76 vs 38 of 90 (p ≈ 5e-9). That is five measurements of one feature
+  family, and the template plants exactly the miss the check names. `C-DECOY` stayed
+  even in all three measurements that had it.
+- **Weak models gained most:** 37 to 45. Strong models went from 41 to 45.
+- **Tokens are 1.37x** the off median, with no test re-runs after the check (0 calls).
+  The cost is the extra round itself. Measured only on these short tasks of about 200k
+  tokens; whether long turns pay proportionally less is not measured.
+- **A residual, inside the gate.** In 23 on-arm sessions the model did not use the
+  sentinel. For 11 of them the final answer was an updated answer that carried
+  `changed_paths`: 8 from gpt-6-luna, gpt-6.1-sol, sonnet and haiku-5-5, and 3 from
+  haiku-4-5. For 12 of the 15
+  `claude-haiku-4-5-20251001` sessions it was a report on the check ("No other call
+  sites exist ...") rather than the answer. So that model's final response is still
+  displaced. The final-answer clause passes because, read by `changed_paths`, the off
+  arm also often ends on prose.
+- **Swap fidelity is read from the DB only.** The model's raw reply is not stored once
+  swapped, so "the sentinel was used" is inferred from final == pre-check byte for byte.
+
+Measurement 5 passed the gate registered for it at `b707b6281`. The owner decided to
+merge if it passed.
+
+After measurement 5, a review changed the stash lifecycle. That is why the description
+above, written for `b707b6281`, no longer matches the shipped code.
+
+- The stash is now consumed only by a sentinel match. A non-sentinel
+  `transform_llm_output` no longer clears it, because Hermes's background-review fork
+  shares the session id and could otherwise take it.
+- A leftover stash is cleared at the session's next turn start (`pre_llm_call`).
+- The sentinel also matches when wrapped in `**`, `*`, `_`, backticks or quotes, or
+  written without its period.
+- A delegated child that gets only the impact note is asked for its full answer, and
+  nothing is stashed for it.
+- The OMH TUI dedupes only when Hermes marks the reply `response_transformed`.
+
+None of these changes the measured path: no review fork ran in these one-shot bench
+sessions, and no bench run is a delegated child. Measurement 5 was not re-run.
+
+Pass counts come from the run records. Firing, final answers and tool calls come from
+each profile's session DB.
+
+### 2026-10-30 round-end check trigger: fire only on a copy or a reference
+
+Pre-registered before its first live run.
+
+The round-end consistency check above costs one extra round wherever it fires. In the
+2026-10-30 head-to-head against oh-my-pi, in the product-default configuration (Hermes
+`tool_search` default), it continued 33 of 33 Haiku 4.5 sessions and 19 of 33 Sonnet 5.5
+sessions. On Sonnet, OMH ran 4 model calls after its last edit against 2 for plain Hermes.
+Its measured wins are narrow:
+- `C-DUPLICATE`, a second copy of the edited helper;
+- `mutation_outside_scope` 2 to 0 in measurement 5, at n = 2.
+
+The change: `pre_verify` asks `consistency_trigger.round_end_trigger` first, whenever the
+check would be the only nudge continuing the turn.
+- **Snapshot.** `pre_tool_call` keeps the pre-edit text of each `.py`/`.pyi` file a
+  `patch` or `write_file` call edits, once per turn.
+- **Diff.** At the first stop, the trigger diffs each snapshot against the disk and finds
+  the definitions the changed lines touch, with stdlib `ast`.
+- **Scan.** It scans the workspace's other Python files, the ones this turn did not edit,
+  for four signals:
+  - `copy`: a touched top-level definition is also defined at the top level elsewhere;
+  - `renamed`: a definition the edit removed is still named elsewhere;
+  - `signature`: a touched function's parameters or return annotation changed, and it
+    is named elsewhere;
+  - `line_copy`: a replaced line of 30 or more characters also appears elsewhere.
+
+No signal skips the check, and the turn ends at its first stop. The trigger fires the
+check, as before, whenever it cannot decide:
+- a changed source file that is not Python;
+- a changed file without a snapshot, or one that does not parse;
+- more than 3,000 files or 2 s of scanning;
+- any error.
+
+Beside another nudge (served-surface gate, impact note, open plan) the check rides along
+without a verdict, since the round happens anyway. The check text and the closing are
+unchanged.
+
+Offline replay, before this registration: the H2H omt sessions' own `patch` and
+`write_file` calls were applied to fresh fixtures (`OPT/A/replay_h2h.py` in the research
+folder). The trigger:
+- fired on every Haiku `C-DUPLICATE` and `C-DECOY` session, each naming the other module's
+  `_to_cents`;
+- fired on `I-SIGNATURE` and `I-KWARG`, through the changed signature;
+- skipped all 23 sessions on `C-SCOPE-TRAP`, `E-BUGFIX`, `E-RENAME`, `L-RENAME-ALIAS` and
+  `I-CONTROL` in which the base check had fired.
+
+The replay cannot apply `terminal` edits.
+
+The setup, fixed before the first live run:
+
+- **Arms.** `base` links the OMH plugin bundle at origin/main `531f7034f`. `new` links
+  this branch. The bundles differ only in `consistency_trigger.py`, `verify_hooks.py`
+  and `tool_hooks.py`.
+- **Profiles.** Both arms use the H2H omt configuration:
+  - Hermes's default `tools.tool_search`;
+  - `impact_check: true` and `lsp_tools: true`;
+  - `pyright` pinned by an absolute `lsp.servers.pyright.command`;
+  - `agent.max_turns: 120` and `agent.run_budget_seconds: 600`.
+
+  Profiles `opta-<lane>-<arm>`; edit surface `impact` (toolsets
+  `file,terminal,omh-lsp`).
+- **Prompt.** `baseline` condition, no edit directive, `--git-init-workspace`,
+  `--test-env`, effort `medium`.
+- **Panel.** Subscription routes only:
+
+  | Lane | Model | Route | Tier |
+  | --- | --- | --- | --- |
+  | h45 | `claude-haiku-4-5-20251001` | `claude-proxy` (CPA) | weak |
+  | s55 | `claude-sonnet-5-5` | `claude-proxy` (CPA) | strong |
+  | luna | `gpt-6-luna` | `openai-codex` | weak |
+  | sol | `gpt-6.1-sol` | `openai-codex` | strong |
+
+- **Templates and seeds.** Seven templates, seeds 104729, 130363 and 155921: 21 instances
+  per lane per arm, 84 per arm.
+  - Positive: `C-DUPLICATE`.
+  - Negatives: `C-DECOY`, a look-alike that must not change, and five templates with no
+    copy elsewhere: `C-SCOPE-TRAP`, `E-BUGFIX`, `E-RENAME`, `L-RENAME-ALIAS` and
+    `I-CONTROL`.
+- **Order.** Per instance, the two arms run back to back, and the order alternates.
+- **Retries.** A run classified `rate_limited`, `provider_error`, `model_unavailable` or
+  `authentication_failed` is retried on the same route. Any other outcome is final. A run
+  with no completed record is a fail.
+- **Ceiling check on the base arm, from the H2H omt sessions.** The check fired in 14 of
+  15 Haiku sessions and 9 of 15 Sonnet sessions on the five no-copy templates. So the
+  base arm leaves room for the fire rate to drop.
+
+The gate. Must hold, `new` against `base`:
+
+1. Total passes: new at least base - 1.
+2. `C-DUPLICATE` passes: new at least base.
+3. `mutation_outside_scope` count: new at most base.
+4. Final answer kept (the last assistant message contains `changed_paths`, read from the
+   session DB): new at least base - 2.
+
+Must improve:
+
+5. **Fire rate on the five no-copy templates.** It is the share of coding sessions with
+   an assistant row whose `finish_reason` is `verify_hook_continue`. A coding session is
+   a completed session with a `patch` or `write_file` call on a `.py` path. New must be
+   at most half of base.
+6. **Strong models (`claude-sonnet-5-5`, `gpt-6.1-sol`).**
+   - Each model's median tokens and median wall time per run: new strictly below base.
+   - Pooled over both models (42 runs per arm), the pre-registered minimum improvement is
+     median tokens at most 0.90x base and median wall time at most 0.95x base.
+
+Reported, not gated:
+- the weak-model medians;
+- the per-template table;
+- the trigger's own verdicts (`consistency_trigger ... reason=`) from the new arm's
+  profile log;
+- model calls after the last edit;
+- tokens and money by route.
+
+Recomputed from the raw run records and the session-DB snapshots, not from the driver log.
+If any clause fails, the failure is recorded here and the branch does not ask to merge.
+
+#### Result: gate failed on one clause (final answer kept)
+
+The run setup:
+- omh `16047b44d` against base origin/main `531f7034f`.
+- Hermes Agent v0.22.5, driven through its venv entry point.
+- 168 of 168 run records, all completed, with no retries.
+- One uncounted smoke ran before the counted runs: `gpt-6-luna`, new arm, `C-SCOPE-TRAP`.
+
+Recomputed from the run records and the profile session-DB snapshots by `OPT/A/gate.py` in the
+research folder.
+
+| Model | base pass | new pass | base tokens (median) | new tokens (median) | base wall (median) | new wall (median) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 21 / 21 | 21 / 21 | 143,516 | 118,019 | 55.2 s | 43.0 s |
+| `claude-sonnet-5-5` | 21 / 21 | 21 / 21 | 77,795 | 54,524 | 35.0 s | 29.9 s |
+| `gpt-6-luna` | 20 / 21 | 20 / 21 | 100,214 | 93,712 | 54.8 s | 48.6 s |
+| `gpt-6.1-sol` | 18 / 21 | 18 / 21 | 98,520 | 81,790 | 62.8 s | 61.1 s |
+| **Total** | **80 / 84** | **80 / 84** | 8.97M total | 7.14M total | 53.0 s | 43.1 s |
+
+Per template, base vs new:
+- `C-DUPLICATE` 12 vs 12, `C-DECOY` 12 vs 12.
+- `C-SCOPE-TRAP` 12 vs 12, `E-BUGFIX` 12 vs 12, `E-RENAME` 12 vs 12, `I-CONTROL` 12 vs 12.
+- `L-RENAME-ALIAS` 8 vs 8. Every miss is `semantic_validator_failed`: `gpt-6.1-sol` 0 of 3 in both arms, `gpt-6-luna` 1 in each arm.
+
+Model calls after the last edit (median): base 6, new 4. On Sonnet, 4 and 2.
+
+The gate:
+
+1. Total passes, new at least base - 1: 80 vs 80. Pass.
+2. `C-DUPLICATE`, new at least base: 12 vs 12. Pass.
+3. `mutation_outside_scope`, new at most base: 0 vs 0. Pass.
+4. Final answer kept, new at least base - 2: 61 vs 66. **Fail.**
+5. Fire rate on the five no-copy templates, new at most half of base: 0 / 54 vs 54 / 54. Pass.
+6. Strong models, each model below base:
+   - `claude-sonnet-5-5` tokens 54,524 vs 77,795, wall 29.9 vs 35.0 s;
+   - `gpt-6.1-sol` tokens 81,790 vs 98,520, wall 61.1 vs 62.8 s.
+
+   Pooled, tokens 0.679x and wall 0.817x, against the registered 0.90x and 0.95x. Pass.
+
+The trigger's verdicts in the new arm:
+- `copy` 19: every `C-DECOY` session, and 7 of 11 `C-DUPLICATE` coding sessions.
+- `no_copy_or_reference` 58. In the other 4 `C-DUPLICATE` sessions the model had already edited
+  both copies, and all 4 passed.
+- No verdict was a fail-open.
+- The decision took 0 to 225 ms, the smoke included.
+
+What clause 4 measures here. Kept means the last assistant message contains `changed_paths`.
+- **Where the gap is.** Most of it is Sonnet: 21 kept in base, 17 in new. In both arms, Sonnet
+  usually ends on prose, and whether that prose names `changed_paths` varies from run to run.
+- **What the check itself changed.** A paired reading of the base arm compares each fired
+  session's interim answer (the answer the model gave before the check) with its final row. The
+  check changed the kept status in 4 of 75 fired sessions:
+  - +3: all Haiku `C-DUPLICATE`, where the new arm fires too;
+  - -1.
+- **On the no-copy templates**, where the new arm skips the check, its net effect on kept in the
+  base arm was 0 or less.
+
+So the 5-run gap is between-run variance in how models end, not the skipped check (61/84 vs
+66/84, two-sided Fisher exact p = 0.47). That is a reading after the fact. The clause is
+recorded as failed as registered, and this branch does not ask to merge on this measurement.
+
+One miss the trigger cannot see, which the check did not catch either:
+- **The miss.** In `L-RENAME-ALIAS`, `gpt-6-luna` and `gpt-6.1-sol` left the string
+  `__all__ = ["compute_quota"]` in `api.py`.
+- **Why the trigger misses it.** The models had already edited that file, and the `renamed`
+  signal scans only unedited files.
+- **The base arm did no better.** It failed this template in 4 of 12 runs, the same models and
+  the same count as the new arm. The check, firing there, did not repair the leftover string.
+
+Spend: 16.18M tokens, $0.
+- CPA Claude subscription: 8,174,148 (base 4,696,070, new 3,478,078).
+- Codex subscription: 8,002,558 (base 4,272,958, new 3,666,536, smoke 63,064).
+
+No gateway was signalled; the eight `opta-*` profiles were deleted after their databases and
+logs were kept.
+
+#### Re-measure (owner decision), 2026-10-31, pre-registered before its first run
+
+After the result above, the owner chose one re-measure. It uses the same pre-registered gate,
+with every clause unchanged, including final answer kept at least base - 2.
+
+- **Seeds.** New seeds 181081, 206347 and 231419, none of them used above.
+- **Unchanged.** The panel, the seven templates and the profile configuration are the same as
+  above. Profiles are `opta2-<lane>-<arm>`.
+- **Base.** Current origin/main `b906cb425`.
+- **New.** This branch after merging it (`9f5f0430f`). The plugin bundles differ only in
+  `consistency_trigger.py`, `verify_hooks.py` and `tool_hooks.py`.
+- **Gate.** Clauses 1 to 6 as registered above, with the same thresholds and the same pooled
+  minimums (strong-model median tokens at most 0.90x base, median wall time at most 0.95x base).
+- **This run decides.** If every clause passes, the branch asks to merge. If any clause fails,
+  the change is recorded here as rejected. There is no further re-measure.
+- **Scoring.** The result is recomputed from the raw run records and session-DB snapshots and
+  recorded here.
+
+#### Re-measure result: gate failed on one clause (pooled strong-model wall time); the change is rejected
+
+The run:
+- base origin/main `b906cb425` against new `9f5f0430f`;
+- seeds 181081, 206347 and 231419;
+- 168 of 168 run records, all completed, with no retries.
+
+Recomputed from the run records and the profile session-DB snapshots by `OPT/A/gate2.py` in the
+research folder. The strong-model pooled medians were also recomputed separately from the run
+records alone.
+
+| Model | base pass | new pass | base tokens (median) | new tokens (median) | base wall (median) | new wall (median) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 21 / 21 | 21 / 21 | 145,844 | 129,919 | 47.8 s | 45.6 s |
+| `claude-sonnet-5-5` | 21 / 21 | 21 / 21 | 75,769 | 53,641 | 28.1 s | 23.1 s |
+| `gpt-6-luna` | 21 / 21 | 21 / 21 | 102,638 | 89,090 | 43.2 s | 43.5 s |
+| `gpt-6.1-sol` | 18 / 21 | 18 / 21 | 97,620 | 83,706 | 61.4 s | 59.2 s |
+| **Total** | **81 / 84** | **81 / 84** | 9.22M total | 7.29M total | 45.4 s | 44.2 s |
+
+Every template passed 12 / 12 in both arms except `L-RENAME-ALIAS`, which passed 9 / 12 in
+both. The three misses in each arm are `gpt-6.1-sol` (`semantic_validator_failed`). Model calls
+after the last edit (median): base 6, new 4.
+
+The gate, as registered:
+
+1. Total passes, new at least base - 1: 81 vs 81. Pass.
+2. `C-DUPLICATE`, new at least base: 12 vs 12. Pass.
+3. `mutation_outside_scope`, new at most base: 0 vs 0. Pass.
+4. Final answer kept, new at least base - 2: 62 vs 63. Pass.
+5. Fire rate on the five no-copy templates, new at most half of base: 0 / 54 vs 54 / 54. Pass.
+6. Strong models:
+   - `claude-sonnet-5-5`: tokens 53,641 vs 75,769; wall 23.1 vs 28.1 s.
+   - `gpt-6.1-sol`: tokens 83,706 vs 97,620; wall 59.2 vs 61.4 s.
+
+   Each model is below base on both, which passes. Pooled over both models (42 runs per arm),
+   median tokens are 65,200 vs 86,906, 0.750x, which passes. Median wall time is 44.52 vs
+   44.75 s, 0.995x, against the registered 0.95x. **Fail.**
+
+Why the pooled wall median barely moved:
+- The pooled set mixes two separate distributions: Sonnet around 23 to 28 s, and sol around
+  59 to 61 s.
+- With 21 runs from each model, the pooled median falls in the gap between them. It is the
+  mean of the slowest Sonnet runs and the fastest sol runs, so it barely reflects either
+  model's own median.
+- The mean pooled wall time fell from 47.2 to 43.7 s.
+
+These are readings made after the run. The clause was registered as a pooled median, and it
+failed.
+
+The trigger's verdicts in the new arm:
+- `copy` 19: every `C-DECOY` session, and 7 of 11 `C-DUPLICATE` coding sessions.
+- `no_copy_or_reference` 58, no fail-opens.
+- Each decision took 0 to 236 ms.
+
+The decision rule registered for this re-measure was that a failed clause records the change as
+rejected. **The round-end trigger is rejected. There is no further re-measure.**
+
+Spend: 16.51M tokens, $0.
+- CPA Claude subscription: 8,550,991 (base 4,861,273, new 3,689,718).
+- Codex subscription: 7,960,797 (base 4,357,529, new 3,603,268).
+
+No gateway was signalled. The eight `opta2-*` profiles were deleted after their databases and
+logs were kept. None had a `gateway.pid` or a bound backend process, and the shared gateway's
+pid did not change.
+
+#### Owner decision (2026-10-31)
+
+The re-measure rule registered above said the trigger is rejected if any clause fails. Clause 6's
+pooled strong-model median wall time failed at 0.995x against 0.95x. The owner overrode that
+rule and chose to merge the trigger.
+
+His reasons:
+- **Passes held in both runs.** They were 80 vs 80 in the first run and 81 vs 81 in the re-measure.
+  `C-DUPLICATE` was 12 vs 12 both times, and `mutation_outside_scope` was 0 vs 0 both times.
+- **Tokens fell.** Strong-model pooled median tokens were 0.679x of base in the first run and
+  0.750x in the re-measure.
+- **Each strong model's own median wall time fell in both runs:**
+
+  | Model | First run, base → new | Re-measure, base → new |
+  | --- | --- | --- |
+  | `claude-sonnet-5-5` | 35.0 → 29.9 s | 28.1 → 23.1 s |
+  | `gpt-6.1-sol` | 62.8 → 61.1 s | 61.4 → 59.2 s |
+
+- **The failed clause reflects how the runs were pooled.** Pooling two models whose wall times
+  form two separate groups puts the pooled median in the gap between them. In the re-measure,
+  the mean pooled strong-model wall time fell from 47.2 to 43.7 s while the pooled median moved
+  from 44.75 to 44.52 s.
+
+The first run's failed clause, final answer kept (61 vs 66), passed in the re-measure (62 vs 63).
+
+The recorded results and both pre-registrations above are unchanged. This note records a
+decision taken after the result, not a pass of the gate as registered.
+
+### 2026-10-30 impact check: callers broken by an edit, off vs on (`impact_check` + `lsp_diagnostics`), gate passed
+
+One question, from oh-my-pi's workspace diagnostics: when an edit changes a definition, does
+telling the model which files that import it now have new type errors help it fix every caller?
+Hermes checks diagnostics only for the file an edit wrote.
+
+How the check works (opt-in, setting `impact_check` or env `OMH_IMPACT_CHECK`): on the turn's
+first `patch` / `write_file` of an existing `.py` file, `pre_tool_call` finds up to 30 workspace
+files that import it (an `ast` import scan, following one package re-export) and records their
+language-server errors. At the turn's first stop, `pre_verify` re-checks those files against the
+disk and, when an error appeared that the baseline did not have, continues the turn with at most
+15 lines of `path:line: message`. It says nothing otherwise. `lsp_diagnostics(path|glob)` joins the
+opt-in `omh-lsp` toolset so the model can re-check.
+
+The setup:
+
+- Split `impact-ab` (`--split impact-ab`; the evaluation corpus and its digest are unchanged),
+  four templates, 3 seeds each, 12 instances per model per arm. Only the edited module has a test
+  in the workspace; the controller exercises every caller in a fresh interpreter.
+  - `I-SIGNATURE`: a required parameter added to a function called directly, through an alias,
+    through the module and through a package re-export under another name.
+  - `I-RETURN-SHAPE`: a dict return turned into a frozen dataclass, read by key in three modules
+    (alias, module attribute, `.get`).
+  - `I-KWARG`: a keyword-only parameter renamed; one caller passes it through `**options`, which
+    a type checker cannot see, one through a module alias.
+  - `I-CONTROL`: an edit that breaks no caller, next to an importer with an unrelated
+    pre-existing type error. The check must stay silent.
+- Both arms: `--edit-directive` (the patch rule, byte-identical in both arms),
+  `--git-init-workspace`, `--test-env`, effort `medium`. Arm `off` is `--edit-surface patch`
+  (toolsets `file,terminal`); arm `on` is `--edit-surface impact` (toolsets
+  `file,terminal,omh-lsp`, profile settings `impact_check: true` and `lsp_tools: true`, so the
+  four `omh-lsp` tools are listed). Two profiles that differ only in those settings, the toolset
+  and the OMH home; `agent.max_turns: 120` and `tools.tool_search` off in both.
+- Subscription routes only. Claude through the local CPA proxy (`claude-proxy`), GPT through
+  Hermes `openai-codex`. Weak: `claude-haiku-4-5-20251001`, `claude-haiku-5-5`, `gpt-5.6-luna`
+  (the smallest model the Codex subscription served on 2026-10-30). Strong: `claude-sonnet-5-5`,
+  `claude-opus-5-5`, `gpt-6.1-sol` (the Codex flagship).
+
+The merge gate, fixed here before the first live run:
+
+- Weak models, on at least off + 3 (summed over the three weak models).
+- Strong models, on at least off - 1 (summed over the three strong models).
+- No on-arm run above 3x its pair's median tokens (the off arm's median for the same model and
+  template).
+- The note fired in at least half of the on-arm sessions with a broken caller. Over the three
+  edit templates, a session counts as having a broken caller when the note fired or its final
+  tree still fails the controller's check; a note "fired" when the profile's log has an
+  `impact_check round_end` line for the session with `new_errors` above 0.
+- 0 notes on `I-CONTROL`.
+- Added round-end latency, p95 of the check's own time at `pre_verify` (the `ms` of the same log
+  line), at most 20 s.
+
+A failed clause means the feature does not merge; the result is recorded here as the DAP run was.
+
+Amendment, fixed before run 2 (below) and after run 1. When `pre_verify` continues a turn, Hermes
+keeps the answer the model already gave only as an interim message
+(`agent/turn_stop_gates.py`), and whatever the model says after the note becomes the turn's final
+answer: the `--oneshot` or API result, or a delegated child's return. Run 1's note ended on a
+request to re-check, and models answered it with a report about the fix. The note now ends by
+asking for the task's final answer again, in full, and the gate gains a seventh clause:
+
+- Final answer preserved after a note: over the on-arm sessions of the three edit templates where
+  the note fired, the number whose last assistant message (read from the session database)
+  contains the task's requested answer, a JSON object with `changed_paths`, is at least
+  round(p x n) - 2. Here n is the number of those sessions and p is the share of off-arm sessions of
+  the same three templates whose last assistant message contains it.
+
+The other six clauses are unchanged.
+
+Amendment 2, fixed before run 3 and after run 2. A second review changed the measured path:
+- Each check's time is now a share of the profile's `plugins.hook_callback_timeout`. That is 8 s
+  and 10 s at the default 30 s, and the check is skipped when its share would be under 2 s.
+- The importer scan stops at that deadline.
+- A session with no language server is skipped before the scan.
+- Module names that shadow the standard library are not matched, and names count from the
+  checkout when the session starts in a sub-directory.
+- Hermes tells hooks nothing about a session's toolsets, so the note now names `lsp_diagnostics`
+  only as optional ("if your tools include it").
+- The note's header says that another writer's changes would show up too.
+The seven clauses are unchanged. Run 3, on the plugin with these changes, is the reported result;
+runs 1 and 2 stay recorded below.
+
+Run 3, plugin `de9ddab71` (reported). Every clause passes, so the check ships, off by default.
+
+| Model | off | on | off tokens (median) | on tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 8 / 12 | 12 / 12 | 291,260 | 353,263 |
+| `claude-haiku-5-5` | 11 / 12 | 12 / 12 | 219,708 | 225,544 |
+| `gpt-5.6-luna` | 9 / 12 | 11 / 12 | 145,068 | 175,135 |
+| `claude-sonnet-5-5` | 12 / 12 | 12 / 12 | 178,670 | 180,781 |
+| `claude-opus-5-5` | 12 / 12 | 12 / 12 | 214,839 | 220,788 |
+| `gpt-6.1-sol` | 12 / 12 | 12 / 12 | 135,548 | 149,799 |
+| **Total** | **64 / 72** | **71 / 72** | 14.6M | 16.6M |
+
+Per template, off vs on: `I-SIGNATURE` 11 vs 18, `I-RETURN-SHAPE` 18 vs 18, `I-KWARG` 17 vs 17,
+`I-CONTROL` 18 vs 18.
+
+- Weak models, on at least off + 3: 35 vs 28, pass.
+- Strong models, on at least off - 1: 36 vs 36, pass.
+- No on-arm run above 3x its pair's median tokens: none; the highest is 2.22x (haiku 4.5
+  `I-SIGNATURE`).
+- The note fired in 10 of the 11 on-arm sessions with a broken caller, pass (9 `I-SIGNATURE`,
+  1 `I-KWARG`); every session that got a note ended passing. The one broken session without a
+  note is gpt-5.6-luna `I-KWARG`.
+- Notes on `I-CONTROL`: 0, pass.
+- Round-end latency p95 139 ms (max 354 ms) over the 65 sessions that reached a round-end check,
+  pass.
+- Final answer preserved after a note: 6 of 10, against round(28 / 54 x 10) - 2 = 3, pass.
+- First-edit baseline: median 0.4 s, p90 2.9 s, max 9.4 s. In 7 of 72 sessions the server gave no
+  verdict for any importer within the 8 s share, so the baseline recorded nothing and the round
+  end had nothing to check (those 7 sessions all passed). The full test suite was running on the
+  same machine during this run; run 2, without it, had a baseline max of 0.9 s. The overrun past 8 s
+  is the bridge's 2 s loop margin, well inside the 30 s host timeout.
+- Tools in the on arm: `lsp_diagnostics` 20 calls, no other `lsp_*` tool. The off arm made none.
+- omh `de9ddab71`, Hermes Agent v0.22.5 (`bf0203a794`), fresh on/off profile pair per model,
+  2026-10-30 10:58-11:24 KST (run 3 pre-registered in `de9ddab71`, committed 10:58:16; first
+  run started 10:58:24). 144 of 144 records completed, none failed, timed out or was retried.
+
+What the gain covers. All of it is on `I-SIGNATURE`. There were 23 off-arm `I-SIGNATURE` failures
+across the three runs (8, 8 and 7), and every one of them missed the caller that reaches the
+function through a renamed package re-export (`cli.py`: `from benchapp import fee`). Four of them
+also missed the alias caller: 1 in run 2, and 3 in run 3, all haiku 4.5. None missed the direct or
+module-attribute caller. The importer scan's unit test, written in the same change, covers the
+same shape. So the measured outcome gain is for callers reached through a renamed re-export, and
+in a few weak-model sessions for an aliased import. The other templates did not separate the arms.
+
+Run 2, plugin `41e91a195` (superseded by run 3). Every clause passed:
+
+| Model | off | on | off tokens (median) | on tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 7 / 12 | 10 / 12 | 311,080 | 362,475 |
+| `claude-haiku-5-5` | 10 / 12 | 12 / 12 | 221,306 | 225,507 |
+| `gpt-5.6-luna` | 9 / 12 | 12 / 12 | 145,850 | 182,656 |
+| `claude-sonnet-5-5` | 12 / 12 | 12 / 12 | 174,693 | 182,988 |
+| `claude-opus-5-5` | 12 / 12 | 12 / 12 | 215,642 | 220,399 |
+| `gpt-6.1-sol` | 12 / 12 | 12 / 12 | 148,557 | 173,769 |
+| **Total** | **62 / 72** | **70 / 72** | 14.2M | 16.8M |
+
+Per template, off vs on: `I-SIGNATURE` 10 vs 18, `I-RETURN-SHAPE` 18 vs 18, `I-KWARG` 16 vs 16,
+`I-CONTROL` 18 vs 18.
+
+- Weak models, on at least off + 3: 34 vs 26, pass.
+- Strong models, on at least off - 1: 36 vs 36, pass.
+- No on-arm run above 3x its pair's median tokens: none; the highest is 2.20x (gpt-6.1-sol
+  `I-KWARG`).
+- The note fired in 12 of the 14 on-arm sessions with a broken caller, pass (9 `I-SIGNATURE`,
+  1 `I-RETURN-SHAPE`, 2 `I-KWARG`); every session that got a note ended passing. The two broken
+  sessions without one are haiku 4.5 `I-KWARG`, the `**options` caller.
+- Notes on `I-CONTROL`: 0, pass.
+- Round-end latency p95 48 ms (max 71 ms) over 72 sessions, pass; the first-edit baseline added
+  p95 0.5 s (max 0.9 s).
+- Final answer preserved after a note: 8 of 12, against round(31 / 54 x 12) - 2 = 5, pass. In run 1,
+  whose note ended on "re-check", it was 1 of 10.
+- Tools in the on arm: `lsp_diagnostics` 20 calls, `lsp_references` 4 (haiku 5.5),
+  `lsp_definition` and `lsp_rename` none. The off arm made no `lsp_*` calls.
+- omh `41e91a195`, Hermes Agent v0.22.5 (`bf0203a794`), fresh on/off profile pair per model,
+  2026-10-30 02:59-03:17 KST; 144 of 144 records completed, none failed, timed out or was retried.
+
+Run 1, plugin as of `c5e4fc02c` (note without the final-answer request; superseded by run 2). Six
+clauses passed; the seventh did not exist yet:
+
+| Model | off | on | off tokens (median) | on tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 8 / 12 | 11 / 12 | 296,656 | 384,301 |
+| `claude-haiku-5-5` | 11 / 12 | 12 / 12 | 223,303 | 225,588 |
+| `gpt-5.6-luna` | 9 / 12 | 12 / 12 | 144,621 | 159,372 |
+| `claude-sonnet-5-5` | 11 / 12 | 12 / 12 | 166,064 | 179,680 |
+| `claude-opus-5-5` | 12 / 12 | 12 / 12 | 216,821 | 221,162 |
+| `gpt-6.1-sol` | 12 / 12 | 12 / 12 | 156,092 | 174,620 |
+| **Total** | **63 / 72** | **71 / 72** | 14.2M | 16.2M |
+
+Per template, off vs on: `I-SIGNATURE` 10 vs 18, `I-RETURN-SHAPE` 18 vs 18, `I-KWARG` 17 vs 17,
+`I-CONTROL` 18 vs 18. All of the gain is on the signature change (haiku 4.5 and gpt-5.6-luna
+0 / 3 each in the off arm).
+
+- Weak models, on at least off + 3: 35 vs 28, pass.
+- Strong models, on at least off - 1: 36 vs 35, pass.
+- No on-arm run above 3x its pair's median tokens: none; the highest is 1.74x (gpt-6.1-sol
+  `I-KWARG`).
+- The note fired in 10 of the 11 on-arm sessions with a broken caller, pass. Seven
+  `I-SIGNATURE` notes and three `I-KWARG` notes; every session that got a note ended passing.
+  The one broken session without a note is haiku 4.5 `I-KWARG`, whose remaining break was the
+  caller passing the keyword through `**options`, which the type checker cannot see.
+- Notes on `I-CONTROL`: 0, pass. The importer with the pre-existing type error was not reported.
+- Round-end latency: p95 1.4 s, max 1.9 s over 72 sessions, pass. The baseline at the first
+  edit (`pre_tool_call`) added p95 1.6 s, max 4.0 s.
+
+What it shows, and what it does not:
+
+- The on arm lists the four `omh-lsp` tools. Over the scored sessions, `lsp_diagnostics` was called
+  17 times, `lsp_references` 3 times (haiku 5.5), and
+  `lsp_definition` / `lsp_rename` never. No off-arm session called an `lsp_*` tool.
+- A first full run was stopped at 73 of 144 records and is not reported: its probe ran each
+  workspace test file with a bare `runpy`, so a correct gpt-6.1-sol `I-RETURN-SHAPE` edit whose new
+  test imported pytest was scored as a fail in both arms. impact-ab now checks the definition and
+  every caller and leaves the model's own tests to the model; the matrix was rerun in full. The
+  gate was not changed.
+- The run used omh `feature/lsp-impact-check` `29940f8a5` (plugin code as of `c5e4fc02c`) on
+  origin/main `5cc1ed311`, Hermes Agent v0.22.5 (`bf0203a794`), one on/off profile pair per model,
+  6 models in parallel, 2026-10-30 02:02-02:26 KST. 144 of 144 records completed; none failed,
+  timed out or was retried.
+- After run 1, an independent review changed the plugin (`985bec3c3`). The baseline now fits
+  the host hook timeout, state does not carry across turns, bare module names no longer match the
+  standard library, and deleted modules are not baselined. Under the new rules the impact-ab
+  importers resolve the same: 6 per `I-SIGNATURE` instance and 4 per `I-CONTROL` instance. A live
+  re-smoke on that commit (haiku 4.5, on arm, 6 runs) passed 3 / 3 `I-SIGNATURE`, with a note in
+  each, and 3 / 3 `I-CONTROL` with no note. The table above is from the plugin as of `c5e4fc02c`.
+- Python and pyright only. The type checker cannot follow `**options`, `getattr` or string
+  dispatch, so those callers still break silently. A deleted or moved module is not checked.
+  n = 12 per model per arm.
+
+### 2026-10-31 export check: a rename's stale `__all__` entry, base vs new (`pre_verify`), gate failed, merged by owner decision
+
+One question: when a turn leaves a module exporting a name it no longer defines, does naming that
+line at the turn's first stop make the model fix it? In the OPT-A round-end run (2026-10-30, the
+same profile configuration as below), `L-RENAME-ALIAS` passed 8 of 12 in both arms, and every miss
+had one cause: GPT models renamed `compute_quota`, updated `from .quota import ...` in `api.py`,
+and left `__all__ = ["compute_quota"]`. The round-end consistency check fired in each of those
+sessions and the model still answered with the sentinel. pyright does not report a stale `__all__`
+string by default, so `impact_check` has nothing to say either. The H2H runs (Claude only, five
+arms, omp included) passed every `L-RENAME-ALIAS` and `L-RENAME-SHADOW` run.
+
+How the check works (always on, `src/plugin_bundle/omh/export_check.py`): at the turn's first stop
+(`pre_verify`, `attempt == 0`), it parses each `.py` file the turn edited with `ast` and names, as
+`path:line` rows, an `__all__` entry the module neither defines nor imports (nor ships as a
+submodule of the package), and a top-level `from module import name` whose module is a workspace
+file that no longer binds the name. Only top-level `from` statements are checked. It also reads the
+workspace modules those imports resolve to, runs no language server, and says nothing otherwise. A
+module whose names it cannot know is skipped (a star import, a module-level `__getattr__`,
+`globals()` / `exec`, `setattr` on a module it imports, `sys.modules[__name__]`, module-level
+`vars()` / `locals()`, `enum.global_enum` / `Enum._convert_`, a package editing its own
+`__path__`, an `__all__` that is not a literal list), as is a file that does not parse. Its note
+joins the same `pre_verify` message as the others, in the order served-surface gate, impact note,
+export note, consistency check, plan directive, one closing, so it never adds a round when another
+nudge already continues the turn. Swept offline over about 10,800 real files (this repo's `src/`
+and `tests/`, Hermes Agent's `agent/`, `hermes_cli/`, `tools/` and `gateway/`, CPython 3.14's
+standard library, a 4,576-file site-packages), it named 3 entries, all genuinely dangling:
+`snowballstemmer` `language`, `pydantic_core` `UNSET`, pip's vendored `cachecontrol` `__version__`.
+
+The setup:
+
+- Templates: `L-RENAME-ALIAS`, `L-RENAME-SHADOW`, `E-RENAME`, `I-CONTROL`, and a new control,
+  `L-RENAME-EXPORTS` (split `lsp-ab`): rename `fetch_rows` to `load_rows` in a package whose
+  `__all__` also lists a submodule it never imports, a name bound in both arms of a `try`, and a
+  `+=` entry defined after it. The prompt names the package's `__all__`, so a correct edit leaves
+  no dangling export. Seeds 104729, 130363, 155921.
+- Panel: `claude-haiku-4-5-20251001` and `claude-sonnet-5-5` through the local CPA proxy
+  (`claude-proxy`), `gpt-6-luna` and `gpt-6.1-sol` through Hermes `openai-codex`, effort `medium`.
+  5 templates x 3 seeds x 4 models = 60 runs per arm.
+- Arms: `base` is the OMH plugin bundle at origin/main `b906cb425`; `new` is this branch. Both use
+  the H2H "omt" profile: Hermes's default `tool_search`, `impact_check: true`, `lsp_tools: true`,
+  pyright pinned by absolute command, `agent.max_turns: 120`, `agent.run_budget_seconds: 600`,
+  `--edit-surface impact` (toolsets `file,terminal,omh-lsp`), no edit directive,
+  `--git-init-workspace`, `--test-env`. The arms run back to back per instance on identical fresh
+  workspaces, order rotating per instance. A run classified `rate_limited` / `provider_error` is
+  retried on the same route; every other outcome is final.
+- Off-arm ceiling, checked before this registration: base passed `L-RENAME-ALIAS` 8 of 12 in the
+  OPT-A run, so +2 is reachable.
+
+The merge gate, fixed here before the first live run. Counts are pooled over the four models and
+recomputed from the raw records and the profiles' session databases, not from driver logs:
+
+1. Must improve: `L-RENAME-ALIAS` new passes at least base passes + 2 (of 12 each).
+2. Must hold: total new passes at least base passes - 1 (of 60 each).
+3. Must hold: 0 export notes in the new arm's `I-CONTROL` and `L-RENAME-EXPORTS` sessions (24). A
+   note fired when the new profile's agent log has an `export_check round_end` line for the
+   session with `rows` above 0. (Amended before any counted run, after a one-instance smoke: Hermes
+   does not store a `pre_verify` message in the session database, so the first wording could not
+   be counted. The check now logs that line.)
+4. Must hold: new median tokens at most 1.05 x base median tokens, over all 60 runs per arm.
+
+If base passes 11 or 12 of 12 `L-RENAME-ALIAS` in this run, clause 1 cannot be met and the gate is
+recorded as failed on the ceiling, not redefined. Recorded beside the gate, not gated: notes per
+template, whether each note named an entry that was stale in that session, median wall time and
+model calls per arm.
+
+A failed clause means the change does not merge; the result is recorded here either way.
+
+Result: **gate failed on clause 4 (tokens)**. Clauses 1-3 passed. Recomputed from the raw records,
+the profiles' session databases and their agent logs:
+
+| Clause | base | new | Verdict |
+| --- | ---: | ---: | --- |
+| 1. `L-RENAME-ALIAS` new >= base + 2 | 8 / 12 | 12 / 12 | pass |
+| 2. Total new >= base - 1 | 56 / 60 | 60 / 60 | pass |
+| 3. Notes on the 24 control sessions | - | 0 | pass |
+| 4. Median tokens new <= 1.05x base | 89,433 | 98,080 (1.097x) | **fail** |
+
+By model, pass · median tokens:
+
+| Model | base | new |
+| --- | --- | --- |
+| `claude-haiku-4-5-20251001` | 15/15 · 131k | 15/15 · 127k |
+| `claude-sonnet-5-5` | 15/15 · 32k | 15/15 · 43k |
+| `gpt-6-luna` | 14/15 · 112k | 15/15 · 120k |
+| `gpt-6.1-sol` | 12/15 · 88k | 15/15 · 91k |
+
+What it shows, and what it does not:
+
+- The note fired in 3 of 60 new-arm sessions: the three `gpt-6.1-sol` `L-RENAME-ALIAS` runs. Each
+  named `src/benchapp/api.py:3`, each base twin left `__all__ = ["compute_quota"]` and failed, and
+  each new run fixed the line and passed. Those three sessions cost 1.24-1.41x their base twin's
+  tokens (2-3 more model calls). Because the round-end consistency check already continued every
+  GPT session, the note never added a round of its own.
+- The other gained pass (`gpt-6-luna` `L-RENAME-ALIAS`, 2/3 to 3/3) had no note; it is run-to-run
+  variation, so the attributable gain is +3, not +4.
+- In the 57 sessions without a note the export check returned an empty string, so the model's input
+  was byte-identical across the arms. Those sessions still differ by 1.058x in median tokens, and
+  the paired difference is not significant (new heavier in 36 of 60 pairs, one-sided sign test
+  p = 0.08). Clause 4 failed on variation the change cannot have caused, but the clause was fixed
+  before the run and is not redefined here.
+- The check ran on every new-arm turn that edited a `.py` file (48 of 48): median 7 ms, max 101 ms.
+- The run used omh `fix/rename-leaves-dangling-export` `71f0dd719` against origin/main
+  `b906cb425`, one base/new profile pair per model, 4 models in parallel, 2026-10-31 02:25-02:58
+  KST. 120 of 120 records completed; none failed, timed out or was retried. A one-instance smoke
+  (`gpt-6.1-sol`, `L-RENAME-ALIAS` seed 104729, on `fd0b1895f`) ran before the counted run and is
+  not counted.
+- n = 3 per model per template. Only `__all__` and top-level `from ... import` names are checked;
+  a stale name in a docstring, a string-dispatch table or a non-Python file is not.
+
+Owner decision (2026-10-31): merge despite the failed clause. Under the pre-registered rule, a
+failed clause meant reject; the owner overrode it. The reasons:
+
+- The note fired in 3 of 60 new-arm sessions. In the other 57, the model's input was byte-identical
+  across the arms, and their median tokens still differ by 1.058x.
+- The paired difference over all 60 is not significant: new is heavier in 36 of 60 pairs, one-sided
+  sign test p = 0.08.
+- So the token gap is run-to-run variation the change cannot have caused.
+
+The results above are left as recorded. The gain attributable to the check is +3 passes (the three
+`gpt-6.1-sol` sessions the note fixed), not the +4 the table shows.
+
+After the run, merged with the round-end check trigger above (#2435), two things changed that the
+run did not measure:
+
+- An export note now counts as a nudge beside which the consistency check rides along, so the note
+  continues the turn even when the trigger finds no copy or reference.
+- A `path:line` the impact note already names is left out of the export note.
+
+In the measured run the consistency check fired at every first stop, so the three note sessions
+behave the same either way.
+
+Review fixes, after the merge (2026-10-31). An independent review swept the Hermes tree,
+including `plugins/`, `tui_gateway/` and its `venv/` virtualenv: 9,597 files, 6 rows. That count is
+every `.py` file a recursive `**/*.py` glob finds (the glob skips hidden directories, so `.venv/`
+was not in it), less paths containing `/test` or `site-packages/_`. Three of those rows, in 2
+files, were false: they named correct code.
+
+- `plugins/platforms/telegram/update_admission.py:19` `from telegram import Update` was resolved to
+  the plugin's own folder.
+- `tui_gateway/entry.py:23` `dispatch` and `resolve_skin` were flagged because
+  `tui_gateway/server.py` ends with `register(sys.modules[__name__])`, which adds those names at
+  runtime.
+
+The fixes:
+
+- An absolute import now resolves only from the project root (the nearest ancestor holding a
+  project marker) or a `src/` directly under it. An installed package's `site-packages` is its own
+  root.
+- A module written into from outside is skipped: `sys.modules[__name__]`, module-level `vars()` /
+  `locals()`, `setattr` on a module, `Enum._convert_`.
+- `setattr` on an object and attribute calls such as `env.globals` no longer hide a whole module.
+- Namespace subpackages and `.pyc` modules count as submodules, and a package directory wins over
+  a same-named `.py`, as in Python's import system.
+- Each name of a parenthesized import is reported on its own line.
+- Paths are relative to the same workspace root the impact note uses.
+- The check stops at a deadline, 2 s at the default hook timeout.
+
+Re-run after the fixes, no false rows remain in the three sweeps:
+
+| Sweep | Files | Rows before | Rows after |
+| --- | ---: | ---: | ---: |
+| Whole Hermes tree, virtualenv included | 9,597 | 6 (3 false) | 6 (0 false) |
+| CPython 3.14 standard library | 1,059 | 1 | 1 |
+| This repo's `src/` | 1,216 | 0 | 0 |
+
+- The 6 rows left in the Hermes tree are all real: the three dangling `__all__` entries above, and
+  `tqdm/_utils.py`, which imports 3 names `tqdm/utils.py` no longer has. That last import fails when
+  run. The old `setattr` rule had hidden it.
+- One row in the review's probe set is now named: `from mylib import y` where `mylib` has no `y`.
+  That import is genuinely broken.
+
+Second review follow-up (2026-10-31, `omh/omp-round-review-followups`):
+
+- `from conftest import x` in `tests/test_a.py` was resolved to the root's `conftest.py`. When the
+  root rule finds a module and the importer's own directory is not a package, a module of the same
+  name beside the importer is a second candidate: a script's `sys.path[0]` and pytest's `prepend`
+  mode read it, a PEP 420 namespace-package module reads the root's (`src/ns/mod.py`'s
+  `from config import KEY` reads `src/config.py`). A name is reported only when both lack it. On
+  its own, a sibling is still not read: the review's probe pins `scripts/setuptools.py` beside
+  `scripts/build.py` as silent.
+- A root module named like an installed package (`requests.py`) is still resolved. The hook runs
+  in Hermes's interpreter, not the project's, so a skip keyed on site-packages would hide a row on
+  one machine and not another. Where the root is on `sys.path` (a root `conftest.py` under pytest,
+  `python -m` from the root), the root module is what the import reads. The sweeps below found 0
+  such resolutions outside a site-packages directory.
+- The log line now says `deadline=1` when the rows are a partial result, and a path on another
+  Windows drive is shown whole instead of dropping the note.
+
+The sweeps were re-run with every `.py` file kept and the deadline lifted, on origin/main and on
+the branch:
+
+| Sweep | Files | Rows on main | Rows on branch | False rows |
+| --- | ---: | ---: | ---: | ---: |
+| Hermes tree, every non-hidden `.py` (`venv/` included, tests included) | 17,015 | 6 | 6 | 0 |
+| Hermes `.venv/` and other hidden directories | 4,582 | 3 | 3 | 0 |
+| CPython 3.14.7 standard library | 1,059 | 1 | 1 | 0 |
+| This repo's `src/`, `tests/` and `benchmarks/` | 2,370 | 0 | 0 | 0 |
+
+The 6 Hermes rows are the ones above. The 3 `.venv/` rows are `pydantic_core` `UNSET`,
+`snowballstemmer` `language`, and protobuf's `message_benchmark.py`, which imports a
+`unittest_pb2` the installed package does not ship.
+
+### 2026-10-30 big files: read outline off vs on (`bigfile-ab`), gate failed
+
+Status: the gate failed and the feature did not merge (PR #2408, draft, branch `feature/read-outline`). The outline code, the `bigfile-ab` split, `lib/bigfile.py` and `tests/test_read_outline.py` exist only on that branch, not on main; the commands and file names below refer to the branch, and this section records the measurement only.
+
+One question, from oh-my-pi's read summary: when a `read_file` result is truncated, does
+appending an outline of the whole file (classes, functions and methods with their line ranges)
+let the model jump to the right offset instead of paging? OMH's version (on the branch) appends and never cuts:
+`src/plugin_bundle/omh/read_outline.py`, Python only (stdlib `ast`), once per file version per
+session, at most 60 lines, for files of at least 400 lines.
+
+The setup, fixed before the first live run:
+
+- Split `bigfile-ab` (branch only; `--split bigfile-ab`, `lib/bigfile.py`; the evaluation corpus and its
+  digest are unchanged). One generated module, `src/benchapp/tariffs.py`, of 4,750-5,030 lines
+  (past both of Hermes' read limits: 2,000 lines and 100,000 characters). Two templates, 3 seeds
+  each, 6 instances per model per arm:
+  - `B-DEEP-BUG`: a pricing helper defined past line 3,000 has an off-by-one threshold. The
+    task names the failing test and the symptom ("a shipment of exactly N pieces is quoted as if
+    it got no crate discount"), never the helper, the module path or the line. Graded on hidden
+    quotes from the correct module, so editing the test does not pass.
+  - `B-DEEP-RENAME`: rename a public function defined past line 3,000, used near the top of the
+    module, deep in it, in a second module and in the tests, next to a same-named method, a log
+    string and a comment that must stay. Graded by AST plus behaviour.
+- Both arms: no edit directive, `--git-init-workspace`, `--test-env`, effort `medium`, toolsets
+  `file,terminal`. Two profiles that differ only in `plugins.entries.omh.settings.read_outline`
+  (`true` / `false`) and the OMH home; `agent.max_turns: 120`; `tools.tool_search` off.
+  `OMH_READ_OUTLINE` is unset in the run environment.
+- Subscription routes only. Weak: `claude-haiku-4-5-20251001`, `claude-haiku-5-5` (Hermes
+  provider `claude-proxy`, the local CPA at `http://127.0.0.1:8317/v1`) and `gpt-5.6-luna`
+  (Hermes provider `openai-codex`). Strong: `claude-sonnet-5-5`, `claude-opus-5-5`
+  (`claude-proxy`) and `gpt-6.1-sol` (`openai-codex`). Both Codex ids answered a one-word probe
+  through the off profile on 2026-10-30; the subscription also serves `gpt-6-luna`, and the
+  older-generation small tier, `gpt-5.6-luna`, is the weak model. Condition `baseline` (no
+  family calibration), as in the sections below.
+- Hermes runs through `~/.hermes/hermes-agent/.venv/bin/python -m hermes_cli.main -p <profile>`,
+  never the `hermes` launcher. `--oneshot` is a client of the host gateway, which runs the turn
+  and loads each profile's plugins (reloaded for both profiles after they were configured), so
+  the harness timeout only detaches the client. After every run that did not complete, the
+  driver sends the gateway `session.interrupt` (the RPC behind the chat client's `/stop`) for
+  that run's sessions; a smoke check stopped a detached turn this way.
+
+The merge gate, written before the first live run:
+
+- Weak models, on at least off + 3 passes (of 18 per arm).
+- Strong models, on at least off - 1 passes (of 18 per arm).
+- The on arm's median tokens per run, over all its runs, at most the off arm's.
+- No on-arm run above 3x the median tokens of its model's off-arm runs on the same template.
+- The outline fired (a `read_file` result carried `omh_read_outline`) in at least half of the
+  on-arm sessions, counted from the on profile's session database; and in no off-arm session.
+- Small and untruncated reads byte-identical: `tests/test_read_outline.py` (branch)
+  (`test_small_and_untruncated_reads_are_byte_identical`).
+
+A run with no record, or one that timed out, is scored as a fail; its tokens come from the
+session database when the session can be found, and are reported as unobserved otherwise, never
+imputed. If the gate fails, the outline does not merge and the result is recorded here. It failed.
+
+The result: on this corpus the outline changes nothing measurable, and the weak-model clause
+fails, so the outline does **not** merge.
+
+| Model | off | on | off tokens (median) | on tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 6 / 6 | 5 / 6 | 579,517 | 591,108 |
+| `claude-haiku-5-5` | 6 / 6 | 6 / 6 | 291,562 | 293,271 |
+| `gpt-5.6-luna` | 6 / 6 | 6 / 6 | 226,699 | 208,058 |
+| `claude-sonnet-5-5` | 6 / 6 | 6 / 6 | 136,573 | 139,692 |
+| `claude-opus-5-5` | 6 / 6 | 6 / 6 | 189,040 | 190,275 |
+| `gpt-6.1-sol` | 6 / 6 | 6 / 6 | 265,919 | 269,421 |
+| **Total** | **36 / 36** | **35 / 36** | 239,844 | 228,715 |
+
+Token medians are per model over its 6 runs per arm; the total row is the median over all 36
+runs per arm. Session-database sums: 11.85M off, 10.91M on.
+
+The gate, clause by clause:
+
+- Weak models, on at least off + 3: **fail**, 17 vs 18. The off arm passed every weak run, so
+  no arm could have cleared + 3; the one on-arm fail is a `claude-haiku-4-5` rename that left a
+  reference behind (1.09M tokens).
+- Strong models, on at least off - 1: pass, 18 vs 18.
+- On-arm median tokens at most the off arm's: pass, 228,715 vs 239,844.
+- No on-arm run above 3x its model's off-arm median on the same template: pass, none.
+- Outline fired in at least half of the on-arm sessions: pass, 29 of 37 on-profile sessions
+  (every session that had a truncated `read_file` result; the other 8 never had one), and in 0
+  of 38 off-profile sessions.
+- Small and untruncated reads byte-identical: pass (`tests/test_read_outline.py`, branch).
+
+What it shows, and what it does not:
+
+- Every model, weak ones included, finds the deep helper by searching for names from the test
+  and the call site, then reads a window around the hit. `read_file` calls per session have the
+  same median in both arms (4). The outline arrives, and the models do not need it: the corpus
+  does not reproduce the paging loop of #1723, where the model never searched.
+- A fair test of the outline needs a task where search does not lead to the location (a symptom
+  with no searchable name) or a model that pages instead of searching. Neither is in this split.
+- Infrastructure: at 01:59:51 KST the shared host gateway received SIGTERM from its supervisor
+  (another session's action, not this run) and interrupted 15 turns. The 17 runs that ended in
+  that window (exit 130, then exit 1 within 3 s) were moved out of the records and run again on
+  the same routes; no completed record was removed. An earlier smoke, before the bench
+  profiles' plugins were reloaded in the gateway, had no outline and is not counted.
+- After the outage the bench profiles also set `agent.run_budget_seconds: 600`. No run in the
+  table timed out or needed a stop.
+- omh `feature/read-outline` `237321b92` on origin/main `5cc1ed311`; Hermes Agent checkout `bf0203a794` (with uncommitted gateway changes from another session).
+  n = 6 per model per arm, Python only.
+
+### 2026-10-30 shell edits: the built-in shell-edit rule, off vs on, gate failed
+
+Status: the gate failed and the feature did not merge (PR #2411, draft, branch `feature/shell-edit-rules`). The rule, the `shell-ab` split and the harness changes exist only on that branch, not on main; the commands and file names below refer to the branch, and this section records the measurement only.
+
+One question, from oh-my-pi's bash interceptor (shipped off there): when a model may use the
+terminal however it likes, does refusing in-place shell edits of source files (`sed -i`,
+`perl -i`, a `python -c` that rewrites a file, `>`/`>>`/`tee` onto an existing source file) and
+naming `patch`/`write_file` instead make it pass more tasks? The rule (on the branch) is
+`src/plugin_bundle/omh/shell_edit_rules.py`, run at `pre_tool_call` after the person's own
+`toolcall_rules`; it matches on `shlex`-parsed shell segments, never refuses reads, searches,
+tests, `git`, new files, non-source files or anything under a generated directory such as
+`build/`, and lets through any command it cannot parse.
+
+The setup, fixed before the first live run:
+
+- Pinned `E-RENAME` and `E-BUGFIX` (3 seeds each), **without**
+  `--edit-directive`, so the model is free to edit through the shell.
+- The negative template `S-GENERATED` in the separate split `shell-ab` (branch only; 3 seeds, the pinned
+  corpus and its digest are unchanged): every write it needs is a new file under `build/` made by
+  shell redirection (a generated `.py` module and a test log), plus `git apply --check` on a patch
+  that must not be applied, and a line read from a source file. It fails if any existing file
+  changes.
+- Both arms: `--git-init-workspace`, `--test-env`, effort `medium`, toolsets `file,terminal`.
+  Two profiles that differ only in `plugins.entries.omh.settings.shell_edit_rules` (true/false)
+  and OMH home, both loading the same plugin snapshot; `agent.max_turns: 120`,
+  `agent.run_budget_seconds: 600`. Arm order alternates per instance.
+- Subscription routes only. Weak: `claude-haiku-4-5-20251001`, `claude-haiku-5-5`
+  (`claude-proxy`), `gpt-6-luna` (`openai-codex`). Strong: `claude-sonnet-5-5`,
+  `claude-opus-5-5` (`claude-proxy`), `gpt-6.1-sol` (`openai-codex`).
+- A run classified `rate_limited` / `provider_error` is retried on the same route; every other
+  outcome, a timeout included, is final and scored as recorded.
+- Ceiling check before the result run: a smoke of the off arm on the weak models. If the off arm
+  passes every smoke run, the main split is too easy to show a gain, and harder rename templates
+  where a text replace misleads (`L-RENAME-ALIAS`, `L-RENAME-SHADOW` from `lsp-ab`) are added to
+  both arms; the choice is written here before the result run.
+- Ceiling smoke result (off arm, seed 104729, the three weak models): 9 / 9 passed, and 0
+  terminal calls edited source. Every edit went through `patch` / `write_file` without any
+  directive. So, as stated above, `L-RENAME-ALIAS` and `L-RENAME-SHADOW` (3 seeds each) join the
+  main split in both arms: 12 main instances per model per arm. The smoke runs are not counted.
+- Free data from earlier sessions (no directive, same panel, the 2026-10-30 read-outline split
+  on a 3,600-line file): only `claude-sonnet-5-5` and `claude-opus-5-5` edited source through
+  the shell (`sed -i ''` with line addresses, 3 of 6 sessions each, in both profiles); the weak
+  models and both GPT models made 0 such calls. That off arm passed 36 / 36, so those shell edits
+  did not fail. The weak-model clause may therefore have nothing to act on; it stays as written.
+
+The merge gate, written before the first live run. Counts are passes over the main split
+(everything except `S-GENERATED`) unless a clause says otherwise.
+
+1. Weak models: on at least off + 2.
+2. Strong models: on at least off - 1.
+3. Shell edits that ran in the on arm: at most 1 in total. Counted over every terminal call in
+   the on arm's session DBs that was not refused, by a broad text match independent of the
+   rule's parser (`sed`/`perl`/`ruby` with an in-place flag; `python` code that opens a file for
+   writing or calls `write_text`/`write_bytes`; `>`, `>>` or `tee` onto a path with a source
+   suffix), each hit checked by hand against the workspace's existing files.
+4. No on-arm session with more than 5 consecutive refusals (refusal tool results with no other
+   tool result between them).
+5. No on-arm run above 3x the median tokens of the same model's off-arm runs on the same
+   template.
+6. Final answer preserved: on-arm sessions whose last assistant message carries the task's
+   answer key (`changed_paths` for `E-*`, `generated_lines` for `S-GENERATED`) at least the
+   off arm's count minus 2, counted from the session DBs.
+7. Negative template: `S-GENERATED` passes, all models pooled, on at least off - 1.
+
+The result. On this panel the rule does not make any model pass more tasks, so the branch
+(`feature/shell-edit-rules`) does not merge and main has no such rule.
+
+| Model | off | on | off tokens (median) | on tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `claude-haiku-4-5-20251001` | 12 / 12 | 11 / 12 | 268,489 | 259,064 |
+| `claude-haiku-5-5` | 12 / 12 | 12 / 12 | 223,649 | 223,204 |
+| `gpt-6-luna` | 11 / 12 | 12 / 12 | 229,689 | 240,554 |
+| `claude-sonnet-5-5` | 12 / 12 | 12 / 12 | 134,980 | 207,348 |
+| `claude-opus-5-5` | 12 / 12 | 12 / 12 | 169,812 | 210,912 |
+| `gpt-6.1-sol` | 9 / 12 | 9 / 12 | 152,544 | 155,859 |
+| **Total** | **68 / 72** | **68 / 72** | 18.3M total | 19.3M total |
+
+Pass counts are the main split (`E-RENAME`, `E-BUGFIX`, `L-RENAME-ALIAS`, `L-RENAME-SHADOW`);
+token medians and totals are over every run of the model, `S-GENERATED` included. Per template,
+off vs on: `E-RENAME` 18 vs 18, `E-BUGFIX` 18 vs 17, `L-RENAME-ALIAS` 14 vs 15, `L-RENAME-SHADOW`
+18 vs 18, `S-GENERATED` 18 vs 17. 180 of 180 records, all `completed`, no retries, no timeouts.
+
+The gate, clause by clause:
+
+1. Weak, on at least off + 2: 35 vs 35, **fail**.
+2. Strong, on at least off - 1: 33 vs 33, pass.
+3. Shell edits that ran in the on arm, at most 1: 0, pass. The broad text match flagged 21
+   calls; by hand every one wrote a new file under `build/` or the answer JSON.
+4. At most 5 consecutive refusals: the longest streak was 1, pass. 21 refusals in 21 of 90
+   on-arm sessions.
+5. No on run above 3x its pair median: none, pass.
+6. Final answer preserved, on at least off - 2: 69 vs 61 sessions, pass.
+7. `S-GENERATED`, on at least off - 1: 17 vs 18, pass. The on-arm fail is a `claude-haiku-4-5`
+   run that copied the generator's output by hand without the last newline and reported 4 lines
+   for 5; no refusal in that session.
+
+What it shows:
+
+- Weak models and both GPT models do not edit source through the shell here. They use `patch` /
+  `write_file` without being told to, so the rule has nothing to refuse for them, and the
+  weak-model clause cannot move. The smoke and the earlier session DBs said the same before the
+  run.
+- `claude-sonnet-5-5` and `claude-opus-5-5` reach for `sed -i ''` on renames: in the on arm every
+  one of their `E-RENAME` and `L-RENAME-*` sessions was refused once (18 of 18) and then finished
+  with `patch`. Their shell edits in the off arm passed anyway, so the refusal bought nothing and
+  cost tokens: sonnet's renames went from about 133k-135k to 207k-249k median tokens, opus's
+  from 136k-206k to 207k-288k (+40% to +84%). Below the 3x clause, but a real cost for no gain.
+- Three of the 21 refusals were wrong: `gpt-6-luna` and `gpt-6.1-sol` ran `python` programs on
+  `S-GENERATED` that hashed every existing file and wrote only `build/` output and the answer.
+  The detector fell back to "the program writes something and names an existing source file" when
+  a write path was `root / 'build/...'` or `outputs[0]`. Fixed after the run: joins and indexed
+  lists are now read as paths, and the fallback only counts source literals the program hands to
+  its own helper functions (`def sub(p): open(p, 'w')`, which opus used and which is still
+  refused). Replaying all 482 terminal calls of this run against the measured detector
+  (`ebaf7c6ac`) and the fixed one changes 7 verdicts, all on `S-GENERATED` (3 on-arm refusals and
+  4 off-arm calls that would have been refused), and none on the main split; the fixed detector
+  refuses no call on `S-GENERATED`. The pass counts above are from the measured detector and are
+  not re-run.
+- Plugin snapshot `ebaf7c6ac` (the rule as measured); the bench ran from `a9d7f848c`, which adds
+  only this README's smoke record and docs. Hermes Agent v0.22.5. n = 12 main instances plus 3
+  negative instances per model per arm.
+
+### 2026-10-30 search hit context: lines around each `search_files` hit, base vs on (`search-ab`), gate failed
+
+Status: the gate failed (clauses 3, 5, 6 and 7) and the feature did not merge (PR #2437, branch `feature/search-hit-context`). The pass (`src/plugin_bundle/omh/search_hit_context.py`), the `search-ab` split, `W-WIDE-RENAME` and the `shapes.py` scorer exist only on that branch and PR, not on main; the names below refer to the branch, and this section records the measurement only. Pre-registered below before the first counted run, then the result.
+
+One question, from oh-my-pi's `grep` (one line before and three after every hit, by default): when
+a small `search_files` result already shows the lines around each hit, does the model go from the
+search to its first edit in fewer calls, and finish sooner and cheaper, without losing passes?
+
+Why: in the 2026-10-30 head-to-head (`.omc/research/omp-borrow-2026-10-30/H2H/`), Sonnet 5.5's
+median run was 4 model calls for omp and 6 for OMH, and 1 call before the first edit for omp
+against 2 for every Hermes arm. Hermes's `search_files` has a `context` argument (default 0); in
+the h2h Hermes transcripts the models passed it in 3 of about 245 searches made before a first
+edit, all on Haiku. The usual next call was a `read_file` of the files the search named: on Haiku
+in 30 of 33 product-default (`omt`) runs, on Sonnet in 11 of 33 (the other Sonnet runs edited from
+the search rows directly, mostly with `sed`). On Haiku omp's own pattern inverted: it read files
+one range at a time and made more calls than plain Hermes, so this is not expected to help every
+model.
+
+The change (`src/plugin_bundle/omh/search_hit_context.py`, first pass of the composed
+`transform_tool_result` seam): a `search_files` content search whose call asked for no context,
+returned at most 20 hits in at most 8 files and was not truncated, gets the line before and the
+three lines after each hit, re-read from disk and redacted by Hermes's own redactor. Every hit row
+is checked against the line on disk first; one mismatch leaves the result alone. The added rows are
+capped at 6,000 characters, and a result over the cap is left unchanged, never partly enriched. A
+broader result passes through byte for byte. It does not inject `context` into the call: Hermes
+counts context lines against `limit`, so a search for every caller would show fewer callers. No
+read is recorded in Hermes's read tracker, so dedup stubs, staleness and the whole-file baseline
+`write_file` needs are unchanged. The 2026-10-28 anchor half of omp's design (hash-tagged lines in
+search output, edits by anchor) was measured negative and is not part of this.
+
+The setup, fixed before the first counted run:
+
+- Arms (one Hermes profile each per model, otherwise identical): `base` = the OMH plugin bundle
+  at origin/main `531f7034f`; `on` = this branch's bundle. Both in the product-default shape the
+  h2h called `omt`: Hermes's default `tools.tool_search` (key absent), `impact_check: true`,
+  `lsp_tools: true`, `--edit-surface impact` (toolsets `file,terminal,omh-lsp`), round-end check on
+  through the coding posture, pinned pyright command, `agent.max_turns: 120`,
+  `agent.run_budget_seconds: 600`. Condition `baseline`, no edit directive, `--git-init-workspace`,
+  `--test-env`, effort `medium`.
+- Panel, subscription routes only: `claude-haiku-4-5-20251001` (weak) and `claude-sonnet-5-5`
+  (strong) through CPA (`claude-proxy`); `gpt-6-luna` (weak) and `gpt-6.1-sol` (strong) through
+  Hermes `openai-codex`.
+- Positive set: the h2h's 11 templates (`I-SIGNATURE`, `I-RETURN-SHAPE`, `I-KWARG`,
+  `I-CONTROL`, `C-DUPLICATE`, `C-SCOPE-TRAP`, `C-DECOY`, `E-RENAME`, `E-BUGFIX`,
+  `L-RENAME-ALIAS`, `L-RENAME-SHADOW`) x seeds 104729, 130363, 155921: 33 instances per model per
+  arm, 132 per arm.
+- Control: new split `search-ab` (branch only; `--split search-ab`; the evaluation corpus and its digest are
+  unchanged), template `W-WIDE-RENAME`, 3 seeds, 12 instances per arm: rename a constant used
+  three times in each of 12-14 modules and in a test. Its natural search returns 40-odd hits in
+  14-16 files, past the pass's bound, so the two arms must behave alike there.
+- Per instance both arms run back to back on identical fresh workspaces; the order alternates per
+  instance. Retry rule as in the h2h: `rate_limited` / `provider_error` / `model_unavailable` /
+  `authentication_failed`, or a client the gateway refused within seconds, is retried on the same
+  route after 60/180/420/900 s; every other outcome is final.
+
+Metrics, recomputed from the raw run records and the profiles' `state.db` snapshots, not from the
+driver log:
+
+- pass: controller `grade.pass`. tokens: the record's `observation.tokens` (Hermes usage
+  `total_tokens`, cache reads included). wall: the record's `wall_seconds`.
+- calls before the first edit: the number of assistant messages before the first one that edits:
+  a `patch` or `write_file` call on a path other than `.omh-benchmark-answer.json`, or a
+  `terminal` call whose command matches the mutation pattern in
+  `.omc/research/omp-borrow-2026-10-30/OPT/search-hit-context/shapes.py` (a local research file, not in the repo) (`sed -i`, `perl -i`, `git apply`, `patch -p`, a `>` or `>>`
+  redirect into a file other than `/dev/*` and the answer file, `tee`, `write_text(`, `open(...,
+  'w')`). Runs with no edit are left out of this median and counted.
+- enriched results: `search_files` tool rows in `state.db` whose `matches_format` is the pass's
+  format string, with the characters the pass added.
+
+The gate, over the 132 positive pairs pooled unless stated. A clause that fails fails the gate:
+
+Must hold:
+1. pass: `on` >= `base` - 1.
+2. weak pass (Haiku 4.5 + Luna, 66 pairs): `on` >= `base` - 1.
+3. no `on` run above 3x the tokens of its `base` pair (same instance).
+4. total tokens: `on` <= 1.05x `base`.
+
+Must improve:
+5. median calls before the first edit: `on` <= `base` - 0.5.
+6. median wall seconds: `on` <= 0.95x `base`.
+7. median tokens: `on` <= 0.97x `base`.
+
+Control (`W-WIDE-RENAME`, 12 pairs):
+8. pass `on` >= `base` - 1, and median tokens `on` <= 1.10x `base`.
+9. the bound: no `search_files` result with more than 20 hits or more than 8 files is enriched in
+   any `on` run (control or positive), and no enriched result adds more than 6,000 characters.
+
+Ceiling note: in the h2h the `omt` arm passed 65 of 66 Claude runs, so passes are near the ceiling
+on this set; they are a must-hold clause, not an improvement claim. Per-model medians are reported
+beside the pooled ones but do not enter the gate.
+
+#### Result: gate failed (4 of 9 clauses)
+
+All 288 counted runs completed on the first attempt (no retry, no timeout), 21:19-22:38 KST, four
+lanes in parallel. The numbers below were recomputed by `shapes.py` from the raw records and the
+profiles' `state.db` snapshots, and cross-checked from the records alone (pass, tokens, wall).
+
+| Clause | base | on | Verdict |
+| --- | --- | --- | --- |
+| 1. pass >= base - 1 | 127/132 | 129/132 | holds |
+| 2. weak pass >= base - 1 | 64/66 | 66/66 | holds |
+| 3. no run above 3x its pair's tokens | | worst 3.18x (Sonnet `L-RENAME-SHADOW-155921`, 31.7k vs 100.8k) | **fails** |
+| 4. total tokens <= 1.05x | 14,996,203 | 15,286,500 (1.019x) | holds |
+| 5. median calls before first edit <= base - 0.5 | 2 | 2 | **fails** |
+| 6. median wall <= 0.95x | 54.01 s | 52.79 s (0.977x) | **fails** |
+| 7. median tokens <= 0.97x | 100,918 | 105,346 (1.044x) | **fails** |
+| 8. control: pass >= base - 1, median tokens <= 1.10x | 12/12, 114,132 | 11/12, 107,100 (0.94x) | holds |
+| 9. bound: nothing over 20 hits / 8 files enriched, no result adds > 6,000 characters | | 212 of 428 `on` searches enriched, 0 over the bound, largest addition 1,534 characters; no `base` result enriched | holds |
+
+Per model (positive set; pass, median calls before the first edit, median model calls, median wall,
+median tokens):
+
+| Model | base | on |
+| --- | --- | --- |
+| Haiku 4.5 | 31, 4, 14, 57.6 s, 161.6k | 33, 4, 13, 53.8 s, 151.1k |
+| Sonnet 5.5 | 33, 2, 6, 33.1 s, 67.3k | 33, 1, 5, 33.9 s, 63.7k |
+| gpt-6-luna | 33, 2, 12, 54.1 s, 102.4k | 33, 2, 12, 57.1 s, 105.5k |
+| gpt-6.1-sol | 30, 2, 11, 58.2 s, 105.9k | 30, 2, 11, 56.2 s, 107.5k |
+
+What it shows:
+
+- On Sonnet the change did what the h2h suggested: the median run went from search to first edit
+  in one call instead of two, and from 6 model calls to 5, at 5% fewer tokens. Wall time did not
+  move (33.1 s against 33.9 s).
+- On Haiku it saved one model call in the median run and 7% of tokens and wall time, and the
+  base arm's two `I-KWARG` fails did not recur. Haiku still read the hit files before editing:
+  calls before the first edit stayed at 4.
+- The GPT models already ask for context themselves (in the `base` arm, 19 of 110 Luna searches and
+  60 of 143 Sol searches passed `context`, against 1 of 162 on Claude). For them the pass adds
+  rows to the searches that did not, and the runs were flat to slightly costlier. Pooled, those
+  two lanes cancel the Claude gain, so no improvement clause is met.
+- The 3x run is a mechanism, not a size blowup. With the hit context, Sonnet edited with seven
+  `patch` calls where the base run used one `sed`. `patch` then triggered `impact_check` and the
+  round-end check, which continued the turn. The search result itself grew by 480 characters.
+- Control: the broad search (46 hits in 16 files) passed through unchanged in every run. Three
+  narrow follow-up searches in Haiku control runs were enriched, as designed. The one control fail
+  (Haiku, seed 104729, `on`) came after a 1-hit verification search that showed the leftover
+  reference; the model ran the tests in the same call and stopped.
+
+The gate is failed and recorded; the change did not merge (PR #2437). Routes:
+CPA Claude subscription 17.36M tokens, `openai-codex` subscription 16.02M tokens in counted runs
+(plus 0.26M in two uncounted smokes); $0.
+
+### 2026-10-30 per-call overhead: OMH's static tokens on every model call, base vs branch, rejected
+
+Status: the gate failed and the change did not merge (PR #2438, branch `fix/omh-per-call-overhead`, rejected after 3 runs). The trimmed tool schemas and descriptions, the route-hint dedupe, the `PLUGIN_TOOL_SCHEMA_CHAR_LIMIT` changes, the `optc_meter` observer and `recompute.py` exist only on that branch and PR, not on main; the changes and commit ids below refer to the branch, and this section records the measurement only.
+
+The 2026-10-30 head-to-head with oh-my-pi measured OMH at 11.6k input tokens per model call under
+Hermes's default `tools.tool_search` (`auto`) against 9.0k for plain Hermes, and 33.0k with
+`tool_search` off. Attribution, measured from that run's `state.db` snapshots: every call's
+system prompt, tool list and replayed history rebuilt, each source tokenized offline (Claude 3
+tokenizer for Haiku 4.5, Claude 5 for Sonnet 5.5). Tokens per model call, OMH minus plain Hermes
+(plain Hermes ran with `tool_search` off in both columns):
+
+| Source | Haiku `auto` | Sonnet `auto` | Haiku `off` | Sonnet `off` |
+| --- | ---: | ---: | ---: | ---: |
+| `omh_*` / `lsp_*` schemas sent eagerly | 0 | 0 | 18,237 | 24,396 |
+| `tool_search` listing lines for OMH tools | 588 | 782 | 0 | 0 |
+| Hermes's own bridge, net of the `process_manage` schema it defers | 176 | 246 | 0 | 0 |
+| OMH awareness section in the system prompt | 432 | 602 | 432 | 602 |
+| `pre_llm_call` context on the first user message (replayed every call) | 641 | 888 | 642 | 887 |
+| Engagement nudges in tool results | 182 | 43 | 207 | 73 |
+| Longer sessions (more calls, larger history) | 614 | 411 | 944 | 712 |
+| Unreconstructed (framing, synthetic verify rows) | 23 | -64 | 48 | 451 |
+| **Total** (measured) | **2,661** | **2,910** | **20,511** | **27,123** |
+
+Of the `pre_llm_call` context, about 2,000 of its 2,600 characters are a route hint
+(`meta_discussion` -> `workflow-learning`) that the bench's wrapper text triggers; the bare task
+gets only the skill candidate line (mean 362 characters). The same hint fires on a product
+request such as "Use OMH to fix the failing test in billing.py". This change does not touch
+routing.
+
+The branch (base = origin/main `531f7034f`) changes three things and nothing else:
+
+1. The tool schemas stop advertising `observation` (host-supplied metadata, in 20 schemas) and
+   `omh_home` / `hermes_home` (refused by every native Hermes call). Handlers still accept them
+   from a host or a standalone caller. `PLUGIN_TOOL_SCHEMA_CHAR_LIMIT` 72227 -> 53244.
+2. Every OMH tool description except `omh_dag` opens with one short complete sentence, so the
+   `tool_search` listing (first sentence, 60 characters) shows it whole: OMH listing lines
+   1986 -> 1515 characters.
+3. A route hint renders a `first_response_shape=`, `not_evidence_yet=` or `plan_todo=` line once
+   when two hints in the same lane carry the same text (bench prompts: 2612 -> 2241 characters).
+
+Expected static reduction per call (tokenized offline; Claude 3 / Claude 5 / o200k): `auto`
+about 230 / 310 / 190 tokens, `off` about 4,800 / 6,400 / 4,500 tokens (`omh_jev_ask` is not
+registered in these profiles, so its share is left out). The run-to-run standard
+error of a 33-instance per-call mean was about 200 to 250 tokens in the head-to-head, so the
+`auto` reduction is close to the noise of the primary metric; the first-call measure below has
+almost none.
+
+The setup, fixed here before the first live run:
+
+- Templates: the head-to-head's 11 (`I-SIGNATURE`, `I-RETURN-SHAPE`, `I-KWARG`, `I-CONTROL`,
+  `C-DUPLICATE`, `C-SCOPE-TRAP`, `C-DECOY`, `E-RENAME`, `E-BUGFIX`, `L-RENAME-ALIAS`,
+  `L-RENAME-SHADOW`), seeds 104729, 130363, 155921: 33 instances per config per arm.
+  `I-CONTROL` is the negative control (no caller breaks).
+- Panel (subscription routes only): `claude-haiku-4-5-20251001` and `claude-sonnet-5-5` through
+  CPA (`claude-proxy`), `gpt-6-luna` through Hermes `openai-codex`. Effort `medium`.
+- Configs: each model with `tools.tool_search` at the Hermes default (`auto`) and `off`: six
+  configs. Arms per config: `base` (OMH bundle at origin/main) and `br` (bundle at the branch
+  head). The two profiles of a config differ only in the bundle and the OMH home.
+- Both arms: the head-to-head's `omh` arm otherwise (`--edit-surface impact`, toolsets
+  `file,terminal,omh-lsp`, `impact_check` and `lsp_tools` on, no edit directive,
+  `--git-init-workspace`, `--test-env`), `agent.max_turns: 120`,
+  `agent.run_budget_seconds: 600`, pyright pinned by absolute command. A bench-only observer
+  plugin (`optc_meter`, no tools, no prompt text, identical in both arms) records each call's
+  usage and request size.
+- Per instance both arms run back to back on identical fresh workspaces, order alternating.
+  Retries only for `rate_limited` / `provider_error` / `model_unavailable` /
+  `authentication_failed` (or a client the gateway refused within seconds), on the same route.
+
+The gate, per config:
+
+- Must hold: `br` passes at least `base` - 1 runs.
+- Must improve: mean input tokens per model call (input + cache read + cache write, summed over
+  the config's sessions, divided by their API calls, from each profile's `state.db`) falls by at
+  least 100 tokens under `auto` and at least 3,000 under `off`.
+- Reported with it, not gating: first-call input tokens (the observer's first `post_api_request`
+  of each session), whose base-to-branch change is the static change alone.
+- Tool choice: under both settings, a small live probe (5 prompts per model and arm, one run each)
+  where an OMH tool should be called (`omh_memory` capture, `omh_todo`, `omh_status`,
+  `omh_run_summary`, `omh_document_plan`); the branch must call the expected tool in at least as
+  many prompts as base, minus one, per model.
+
+Results are recomputed from the raw records and `state.db` snapshots, not the driver log.
+A failed clause is recorded here and the change does not merge on it.
+
+Run 1 (branch `af55afc3a`, 396 runs, 21:32-22:45 KST): **gate failed** on one
+config. Recomputed from the records and `state.db` (`recompute.py`); per-call tokens are
+input + cache read + cache write over API calls; CI is a paired bootstrap over instances.
+
+| Config | Pass base | Pass br | Tokens/call base | Tokens/call br | Drop (95% CI) | First call base -> br | Verdict |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| Haiku 4.5 `auto` | 32 | 32 | 11,622 | 11,418 | +204 (-160, +549) | 7,757 -> 7,461 | pass |
+| Haiku 4.5 `off` | 31 | 33 | 29,345 | 24,364 | +4,980 (+4,639, +5,359) | 25,255 -> 20,389 | pass |
+| Sonnet 5.5 `auto` | 33 | 33 | 11,720 | 11,405 | +315 (-85, +707) | 9,756 -> 9,468 | pass |
+| Sonnet 5.5 `off` | 33 | 33 | 36,061 | 29,418 | +6,642 (+6,250, +7,049) | 33,624 -> 26,920 | pass |
+| GPT-6 Luna `auto` | 32 | 33 | 9,019 | 8,765 | +254 (+90, +433) | 6,523 -> 6,327 | pass |
+| GPT-6 Luna `off` | 32 | 33 | 26,080 | 26,192 | -112 (-1,613, +1,328) | 17,935 -> 15,108 | **fail** |
+
+Why Luna `off` failed: its first call fell by 2,827 tokens, as expected, but `omh_context` was
+called in 33 of 33 branch sessions against 21 of 33 base sessions, and each result is about
+39,000 characters that then ride every later call. The branch had rewritten that tool's opener
+from "Return compact OMH operating context for Hermes before generic chat, image, file, search,
+or coding tools." to "Return compact OMH operating context. Read it before generic chat, image,
+file, search, or coding tools.", which reads as an instruction. No Claude session called
+`omh_context` in either arm.
+
+Amendment 1, written after run 1 and before run 2: `omh_context` gets its original description
+back, byte for byte (no other change; `PLUGIN_TOOL_SCHEMA_CHAR_LIMIT` 53222 -> 53224, listing
+1503 -> 1521 characters). Run 2 repeats the whole design above on all six configs, both arms,
+fresh, with the same gate. Run 1 stays recorded as a failure. Probe results are taken on the
+run 2 branch.
+
+Run 2 (branch `1d542cfa5`, 396 runs, 22:44-23:42 KST; run 1 above ended at 22:42, not 22:45):
+**gate failed** on one config, the same one. Recomputed from the records and the `state.db`
+snapshots taken after the run.
+
+| Config | Pass base | Pass br | Tokens/call base | Tokens/call br | Drop (95% CI) | First call base -> br | Verdict |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- |
+| Haiku 4.5 `auto` | 33 | 33 | 11,740 | 11,325 | +415 (+60, +756) | 7,757 -> 7,471 | pass |
+| Haiku 4.5 `off` | 30 | 33 | 29,275 | 24,187 | +5,089 (+4,772, +5,438) | 25,254 -> 20,389 | pass |
+| Sonnet 5.5 `auto` | 33 | 33 | 11,737 | 11,208 | +529 (+272, +844) | 9,756 -> 9,474 | pass |
+| Sonnet 5.5 `off` | 33 | 33 | 36,087 | 29,492 | +6,595 (+6,088, +7,156) | 33,625 -> 26,921 | pass |
+| GPT-6 Luna `auto` | 32 | 33 | 9,040 | 8,882 | +158 (-41, +361) | 6,524 -> 6,331 | pass |
+| GPT-6 Luna `off` | 33 | 31 | 25,492 | 25,332 | +160 (-1,649, +2,038) | 17,934 -> 15,106 | **fail** (passes and tokens) |
+
+The static change landed as measured offline on every config: the first call fell by 282-296
+tokens under `auto` and 2,828-6,703 under `off`. The Codex route counts the schemas at about
+2,800 tokens, not the o200k estimate of 4,500 the `off` threshold was set from, so Luna `off`
+could not have reached 3,000 even with no other change.
+
+What sank Luna `off` both times is `omh_context`. With the original description restored, Luna
+still called it in 31 of 33 branch sessions against 19 of 33 base sessions; each result is about
+39,000 characters that ride every later call. Within each group the branch is cheaper (25,946 vs
+28,934 tokens per call in sessions that called it, 18,185 vs 20,360 in sessions that did not).
+A diagnostic profile (not part of the gate, 22 instances, seeds 104729 and 130363) with
+`observation` put back on `omh_context` alone called it in 17 of 22, against 12 of 22 for base
+and 20 of 22 for the branch on the same instances: part of the shift may come from that tool's
+schema getting shorter, and 22 runs cannot separate it from noise. The two branch failures
+(`C-DUPLICATE`, `L-RENAME-ALIAS`) are 2 of 33 against 0; the rule asked for at most 1.
+
+Tool choice (5 prompts per model, setting and arm, one run each; the expected OMH tool called
+directly or through `tool_call`): base and branch both 5/5 on every `off` config and on Sonnet
+`auto`; Haiku `auto` 4/5 in both arms (both missed `omh_document_plan`: they described it and
+stopped); Luna `auto` 4/5 base, 5/5 branch. The clause holds everywhere.
+
+Verdict: the pre-registered gate failed on GPT-6 Luna with `tool_search` off. The change does
+not merge on this result. Five of six configs passed, including every product-default (`auto`)
+config.
+
+Amendment 2 (owner decision, 2026-10-31), written and pushed before run 3: one amended
+re-measure, after which the result stands.
+
+- The branch leaves `omh_context`'s schema entirely untouched, `observation` included: it is
+  byte-identical to origin/main, so the change cannot move that tool's call rate.
+  `PLUGIN_TOOL_SCHEMA_CHAR_LIMIT` 53224 -> 54095. Everything else is as in run 2.
+- Base is origin/main `b906cb425`, merged into the branch by a new commit first.
+- New seeds 181081, 204983, 224737 (the corpus generates any seed; for each of the 11 templates
+  each new seed yields its own fixture digest and an untouched workspace fails the controller's
+  check). Same 11 templates, same three models, both `tool_search` settings, both arms.
+- The gate clauses are unchanged except one. The `off` threshold of 3,000 was set from an o200k
+  estimate of the static cut (about 4,500 tokens). On the `openai-codex` route the measured
+  first-call cut was 2,827 and 2,828 tokens in runs 1 and 2, about 2,800. Restated in the units
+  Codex counts, for GPT-6 Luna `off` only: 3,000 x 2,800 / 4,500 = 1,867 tokens per call.
+  No Claude threshold changes; GPT-6 Luna `auto` stays at 100.
+- The tool-choice probe runs again on the run 3 profiles.
+- If every config passes, the change is put up for merge. If any fails, it is recorded here as
+  rejected and the work stops.
+
+Run 3 (branch `ef5dd1b6e`, base origin/main `b906cb425`, seeds 181081 / 204983 / 224737,
+396 runs, 2026-10-31 02:09-03:10 KST): **gate failed; the change is rejected.** Recomputed from
+the records and the `state.db` snapshots.
+
+| Config | Pass base | Pass br | Tokens/call base | Tokens/call br | Drop (95% CI) | Threshold | First call base -> br | Verdict |
+| --- | ---: | ---: | ---: | ---: | --- | ---: | --- | --- |
+| Haiku 4.5 `auto` | 31 | 31 | 12,120 | 11,605 | +515 (+147, +855) | 100 | 7,756 -> 7,471 | pass |
+| Haiku 4.5 `off` | 31 | 32 | 29,492 | 24,675 | +4,817 (+4,272, +5,349) | 3,000 | 25,256 -> 20,619 | pass |
+| Sonnet 5.5 `auto` | 33 | 33 | 11,722 | 11,312 | +410 (+59, +769) | 100 | 9,757 -> 9,474 | pass |
+| Sonnet 5.5 `off` | 33 | 33 | 35,982 | 29,411 | +6,572 (+6,224, +6,926) | 3,000 | 33,626 -> 27,241 | pass |
+| GPT-6 Luna `auto` | 33 | 33 | 9,062 | 8,911 | +152 (-39, +350) | 100 | 6,524 -> 6,331 | pass |
+| GPT-6 Luna `off` | 33 | 32 | 25,415 | 23,977 | +1,438 (-679, +3,635) | 1,867 | 17,934 -> 15,240 | **fail** |
+
+With `omh_context` byte-identical to base, GPT-6 Luna `off` still called it in more branch
+sessions (24 of 33 against 20 of 33). Within each group the branch was cheaper (26,181 vs
+28,646 tokens per call in sessions that called it, 18,081 vs 20,680 in sessions that did not),
+but the mean drop of 1,438 is under the restated 1,867. Passes held everywhere. Tool-choice
+probe: 5/5 in both arms on every config except Luna `auto` base (4/5, missed
+`omh_document_plan`); the clause holds.
+
+Verdict, per amendment 2: **rejected**. The per-call cut does not merge. Five of six configs
+passed in all three runs, every product-default (`auto`) config among them, and the first call
+fell by 283-286 tokens under `auto` and 2,695-6,385 under `off` each time; what the gate could
+not clear is GPT-6 Luna with `tool_search` off, where `omh_context`'s roughly 39k-character
+result dominates the per-call mean.
+
+### 2026-10-29 debugging: builtin `patch` vs a debugpy tool (`omh-dap`), gate failed
+
+One question, from oh-my-pi's `debug` tool: does giving the model a debugger (breakpoints,
+locals, evaluate) help it find and fix a bug that the failing assertion does not explain? On
+this corpus it does not: pass counts barely move and the token clause fails, so the
+`debug_python` tool (branch `feature/omh-dap`) does **not** merge.
+
+The setup:
+
+- Split `dap-ab`, three templates whose failing test shows only values (`assert 118 == 76`):
+  `D-MUTABLE-DEFAULT` (a mutable default argument), `D-ALIASED-STATE` (a shallow copy shares
+  state), `D-ORDER-DEPENDENT` (a cache keyed on the wrong thing). 3 seeds each, 9 per model
+  per arm, effort `medium`, OpenGateway (`og`).
+- Both arms: `--edit-directive debug` (one shared sentence plus "if the same test still fails
+  after three edits, stop editing and inspect state again"), `--git-init-workspace`,
+  `--test-env` (pytest and debugpy ready). Only the dap arm has toolset `omh-dap`.
+- omh `feature/omh-dap` `9528a8c73` (pushed, not merged). 143 of 144 run records (one
+  gpt-4.1-nano dap run left none and is scored as a fail); `artifacts/` is git-ignored, so the
+  records stay local, as for the other sections here.
+- qwen-flash `D-MUTABLE-DEFAULT` in both arms reuses the last smoke's records (same commit,
+  same flags), decided before the run because the paid-call cap was short by four.
+
+| Model | patch | dap |
+| --- | ---: | ---: |
+| `deepseek/deepseek-v4.1-flash-ultrafast` | 9 / 9 | 9 / 9 |
+| `moonshotai/kimi-k3.1-pro` | 9 / 9 | 9 / 9 |
+| `z-ai/glm-5.3` | 8 / 9 | 7 / 9 |
+| `minimax/MiniMax-M3` | 9 / 9 | 9 / 9 |
+| `x-ai/grok-4-1-fast` | 9 / 9 | 9 / 9 |
+| `qwen/qwen-flash` | 0 / 9 | 2 / 9 |
+| `openai/gpt-4o-mini` | 0 / 9 | 0 / 9 |
+| `openai/gpt-4.1-nano` | 0 / 9 | 1 / 9 |
+| **Total** | **44 / 72** | **46 / 72** |
+
+The merge gate, fixed before the first paid run:
+
+- Weak models, dap at least patch + 3: 12 vs 9, pass.
+- Strong models, dap at least patch - 1: 34 vs 35, pass.
+- No dap run above 3x its patch pair's median tokens: **fail, 7 runs**. Among runs that
+  finished normally: gpt-4.1-nano 6.3x, MiniMax-M3 3.7x, grok-4-1-fast 3.3x. The rest are
+  three qwen-flash timeouts and the missing nano record.
+- `debug_python` used in at least half of the dap-arm sessions: 46 / 65, pass.
+
+What it shows:
+
+- Strong models already fix these bugs by reading the code and printing; the debugger adds
+  nothing for them. Weak models mostly cannot fix them either way, and with a debugger they
+  loop longer, because each debugger call is cheap.
+- Four smokes before the run each found a different loop, and each was fixed in the tool:
+  a statement passed to evaluate (now `not_an_expression` with the way to read a module
+  value), 558 evaluates walking `lines[0]` to `lines[541]` at one stop (now 15 per stop and
+  40 per session), a launch refused while a session was live (a relaunch now replaces it),
+  and breakpoints that stopped during import (now says to continue). After each fix the
+  weak model found another loop.
+- The shared "three edits" sentence stopped the patch arm's edit/test loops in the smoke.
+- Provider failures: from 22:18 KST og answered `401 model_access_denied` for qwen-flash,
+  gpt-4o-mini and gpt-4.1-nano. Six gpt-4o-mini dap runs crashed within 10 s and the nano run
+  left no record. The token clause fails without them.
+- **A bench timeout did not stop the model.** `hermes -p <bench>` is a client of the
+  profile's gateway; the 30-minute timeout killed the client, and the agent turn went on.
+  Two qwen-flash sessions ran for over three hours. Over the whole DAP effort the bench
+  profiles used 1.15B tokens, 87% of them in sessions that outlived their timeout, while
+  the paid-call count stayed at 155 of 160. The longest passing run here took 40 model calls
+  (84 in the LSP run), so every bench profile now sets `agent.max_turns: 120`; a live check
+  with `max_turns: 3` stopped a turn after 3 calls. See "Before a paid run" under Commands.
+- Python and debugpy only. n = 9 per model per arm.
+
+### 2026-10-29 rename: builtin `patch` vs Hermes LSP through `omh-lsp`
+
+One question, from oh-my-pi's "LSP wired into every write": does letting the model ask the
+language server for definitions, references and a rename beat finding and editing every use
+by hand? On this corpus it raises weak models' rename pass rate from 16 / 36 to 28 / 36 and
+leaves strong models where they were, so the `omh-lsp` tools (`lsp_definition`,
+`lsp_references`, `lsp_rename`) ship, off by default.
+
+How the tools work: Hermes already runs pyright and other servers in `agent/lsp` for its
+post-write diagnostics, but exposes no navigation tool and sends no navigation request. The
+OMH plugin drives that same service; one bridge module is the only code that touches its
+private attributes, and Hermes core is not patched. The symbol is located on the given line as
+a whole identifier only. `lsp_rename` syncs the exact bytes it will edit to the server and
+writes only if the disk still holds them (`stale_file` otherwise); a rename whose symbol is
+gone from a line that already holds the new name answers `already_renamed` and writes nothing.
+
+The setup:
+
+- The pinned `E-RENAME` template plus two new templates in the separate split `lsp-ab`
+  (`--split lsp-ab`; the evaluation corpus and its digest are unchanged). Each new template
+  fails untouched, fails a naive text replace, and passes only a semantic rename:
+  - `L-RENAME-ALIAS`: a module function re-exported through `__all__`, imported under an
+    alias and through the module, next to a same-named method, a log string and a comment
+    that must stay.
+  - `L-RENAME-SHADOW`: a function whose name a parameter in another module shadows.
+- 3 seeds each, 9 instances per model per arm, effort `medium`, OpenGateway (`og`).
+- Both arms: `--edit-directive rename` (one sentence naming `search_files`/`patch` or
+  `lsp_definition`/`lsp_references`/`lsp_rename`; only the tool names differ),
+  `--git-init-workspace` (Hermes LSP only runs inside a git worktree; every earlier run in
+  this README had LSP dormant) and `--test-env` (a ready interpreter with pytest and the
+  workspace on `sys.path`, named in the task; without it, in the third measurement below,
+  qwen-flash spent 18 and 38 terminal calls on pip installs and venv paths after a one-call
+  rename). 0 `pip install` calls in either arm here.
+- Two profiles that differ only in the `lsp_tools` gate and OMH home; `tools.tool_search` off
+  in both. `patch` stays available in the lsp arm.
+- Contamination check: 0 `lsp_*` calls in the 72 patch-arm sessions.
+- omh `feature/omh-lsp-nav` `6c7976ddb` on origin/main `7a2de348a`; Hermes Agent v0.22.5
+  (`hermes --version`; the run records do not store it).
+
+| Model | patch | lsp | patch tokens (median) | lsp tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `z-ai/glm-5.3` | 9 / 9 | 9 / 9 | 146,334 | 142,246 |
+| `minimax/MiniMax-M3` | 9 / 9 | 9 / 9 | 307,488 | 297,129 |
+| `deepseek/deepseek-v4.1-flash-ultrafast` | 8 / 9 | 8 / 9 | 216,575 | 178,623 |
+| `moonshotai/kimi-k3.1-pro` | 5 / 9 | 7 / 9 | 156,655 | 154,570 |
+| `x-ai/grok-4-1-fast` | 7 / 9 | 9 / 9 | 189,137 | 218,454 |
+| `qwen/qwen-flash` | 6 / 9 | 9 / 9 | 442,883 | 168,547 |
+| `openai/gpt-4o-mini` | 3 / 9 | 7 / 9 | 235,446 | 171,393 |
+| `openai/gpt-4.1-nano` | 0 / 9 | 3 / 9 | 108,724 | 150,237 |
+| **Total** | **47 / 72** | **61 / 72** | 20.2M | 14.5M |
+
+Token medians are over each model's 9 runs per arm; the two failed patch runs (below) have no
+token count in their records and are left out of their model's median. Totals are the
+session-database sums for all 72 sessions per arm and include them; without the
+gpt-4o-mini timeout (3.55M) the patch total is 16.6M.
+
+Per template, patch vs lsp: `E-RENAME` 20 vs 19, `L-RENAME-ALIAS` 13 vs 20,
+`L-RENAME-SHADOW` 14 vs 22. The gain is where a text search misleads: aliases, re-exports
+and shadowing names. On the plain rename the two arms are even.
+
+The merge gate, fixed before the first paid run, passes on every clause:
+
+- Weak models (grok, qwen, gpt-4o-mini, gpt-4.1-nano), lsp at least patch + 3: 28 vs 16.
+- Strong models (deepseek, glm, kimi, minimax), lsp at least patch - 1: 33 vs 31.
+- No lsp run above 3x its patch pair's median tokens: none (highest 2.85x, gpt-4.1-nano).
+- `lsp_rename` used in at least half of the lsp-arm sessions: 70 / 72.
+
+What it shows, and what it does not:
+
+- Two patch-arm runs failed: a kimi process crash before any model call, and a gpt-4o-mini
+  timeout after 3.55M tokens. Both are recorded as `failed` and scored as fails. No lsp-arm
+  run failed that way.
+- This is the fourth lsp-arm measurement; only this one is reported as the result.
+  1. 59 / 72, gate passed, but an independent verifier made `lsp_rename` write a corrupted
+     file (preview, outside edit, apply) while reporting success. Fixed by syncing the bytes
+     it edits.
+  2. 58 / 72, token clause failed: gpt-4o-mini called `lsp_rename` 42 more times on lines it
+     had already renamed (8.2x), and qwen-flash looped on pytest setup (7.8x). Fixed the first
+     with `already_renamed`.
+  3. 63 / 72, token clause failed: qwen-flash pytest-setup loops (3.08x, 14.3x). Fixed with
+     `--test-env`, applied to both arms, so both arms were measured again.
+  4. The table above.
+- After the table's run a second verifier found that the symbol lookup fell back to a
+  substring match (`LIMIT` inside `LIMIT_ALIAS`), so a repeated `LIMIT -> MAX_LIMIT` rename
+  renamed `LIMIT_ALIAS` and reported success. Whole-identifier matching fixes it. Replaying
+  all 220 lsp calls of this run against the fixture lines they targeted, none needed the
+  substring path, so the numbers above are unchanged by the fix.
+- The gate was written into the plan before any paid run (plan 22:54 KST, first paid record
+  23:27 KST, 2026-10-28) and was not changed after.
+- Rename only. Definition and references are exercised as steps of a rename, not measured on
+  their own; the corpus `lsp` class still cannot pass under `hermes_current_session`, which
+  records no tool events.
+- Python and pyright only. n = 9 per model per arm.
+
+Pass counts come from the run records. Tool-call counts come from each profile's session DB.
+
+### 2026-10-28 edit surface: builtin `patch` vs hash-anchored `hashline_edit` (supersedes 2026-10-27)
+
+One question, from oh-my-pi's hashline result (Grok Code Fast 1 6.7% -> 68.3%
+on its own corpus): does addressing lines by a content hash instead of
+retyping old text raise edit pass rates for the models OMH routes to? On this
+corpus it does not, and weak models get worse, so the hashline tools are not
+merged. Their code, with the not-found recovery below, stays on branch
+`feature/hashline-edit` (`e29c341be`).
+
+**The 2026-10-27 table that stood here was invalid.** Its patch arm ran in a
+profile that also enabled the hashline gate, so `--toolsets file,terminal`
+exposed `hashline_read`/`hashline_edit` too: gpt-4o-mini called them in 4 of 6
+patch sessions and grok-4-1-fast in 3 of 6. The table below replaces it.
+
+The setup:
+
+- The pinned evaluation corpus, `--templates E-RENAME,E-BUGFIX` only (3 seeds
+  each, 6 instances per arm), effort `medium`, OpenGateway (`og`).
+- `--edit-directive` on both arms: one sentence names `read_file`/`patch` or
+  `hashline_read`/`hashline_edit` and forbids editing through the shell.
+  Without it the first smoke made 7 `terminal` calls and no edit-tool call.
+- Two profiles that differ only in the hashline gate and OMH home:
+  `patch` arm `--toolsets file,terminal` with the gate off; `hashline` arm
+  `--toolsets omh-hashline,terminal` with the gate on. `tools.tool_search` is
+  off in both, so plugin tools are not deferred behind tool search.
+- Contamination check: 0 hashline calls across the 48 patch-arm sessions.
+- The hashline arm carries the not-found recovery (`similar_files`, a
+  root-relative fallback for absolute paths, and a repeat hint).
+- omh `feature/hashline-edit` on origin/main `bbf278ab3`; Hermes Agent
+  v0.22.5 · stable · local bf0203a794a0.
+
+| Model | patch | hashline | patch tokens (median) | hashline tokens (median) |
+| --- | ---: | ---: | ---: | ---: |
+| `z-ai/glm-5.3` | 6 / 6 | 6 / 6 | 187,545 | 144,394 |
+| `x-ai/grok-4-1-fast` | 6 / 6 | 6 / 6 | 319,764 | 281,736 |
+| `deepseek/deepseek-v4.1-flash-ultrafast` | 6 / 6 | 5 / 6 | 226,100 | 244,568 |
+| `moonshotai/kimi-k3.1-pro` | 6 / 6 | 4 / 6 | 176,586 | 149,377 |
+| `minimax/MiniMax-M3` | 4 / 6 | 5 / 6 | 515,527 | 701,143 |
+| `qwen/qwen-flash` | 5 / 6 | 0 / 6 | 164,094 | 405,057 |
+| `openai/gpt-4o-mini` | 3 / 6 | 0 / 6 | 137,174 | 1,382,215 |
+| `openai/gpt-4.1-nano` | 0 / 6 | 0 / 6 | 97,254 | 175,894 |
+| **Total** | **36 / 48** | **26 / 48** | 13.1M total | 22.8M total |
+
+The merge gate, fixed before the run, fails on every clause:
+
+- Weak models (grok, qwen, gpt-4o-mini, gpt-4.1-nano), hashline must be at
+  least patch: 6 vs 14.
+- Strong models (deepseek, glm, kimi, minimax), hashline must be at least
+  patch - 1: 20 vs 22.
+- No hashline run over 3x its patch pair's median tokens: six were over, four
+  from gpt-4o-mini (3.8x to 39.9x, worst 5.47M against 137k) and two from
+  qwen-flash (3.2x and 3.6x).
+
+What it shows:
+
+- **No gain where patch already works.** Strong-model hashline failures are
+  all BUGFIX `mutation_outside_scope`, not failed edits.
+- **The not-found recovery fires but does not stop the loop.** gpt-4o-mini made
+  647 `hashline_edit` calls in six runs and got 131 not-found and 74 repeat
+  answers. It ignores "Stop retrying this path".
+- **qwen-flash fails differently.** Its `hashline_edit` calls touched only the
+  task files, yet all six runs scored `mutation_outside_scope`, and it made 5x
+  the terminal calls of its patch arm. The extra files likely came from the
+  shell, but the cause is not established.
+- **Not a reproduction of oh-my-pi's number.** Their corpus and harness
+  differ, and Grok 4.1 Fast passes 6 / 6 with `patch` here.
+- n = 6 per arm, so single-instance differences are noise.
+
+Pass counts come from the run records. Tool-call counts come from each
+profile's session DB.
+
+### 2026-10-27 `gpt-6.1-terra` vs `gpt-6.1-sol` (GPT-6.1 Terra onboarding)
+
+One question from the GPT-6.1 Terra onboarding: on this corpus, does Terra
+at half of Sol's list price lose anything against GPT-6.1 Sol at the same
+effort? Both arms send the `gpt` family block (`--condition family`), so the
+model is the only difference. Sol's exact override measured as no effect on
+2026-10-02, and comparing against it would add a second variable.
+
+The setup:
+
+- The same pinned evaluation corpus (30 instances, digest
+  `c4ea899a8e727fcc531776e56306ff0e83d129e2248fe4362614b3d186fa7b33`).
+- The `hermes_current_session` path on the Codex subscription
+  (`openai-codex`), so every record reports `cost_usd` 0.
+- omh at `256262138` (origin/main the day of the run; the onboarding PR
+  changes no prompt text). Hermes Agent v0.22.5 (2026.9.24) · stable · local bf0203a794a0.
+- A targeted manifest with both ids at `high`. Every arm used
+  `--split evaluation` and `--max-paid-calls 30`. Hermes' Codex route sends
+  `high` unchanged for both ids; only `max` is clamped for Terra.
+
+Arms ran sequentially on 2026-10-27 UTC:
+
+- **T1:** Terra `family`, 02:33 to 02:50Z. Six instances (E-CALLFLOW-155921,
+  all three E-REFERENCES, and E-PREDICATE-104729/130363) exited as
+  `process_crash` within 25 seconds of each other (02:40:23 to 02:40:48Z).
+  The child process failed before it produced a model answer, so this is a
+  runtime interruption, not a model result. Pairs against T1 drop those six
+  (n = 24).
+- **T2:** Sol `family`, 02:50 to 03:14Z.
+- **T3:** Terra `family` again, 03:14 to 03:28Z. This is the clean Terra arm
+  and the same-model drift control.
+
+| Arm | Model | Passed | Total tokens | Mean tokens (n) |
+| --- | --- | ---: | ---: | ---: |
+| T1 | `gpt-6.1-terra` | 13 / 30 (6 crashes) | 1,616,929 | 67,372 (24) |
+| T2 | `gpt-6.1-sol` | 18 / 30 | 2,018,456 | 67,281 (30) |
+| T3 | `gpt-6.1-terra` | 18 / 30 | 1,912,768 | 63,758 (30) |
+
+T2 and T3 passed the same 18 instances (McNemar: zero discordant pairs, p =
+1.0). Among T1's 24 completed instances, every pass agrees with T3. Paired
+token deltas per instance, with a template-cluster bootstrap (10,000 draws,
+seed 20260813):
+
+| Pair | Mean delta | 95% CI | Instances lower |
+| --- | ---: | --- | ---: |
+| T3 − T1 (same model, drift; n = 24) | +1,039 (+1.5%) | [−2,147, +4,289] | 14 / 24 |
+| T3 − T2 (Terra vs Sol) | −3,523 (−5.2%) | [−7,245, +182] | 19 / 30 |
+| T1 − T2 (Terra vs Sol; n = 24) | −3,757 (−5.3%) | [−7,797, +581] | 15 / 24 |
+
+What it shows:
+
+- **No loss against Sol on this corpus.** Terra solved the same instances
+  with about 5% fewer tokens. The CI touches zero, so the token gap is not
+  claimed. At list price that means about half Sol's cost for the same pass
+  set. The run itself was free on the subscription.
+- **Faster wall clock, contended:** 14 minutes for T3 against 24 for T2,
+  sequential on one machine. The arms ran on one provider, one after
+  another, so this is a reading, not a timing claim.
+- **The corpus ceiling stays at 18 / 30.** No arm passes a read or lsp
+  task, so this corpus cannot show where the vendor says Sol still wins (the
+  hardest coding). A placement that replaces Sol in `deep` or
+  `unspecified-high` needs a corpus with headroom (#1333). Terra in a cheap
+  slot does not.
+
+Results describe this pinned corpus, OMH version, Hermes version, model IDs,
+and conditions only. They do not establish universal model superiority.
+
 ### 2026-10-02 `gpt-6.1-sol` generation and override evaluation (PR #1975 follow-up)
 
 Two questions from the GPT-6.1 Sol onboarding (#1975). Does 6.1 Sol hold the
@@ -725,4 +4381,4 @@ How to read it:
   corpus.
 
 Records, manifests, and lane scripts are in
-`~/Desktop/khope/bench-archive/prompt-audit-2026-10-04/runs` (outside git).
+the owner's local `bench-archive/prompt-audit-2026-10-04/runs` (outside git).

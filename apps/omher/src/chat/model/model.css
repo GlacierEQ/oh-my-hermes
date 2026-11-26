@@ -1,0 +1,324 @@
+/* Model + reasoning pill (header right) and its popover. Selection states are gray. */
+.mp-wrap {
+  position: relative;
+}
+.mp-wrap,
+.head-right {
+  min-width: 0;
+}
+.mp {
+  max-width: 100%;
+  min-width: 0;
+  height: 26px;
+  border-radius: var(--r);
+  background: var(--raise);
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  font-size: 12px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+/* only the model id gives way when the header is tight */
+.mp > :not(.mp-l) {
+  flex: none;
+}
+/* a long model id ellipsizes; the full id is in the title */
+.mp-l {
+  min-width: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mp:hover,
+.mp.on {
+  background: var(--raise2);
+}
+.mp svg {
+  color: var(--muted);
+  transition: transform 0.16s ease;
+}
+.mp.on svg {
+  transform: rotate(180deg);
+}
+/* the model's mark, with the connection dot tucked on its corner */
+.mp-mk {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.mp-d {
+  position: absolute;
+  right: -2px;
+  bottom: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--quiet);
+  box-shadow: 0 0 0 1.5px var(--raise);
+}
+.model-ic {
+  flex: none;
+  color: var(--ink);
+}
+.mp-d.live {
+  background: var(--ok);
+}
+.mp .sep {
+  width: 1px;
+  height: 12px;
+  background: var(--line-strong);
+}
+.mp .eff {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.mp-h {
+  font-size: 10.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 4px 6px 2px;
+}
+/* search field at the top of the popover */
+.mp-search {
+  height: 28px;
+  border-radius: var(--r);
+  background: var(--raise);
+  border: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 8px;
+  color: var(--quiet);
+  cursor: text;
+}
+/* the search field takes the app's text-field focus (its edge turns --muted, as the sidebar search does) */
+.mp-search:focus-within {
+  border-color: var(--muted);
+}
+/* keyboard focus ring for the chips and rows: 2px ink at 40%, 2px off the edge */
+.mp-chip:focus-visible,
+.mp-opt:focus-visible,
+.mp-pop .mseg button:focus-visible,
+.mp-link:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--ink) 40%, transparent);
+  outline-offset: 2px;
+}
+.mp-search input {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: 0;
+  outline: 0;
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.mp-search input::placeholder {
+  color: var(--muted);
+}
+.mp-search input::-webkit-search-cancel-button {
+  display: none;
+}
+/* vendor chips: All plus one per company that has a model; the chosen one is gray. One row that scrolls sideways
+   (wheel, trackpad, Tab): nine chips wrapped 4 / 4 / 1 with "Other" alone on a third row. The edge with more chips past
+   it fades (`data-more`, set by the picker); the 4px side padding keeps a focused chip's ring inside the scroll box. */
+.mp-chips {
+  display: flex;
+  gap: 4px;
+  padding: 7px 4px 5px;
+  margin: 0 -4px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+.mp-chips::-webkit-scrollbar {
+  display: none;
+}
+.mp-chips > .mp-chip {
+  flex: none;
+}
+/* the fade covers most of a chip, so a chip cut at the edge reads as "more this way", not as a broken chip */
+.mp-chips[data-more="end"] {
+  mask-image: linear-gradient(to right, #000 calc(100% - 56px), transparent calc(100% - 4px));
+}
+.mp-chips[data-more="start"] {
+  mask-image: linear-gradient(to left, #000 calc(100% - 56px), transparent calc(100% - 4px));
+}
+.mp-chips[data-more="both"] {
+  mask-image: linear-gradient(to right, transparent 4px, #000 56px, #000 calc(100% - 56px), transparent calc(100% - 4px));
+}
+.mp-chip {
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 7px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-strong);
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.mp-chip:hover {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 4%, transparent);
+}
+.mp-chip.on {
+  color: var(--ink);
+  background: color-mix(in srgb, var(--ink) 11%, transparent);
+  border-color: transparent;
+}
+.mp-h2 {
+  margin-top: 8px;
+}
+.mp-list {
+  max-height: 300px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* room for a row's focus ring inside the scroll box */
+  padding: 4px;
+  margin: 0 -4px;
+}
+/* a list with more rows past an edge fades there (`data-more`, set by the picker): the row the box cuts never sits
+   in full ink against the Reasoning heading or the search field */
+.mp-list[data-more="below"] {
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 32px), transparent);
+}
+.mp-list[data-more="above"] {
+  mask-image: linear-gradient(to top, #000 calc(100% - 20px), transparent);
+}
+.mp-list[data-more="both"] {
+  mask-image: linear-gradient(to bottom, transparent, #000 20px, #000 calc(100% - 32px), transparent);
+}
+.mp-g {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 6px 6px 2px;
+}
+.mp-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px;
+}
+/* nothing to pick: the sentence and its "Add one in Bot settings" line read as one note, not two blocks */
+.mp-pop [data-empty] .mp-list {
+  padding-bottom: 0;
+}
+.mp-pop [data-empty] .mp-f {
+  border-top: 0;
+  margin-top: 0;
+  /* 6px popover + 4px list + 6px line above the sentence: the same 16px under the link */
+  padding: 0 6px 9px;
+}
+.mp-opt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 6px;
+  border-radius: var(--r-sm);
+  font-size: 12.5px;
+  color: var(--body);
+  text-align: left;
+}
+/* one highlight row, moved by the mouse or by Up/Down from the search field */
+.mp-opt.kb:not(:disabled) {
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+/* the current model: check mark and full ink; the fill belongs to the highlight row only */
+.mp-opt.on {
+  color: var(--ink);
+  font-weight: 500;
+}
+.mp-n {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mp-ck {
+  margin-left: auto;
+  color: var(--ink);
+  display: grid;
+  visibility: hidden;
+}
+.mp-opt.on .mp-ck {
+  visibility: visible;
+}
+.mp-pop .mseg {
+  margin: 4px 6px 2px;
+}
+/* More than six levels do not fit one row of a model popover: they wrap at four a row, and a shorter last row stretches
+   to the full width (seven levels read 4 + 3, never 4 + 3 and an empty slot). Intentionally general: it holds for a
+   route's ladder in the chat picker and for any SESSIONS agent that offers as many. */
+.mp-pop .mseg:has(> button:nth-child(7)) {
+  flex-wrap: wrap;
+}
+.mp-pop .mseg:has(> button:nth-child(7)) > button {
+  flex: 1 1 calc(25% - 2px);
+}
+.mp-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 6px 6px 0;
+}
+.mp-f {
+  border-top: 1px solid var(--line);
+  margin-top: 8px;
+  padding: 7px 6px 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.mp-link {
+  font-size: 11px;
+  color: var(--body);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  padding: 0;
+}
+
+/* segmented control (also used by settings) */
+.mseg {
+  display: flex;
+  gap: 2px;
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 2px;
+}
+.mseg button {
+  flex: 1;
+  height: 22px;
+  border-radius: var(--r-sm);
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.mseg button:hover:not(:disabled) {
+  color: var(--ink);
+}
+.mseg button:disabled {
+  opacity: 0.6;
+}
+.mseg button.on {
+  background: var(--seg-on);
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: 0 0 0 1px var(--line), 0 1px 2px rgba(0, 0, 0, 0.12);
+  opacity: 1;
+}
+/* a small switch's segments keep their words clear of the edges once it grows past 200px; :where() keeps this at
+   `.mseg button`'s weight, so a page's own padding (Terminal, Automations, Language) still wins */
+.mseg:where(.sm) button {
+  padding: 0 6px;
+}
+/* 200px when the words fit, wider when they do not (a wider system font, a longer language): never wrapped in 22px */
+.mseg.sm {
+  flex: none;
+  width: max-content;
+  min-width: 200px;
+  max-width: 100%;
+}

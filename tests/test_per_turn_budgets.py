@@ -11,8 +11,12 @@ moves -- rather than only to the number it returns today.
 from __future__ import annotations
 
 import argparse
+import ast
+import copy
 import dataclasses
+import hashlib
 import importlib.util
+import json
 import re
 import tempfile
 import unittest
@@ -130,7 +134,10 @@ class PerRequestBudgetRegistryTests(unittest.TestCase):
 
         templates = context_cost.builtin_skill_templates()
         source = templates[0]
-        clone = dataclasses.replace(source, name=f"{source.name}-clone")
+        # `replace` would render the copy again under its new name; this test is about
+        # bytes, so copy the finished template instead.
+        clone = copy.copy(source)
+        object.__setattr__(clone, "name", f"{source.name}-clone")
         metrics = {metric.name: metric for metric in budget_metrics()}
         before = {
             name: metrics[name].live()
@@ -165,7 +172,7 @@ class PerRequestBudgetRegistryTests(unittest.TestCase):
             for definition in builtin_definitions()
             if definition.name in names
             and not definition.artifact_contracts
-            and not definition.progressive_disclosure
+            and definition.progressive_disclosure
         ]
         self.assertGreater(len(members), 50)
         metrics = {metric.name: metric for metric in budget_metrics()}
@@ -200,6 +207,32 @@ class SkillIndexRenderingTests(unittest.TestCase):
         self.assertEqual(skill_index.hermes_index_description("x" * 61), "x" * 57 + "...")
         # Surrounding whitespace, then surrounding quote characters, are stripped first.
         self.assertEqual(skill_index.hermes_index_description('  "quoted"  '), "quoted")
+
+    def test_description_cut_matches_hermes_on_real_descriptions(self) -> None:
+        # Expected values are the output of hermes-agent
+        # `agent/skill_utils.py::clip_skill_description` (Nov 2026 main) on
+        # the openings of three shipped descriptions, pasted as literals: the cut lands
+        # on a word boundary, trailing punctuation is stripped, and `...` is
+        # appended. OMH does not import Hermes, so the literals are the pin.
+        cases = (
+            (
+                "[omh] Git branch in trouble: a merge conflict, a commit that broke something, "
+                "history to repair; plan the resolution.",
+                "[omh] Git branch in trouble: a merge conflict, a commit...",
+            ),
+            (
+                "[omh] Accumulated tech debt or architecture deepening: rank it; build the "
+                "severity-by-effort debt ledger.",
+                "[omh] Accumulated tech debt or architecture deepening...",
+            ),
+            (
+                "[omh] Current tech or business fact to cite from web: web lookup lane - settle a question.",
+                "[omh] Current tech or business fact to cite from web: web...",
+            ),
+        )
+        for description, expected in cases:
+            with self.subTest(description=description[:40]):
+                self.assertEqual(skill_index.hermes_index_description(description), expected)
 
     def test_one_line_per_installable_skill_under_sorted_category_headers(self) -> None:
         lines = skill_index.full_profile_skill_index_lines()
@@ -271,13 +304,178 @@ class UpstreamDescriptionLimitPinTests(unittest.TestCase):
         self.assertIn('desc[:SKILL_PROMPT_DESC_LIMIT - 3] + "..."', source)
 
 
+def _module_literals(tree: ast.Module) -> dict[str, object]:
+    """Module-level names whose value is a plain literal, in source order."""
+    names: dict[str, object] = {}
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+        for target in targets:
+            if not isinstance(target, ast.Name):
+                continue
+            try:
+                names[target.id] = ast.literal_eval(node.value)
+            except (ValueError, TypeError):
+                continue
+    return names
+
+
+def _eval_toolset_expr(node: ast.AST, names: dict[str, object]) -> set[str]:
+    """Evaluate a module-level toolset expression without importing Hermes.
+
+    Hermes moved `_DIRECT_SURFACE_TOOLSETS` from a literal `frozenset({...})`
+    to `CLIENT_SURFACE_TOOLSETS | TOOLSET_SESSION_PLATFORMS.keys()`.  The
+    invariant is the resulting set, not the spelling, so resolve names, literal
+    sets/dicts, `|` unions and `.keys()` calls over literal module constants.
+    """
+    if isinstance(node, ast.Name):
+        value = names.get(node.id)
+        if isinstance(value, (set, frozenset, list, tuple)):
+            return set(value)
+        if isinstance(value, dict):
+            return set(value)
+        raise TypeError(f"{node.id} is not a literal collection at module level")
+    if isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+        return {ast.literal_eval(element) for element in node.elts}
+    if isinstance(node, ast.Dict):
+        return {ast.literal_eval(key) for key in node.keys}
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in {"frozenset", "set", "tuple", "list"}
+        and len(node.args) == 1
+    ):
+        return _eval_toolset_expr(node.args[0], names)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return _eval_toolset_expr(node.left, names) | _eval_toolset_expr(node.right, names)
+    if (
+        isinstance(node, ast.Call)
+        and not node.args
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "keys"
+    ):
+        return _eval_toolset_expr(node.func.value, names)
+    if isinstance(node, ast.Attribute):
+        value = names.get(node.attr)
+        if isinstance(value, (set, frozenset, list, tuple, dict)):
+            return set(value)
+    raise TypeError(ast.dump(node))
+
+
+def _session_platform_toolsets(toolsets_source: Path) -> set[str]:
+    """Keys of `TOOLSETS` whose spec declares `platforms` (the session-gated set)."""
+    tree = ast.parse(toolsets_source.read_text(encoding="utf-8"))
+    for node in tree.body:
+        if not (
+            isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "TOOLSETS" for target in node.targets)
+            and isinstance(node.value, ast.Dict)
+        ):
+            continue
+        names: set[str] = set()
+        for key, value in zip(node.value.keys, node.value.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                continue
+            declares = (
+                isinstance(value, ast.Dict)
+                and any(isinstance(item, ast.Constant) and item.value == "platforms" for item in value.keys)
+            ) or (
+                isinstance(value, ast.Call)
+                and any(keyword.arg == "platforms" for keyword in value.keywords)
+            )
+            if declares:
+                names.add(key.value)
+        return names
+    raise AssertionError(f"{toolsets_source} no longer defines TOOLSETS as a mapping")
+
+
+def _resolve_module_names(tree: ast.Module) -> dict[str, object]:
+    """Literal module names plus reducible `frozenset({...})`/union assignments."""
+    names = _module_literals(tree)
+    for _ in range(len(tree.body)):
+        progressed = False
+        for node in tree.body:
+            if not isinstance(node, ast.Assign) or len(node.targets) != 1 or not isinstance(node.targets[0], ast.Name):
+                continue
+            try:
+                value = _eval_toolset_expr(node.value, names)
+            except (TypeError, ValueError):
+                continue
+            if names.get(node.targets[0].id) != value:
+                names[node.targets[0].id] = value
+                progressed = True
+        if not progressed:
+            break
+    return names
+
+
+def _imported_literal_names(source: Path, tree: ast.Module) -> dict[str, object]:
+    """Literal constants of `from <module> import <name>` for sibling Hermes modules."""
+    names: dict[str, object] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ImportFrom) or not node.module:
+            continue
+        for candidate in (source.parent / f"{node.module}.py", source.parent.parent / f"{node.module}.py"):
+            if candidate.is_file():
+                break
+        else:
+            continue
+        imported = _resolve_module_names(ast.parse(candidate.read_text(encoding="utf-8")))
+        for alias in node.names:
+            original = alias.name
+            if original in imported:
+                names[alias.asname or original] = imported[original]
+            elif original == "TOOLSET_SESSION_PLATFORMS":
+                names[alias.asname or original] = _session_platform_toolsets(candidate)
+    return names
+
+
+def _direct_surface_toolsets(source: Path) -> set[str]:
+    """The resolved `_DIRECT_SURFACE_TOOLSETS` of a Hermes `tools/tool_search.py`."""
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    assignments = [
+        node for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "_DIRECT_SURFACE_TOOLSETS" for target in node.targets)
+    ]
+    if not assignments:
+        raise AssertionError(f"{source} no longer defines _DIRECT_SURFACE_TOOLSETS")
+    names = {**_imported_literal_names(source, tree), **_resolve_module_names(tree)}
+    return _eval_toolset_expr(assignments[-1].value, names)
+
+
+def _tool_search_default_enabled(source: Path) -> str:
+    """`DEFAULT_CONFIG["tools"]["tool_search"]["enabled"]`, read from the AST.
+
+    The surrounding defaults mapping is not a pure literal, so walk mappings
+    for the `tool_search` block instead of parsing one indentation spelling.
+    """
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values):
+            if not (isinstance(key, ast.Constant) and key.value == "tool_search" and isinstance(value, ast.Dict)):
+                continue
+            for inner_key, inner_value in zip(value.keys, value.values):
+                if (
+                    isinstance(inner_key, ast.Constant)
+                    and inner_key.value == "enabled"
+                    and isinstance(inner_value, ast.Constant)
+                    and isinstance(inner_value.value, str)
+                ):
+                    return inner_value.value
+    raise AssertionError(f"{source} no longer defines a tool_search.enabled default")
+
+
 class UpstreamToolDeferralPinTests(unittest.TestCase):
     """`plugin_tool_schema_chars` is labelled an eager ceiling because Hermes defers plugin tools.
 
     Under Hermes's default `tools.tool_search.enabled: auto` every non-core
     tool outside `_DIRECT_SURFACE_TOOLSETS` is deferrable, which puts the
-    `omh` toolset behind the bridge. Checked from the upstream source text
-    wherever a Hermes checkout is importable; skipped elsewhere, including CI.
+    `omh` toolset behind the bridge.  The invariant is the resolved set, so it
+    is read with `ast` instead of one regex spelling; the actual deferral of a
+    registered `omh` tool is observed end to end by
+    `tools/check_hermes_compatibility.py` in the Hermes compatibility workflow.
     """
 
     def test_the_omh_toolset_is_deferrable_by_default_upstream(self) -> None:
@@ -285,19 +483,14 @@ class UpstreamToolDeferralPinTests(unittest.TestCase):
         defaults = _hermes_source("hermes_cli/config_defaults.py")
         if tool_search is None or defaults is None:
             self.skipTest("no Hermes checkout is importable; tools/tool_search.py cannot be compared")
+        direct = _direct_surface_toolsets(tool_search)
+        self.assertIsInstance(direct, set)
+        self.assertNotIn("omh", direct)
+        self.assertTrue(direct, "the resolved direct-surface set is empty; the expression was not understood")
         source = tool_search.read_text(encoding="utf-8")
-        direct = re.search(r"^_DIRECT_SURFACE_TOOLSETS = frozenset\((\{[^}]*\})\)$", source, re.MULTILINE)
-        self.assertIsNotNone(direct, f"{tool_search} no longer defines _DIRECT_SURFACE_TOOLSETS")
-        assert direct is not None
-        self.assertNotIn('"omh"', direct.group(1))
         # The rule's wording has changed between Hermes versions; its name has not.
         self.assertIn("def is_deferrable_tool_name(", source)
-        block = defaults.read_text(encoding="utf-8").split('"tool_search": {', 1)
-        self.assertEqual(len(block), 2, f"{defaults} has no tool_search defaults block")
-        enabled = re.search(r'^\s*"enabled": "([a-z]+)"', block[1], re.MULTILINE)
-        self.assertIsNotNone(enabled, f"{defaults} tool_search block has no enabled default")
-        assert enabled is not None
-        self.assertIn(enabled.group(1), {"auto", "on"})
+        self.assertIn(_tool_search_default_enabled(defaults), {"auto", "on"})
 
     def test_the_budget_is_described_as_an_eager_ceiling(self) -> None:
         metric = next(m for m in budget_metrics() if m.name == "plugin_tool_schema_chars")
@@ -385,9 +578,12 @@ class IndexOpeningLintTests(unittest.TestCase):
         self.assertEqual(skill_index.index_opening("Hermes Code Review workflow: bug-first"), "hermes code review")
 
     def test_the_prefix_costs_six_characters_of_the_visible_window(self) -> None:
-        # The window is 57 characters either way; the prefix sits inside it.
-        self.assertEqual(skill_index.index_opening("[omh] " + "a" * 60 + " b c"), "a" * 51)
-        self.assertEqual(skill_index.index_opening("a" * 60 + " b c"), "a" * 57)
+        # The window is the same either way and the prefix sits inside it: a
+        # third word that ends at character 57 is whole without the prefix
+        # and cut at the word boundary with it.
+        body = "a" * 24 + " " + "b" * 24 + " " + "c" * 7 + " d e"
+        self.assertEqual(skill_index.index_opening("[omh] " + body), "a" * 24 + " " + "b" * 24)
+        self.assertEqual(skill_index.index_opening(body), "a" * 24 + " " + "b" * 24 + " " + "c" * 7)
 
     def test_openings_that_differ_by_the_third_word_do_not_collide(self) -> None:
         pairs = [("one", "[omh] Hermes frontend workflow: x"), ("two", "[omh] Hermes frontend refactor: y")]
@@ -491,6 +687,201 @@ class PluginToolSchemaProducerTests(unittest.TestCase):
         by_tool = per_turn_context.plugin_tool_schema_chars_by_tool()
         self.assertEqual(per_turn_context.plugin_tool_schema_chars(), sum(by_tool.values()))
 
+    def test_parked_dag_schema_growth_is_bounded_without_spending_legacy_content(self) -> None:
+        # The approved preflight schema was also 2479 JSON characters. Remove
+        # only parked additions, retaining preflight's marker refusal and
+        # one-shot cap wording; pin its intact schema, not just its size, so
+        # removing an existing safeguard cannot finance parked growth.
+        schema = per_turn_context.registered_tool_schemas()["omh_dag"]
+        legacy = copy.deepcopy(schema)
+        # The export `owner` was an approved enum; its pattern form is funded by its own PLUGIN_TOOL_SCHEMA_CHAR_LIMIT
+        # entry (+3), so the approved schema compared below keeps the enum and the change is counted separately.
+        export_owner = legacy["parameters"]["properties"]["owner"]
+        self.assertEqual(export_owner["description"], "export: a coding owner named in the run's request.")
+        legacy["parameters"]["properties"]["owner"] = {"type": "string", "enum": ["claude-code", "codex"],
+                                                       "description": export_owner["description"]}
+        # The node `owner` was the approved enum; its pattern form is funded below (+62), so restore the enum here too.
+        legacy["parameters"]["properties"]["nodes"]["items"]["properties"]["owner"] = {
+            "type": "string", "enum": ["claude-code", "codex"]}
+        parked_note = (
+            "A still-running wait may settle parked with "
+            "handle and wake_at (future UTC ISO-8601 or epoch, within 24h); ready reoffers it then, at most three parks. "
+        )
+        self.assertEqual(legacy["description"].count(parked_note), 1)
+        legacy["description"] = legacy["description"].replace(parked_note, "", 1)
+        properties = legacy["parameters"]["properties"]
+        self.assertEqual(properties.pop("handle")["maxLength"], 120)
+        self.assertEqual(properties.pop("wake_at")["type"], ["string", "number"])
+        self.assertEqual(properties["outcome"]["enum"].count("parked"), 1)
+        properties["outcome"]["enum"].remove("parked")
+        # The node `category` enum is the routable vocabulary, which grew by
+        # the six routing-recipe categories on 2026-10-28 (+75, funded by its
+        # own PLUGIN_TOOL_SCHEMA_CHAR_LIMIT entry). Strip exactly those so the
+        # approved schema below is still compared intact.
+        category_enum = properties["nodes"]["items"]["properties"]["category"]["enum"]
+        recipe = ["google-search", "x-search", "review", "swarm", "forensics", "synthesize"]
+        self.assertEqual(category_enum[-len(recipe):], recipe)
+        del category_enum[-len(recipe):]
+        # The node `role` field (+85, its own PLUGIN_TOOL_SCHEMA_CHAR_LIMIT entry) is stripped the same way, from
+        # this and from the live schema below, so it can spend neither the approved schema nor the parked cap.
+
+        # The node `review_focus` field (+130, its own PLUGIN_TOOL_SCHEMA_CHAR_LIMIT entry) is stripped before
+        # `identity`: its property and its name in the description's field list.
+        def without_review_focus(target: dict) -> int:
+            before = len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+            focus = target["parameters"]["properties"]["nodes"]["items"]["properties"].pop("review_focus")
+            self.assertEqual(focus, {"type": "string",
+                                     "description": "What the parent will look for when it reads this node's work."})
+            self.assertEqual(target["description"].count("read_only, identity, review_focus)"), 1)
+            target["description"] = target["description"].replace(
+                "read_only, identity, review_focus)", "read_only, identity)", 1)
+            return before - len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+
+        # The node `identity` field (+122, its own PLUGIN_TOOL_SCHEMA_CHAR_LIMIT entry; #2939) is stripped first,
+        # from this and from the live schema below, so it can spend neither the approved schema nor the parked cap.
+        def without_identity(target: dict) -> int:
+            before = len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+            identity = target["parameters"]["properties"]["nodes"]["items"]["properties"].pop("identity")
+            self.assertEqual(identity, {"type": "string",
+                                        "description": "Optional identity reference: builtin:<name> or custom:<name>."})
+            self.assertEqual(target["description"].count("write_scope, role, owner, local, read_only, identity)"), 1)
+            target["description"] = target["description"].replace(
+                "write_scope, role, owner, local, read_only, identity)", "write_scope, role, owner, local, read_only)", 1)
+            return before - len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+
+        # The node `read_only` field (+45, its own PLUGIN_TOOL_SCHEMA_CHAR_LIMIT entry) is stripped before `local`.
+        def without_read_only(target: dict) -> int:
+            before = len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+            read_only = target["parameters"]["properties"]["nodes"]["items"]["properties"].pop("read_only")
+            self.assertEqual(read_only, {"type": "boolean"})
+            self.assertEqual(target["description"].count("write_scope, role, owner, local, read_only)"), 1)
+            target["description"] = target["description"].replace(
+                "write_scope, role, owner, local, read_only)", "write_scope, role, owner, local)", 1)
+            return before - len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+
+        # The node `local` field (+37, its own PLUGIN_TOOL_SCHEMA_CHAR_LIMIT entry) is stripped next, then `owner`.
+        def without_local(target: dict) -> int:
+            before = len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+            local = target["parameters"]["properties"]["nodes"]["items"]["properties"].pop("local")
+            self.assertEqual(local, {"type": "boolean"})
+            self.assertEqual(target["description"].count("write_scope, role, owner, local)"), 1)
+            target["description"] = target["description"].replace(
+                "write_scope, role, owner, local)", "write_scope, role, owner)", 1)
+            return before - len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+
+        # The node `owner` field (+62, its own PLUGIN_TOOL_SCHEMA_CHAR_LIMIT entry: the closed enum became a pattern
+        # with the description "Coding owner: built-in or configured id.") is stripped next, the same way.
+        def without_owner(target: dict) -> int:
+            before = len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+            owner = target["parameters"]["properties"]["nodes"]["items"]["properties"].pop("owner")
+            self.assertEqual(owner, {"type": "string", "pattern": "^[a-z][a-z0-9-]{1,31}$",
+                                     "description": "Coding owner: built-in or configured id."})
+            self.assertEqual(target["description"].count("write_scope, role, owner)"), 1)
+            target["description"] = target["description"].replace("write_scope, role, owner)", "write_scope, role)", 1)
+            return before - len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+
+        def without_export_owner(target: dict) -> int:
+            before = len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+            export_owner = target["parameters"]["properties"]["owner"]
+            self.assertEqual(export_owner["pattern"], "^[a-z][a-z0-9-]{1,31}$")
+            target["parameters"]["properties"]["owner"] = {
+                "type": "string", "enum": ["claude-code", "codex"], "description": export_owner["description"]}
+            return before - len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+
+        def without_role(target: dict) -> int:
+            before = len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+            role = target["parameters"]["properties"]["nodes"]["items"]["properties"].pop("role")
+            self.assertEqual(role, {"type": "string", "enum": ["build", "baseline", "verify", "review"]})
+            self.assertEqual(target["description"].count("write_scope, role)"), 1)
+            target["description"] = target["description"].replace("write_scope, role)", "write_scope)", 1)
+            return before - len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+
+        # The goal `criteria` parameter (+226, then +95 and +8 for its description; its own PLUGIN_TOOL_SCHEMA_CHAR_LIMIT
+        # entries) is stripped before all three, with the description clause, and `goal` reads "goal criteria" again.
+        def without_criteria(target: dict) -> int:
+            before = len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+            properties = target["parameters"]["properties"]
+            criteria = properties.pop("criteria")
+            self.assertEqual(criteria["items"], {"type": "object", "properties": {
+                "id": {"type": "string"}, "text": {"type": "string"}}})
+            clause = ("criteria (define, extend): the goal's checkable outcomes, each met only by a verify node's "
+                      "handoff line. ")
+            self.assertEqual(target["description"].count(clause), 1)
+            target["description"] = target["description"].replace(clause, "", 1)
+            self.assertEqual(properties["goal"]["description"], "define: the run's goal, one line.")
+            properties["goal"]["description"] = "define: the run's goal criteria, one line."
+            return before - len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+
+        # The escalated outcome (+224, its own PLUGIN_TOOL_SCHEMA_CHAR_LIMIT entry) is stripped first: its enum value
+        # and its description sentence.
+        def without_escalation(target: dict) -> int:
+            before = len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+            outcomes = target["parameters"]["properties"]["outcome"]["enum"]
+            self.assertEqual(outcomes.count("escalated"), 1)
+            outcomes.remove("escalated")
+            sentence = ("A child whose handoff starts a line with ESCALATE: settles escalated with the question as "
+                        "reason; the node is offered again one category up (quick, unspecified-low, unspecified-high, "
+                        "ultrabrain), at most twice. ")
+            self.assertEqual(target["description"].count(sentence), 1)
+            target["description"] = target["description"].replace(sentence, "", 1)
+            return before - len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+
+        # The define-only `carry_forward` base revision (+188, its own PLUGIN_TOOL_SCHEMA_CHAR_LIMIT entry) is stripped
+        # first: one optional string property, no description sentence.
+        def without_carry_forward(target: dict) -> int:
+            before = len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+            carry = target["parameters"]["properties"].pop("carry_forward")
+            self.assertEqual(set(carry), {"type", "description"})
+            self.assertEqual(carry["type"], "string")
+            return before - len(json.dumps(target, sort_keys=True, ensure_ascii=False))
+
+        self.assertEqual(without_carry_forward(legacy), 188)
+        self.assertEqual(without_review_focus(legacy), 130)
+        self.assertEqual(without_escalation(legacy), 224)
+        self.assertEqual(without_criteria(legacy), 226 + 95 + 8)
+        self.assertEqual(without_identity(legacy), 122)
+        self.assertEqual(without_read_only(legacy), 45)
+        self.assertEqual(without_local(legacy), 37)
+        # The approved (pre-change) node owner enum and its description clause are stripped as before; this is the
+        # approved baseline the hash pins, so its size is not a funded delta.
+        approved_owner = legacy["parameters"]["properties"]["nodes"]["items"]["properties"].pop("owner")
+        self.assertEqual(approved_owner, {"type": "string", "enum": ["claude-code", "codex"]})
+        self.assertEqual(legacy["description"].count("write_scope, role, owner)"), 1)
+        legacy["description"] = legacy["description"].replace("write_scope, role, owner)", "write_scope, role)", 1)
+        self.assertEqual(without_role(legacy), 85)
+        encoded = json.dumps(legacy, sort_keys=True, ensure_ascii=False)
+        self.assertEqual(len(encoded), 2479)
+        # Digest re-derived, length unchanged: the export `owner` description reads "a coding owner named in the
+        # run's request" in place of "the coding owner the person already chose" (same 42 characters), since a
+        # choice counts only for the request it was made in; the pin before it was 39be91ff...d3c5.
+        self.assertEqual(
+            hashlib.sha256(encoded.encode()).hexdigest(),
+            "5f8cb791ca4052cd474026e154f759ba0ea9c01f402d4fd6ebe4054253143b6f",
+        )
+        # The parked cap is measured against the live schema without the six
+        # category values, so category growth cannot spend the parked cap.
+        live = copy.deepcopy(schema)
+        del live["parameters"]["properties"]["nodes"]["items"]["properties"]["category"]["enum"][-len(recipe):]
+        self.assertEqual(without_carry_forward(live), 188)
+        self.assertEqual(without_review_focus(live), 130)
+        self.assertEqual(without_escalation(live), 224)
+        self.assertEqual(without_criteria(live), 226 + 95 + 8)
+        self.assertEqual(without_identity(live), 122)
+        self.assertEqual(without_read_only(live), 45)
+        self.assertEqual(without_local(live), 37)
+        # The node `owner` field, with its clause, is 132 characters now (114 for the pattern field, 18 for the clause);
+        # the approved enum form was 70, so the funded growth is 62.
+        self.assertEqual(without_owner(live), 132)
+        self.assertEqual(without_export_owner(live), 3)
+        self.assertEqual(without_role(live), 85)
+        delta = len(json.dumps(live, sort_keys=True, ensure_ascii=False)) - len(encoded)
+        self.assertEqual(
+            per_turn_context.plugin_tool_schema_chars_by_tool()["omh_dag"] - len(encoded) - delta,
+            75 + 85 + 70 + 62 + 3 + 37 + 226 + 95 + 8 + 45 + 122 + 224 + 188 + 130,
+        )
+        self.assertGreater(delta, 0)
+        self.assertLessEqual(delta, 429)  # Measured feature cap, not general headroom.
+
     def test_a_longer_schema_description_moves_the_total(self) -> None:
         before = per_turn_context.plugin_tool_schema_chars()
         grown = str(OMH_TODO_SCHEMA["description"]) + " padding"
@@ -509,11 +900,14 @@ class PreLlmCallScenarioTests(unittest.TestCase):
                     "first_turn_without_section",
                     "route_hint",
                     "skill_candidates",
+                    "defect_fix_method",
                     "role_marker",
                     "active_workflow",
                     "running_work_board",
                     "done_unverified_plan",
                     "held_native_write",
+                    "plan_acceptance",
+                    "clarify_timed_out",
                     "all_surfaces",
                     "all_surfaces_without_section",
                 ]
@@ -534,6 +928,47 @@ class PreLlmCallScenarioTests(unittest.TestCase):
             without_line = per_turn_context.pre_llm_call_context_scenario_chars()["held_native_write"]
         line = native_todo.HELD_NATIVE_WRITE_NOTE.format(kind="accepted plan")
         self.assertEqual(with_line - without_line, len(line) + len("\n\n"))
+
+    def test_the_plan_acceptance_scenario_measures_the_follow_on_line(self) -> None:
+        from omh.plugin_bundle.omh import plan_follow_on
+        from omh.plugin_bundle.omh.hooks import llm_hooks
+
+        with_line = per_turn_context.pre_llm_call_context_scenario_chars()["plan_acceptance"]
+        with mock.patch.object(llm_hooks, "acceptance_line", lambda *args: ""):
+            without_line = per_turn_context.pre_llm_call_context_scenario_chars()["plan_acceptance"]
+        self.assertEqual(with_line - without_line, len(plan_follow_on.ACCEPTANCE_LINE) + len("\n\n"))
+
+    def test_the_defect_fix_scenario_measures_the_method_block(self) -> None:
+        from omh.plugin_bundle.omh.defect_fix_method import METHOD_BLOCK
+        from omh.plugin_bundle.omh.hooks import llm_hooks
+
+        with_block = per_turn_context.pre_llm_call_context_scenario_chars()
+        with mock.patch.object(llm_hooks, "asks_to_fix_code", lambda _message: False):
+            without_block = per_turn_context.pre_llm_call_context_scenario_chars()
+        self.assertEqual(
+            with_block["defect_fix_method"] - without_block["defect_fix_method"], len(METHOD_BLOCK) + len("\n\n")
+        )
+        # Only the scenarios whose request asks to fix code move: this one and the
+        # plain first turn ("... and fix the tests"); the maxima do not.
+        moved = sorted(name for name in with_block if with_block[name] != without_block[name])
+        self.assertEqual(moved, ["defect_fix_method", "first_turn_without_section"])
+
+    def test_the_console_scenarios_measure_the_console_choices_lines(self) -> None:
+        from omh.plugin_bundle.omh import console_choices
+        from omh.plugin_bundle.omh.hooks import llm_hooks
+
+        with_line = per_turn_context.pre_llm_call_context_scenario_chars()
+        with mock.patch.object(llm_hooks, "console_choices_line", lambda *args, **kwargs: ""):
+            without_line = per_turn_context.pre_llm_call_context_scenario_chars()
+        joined = len("\n\n")
+        for name in ("all_surfaces", "all_surfaces_without_section"):
+            with self.subTest(scenario=name):
+                self.assertEqual(with_line[name] - without_line[name], len(console_choices.CONSOLE_CHOICES_LINE) + joined)
+        # The re-ask is the timed-out turn's only part: the scenario is that line inside the fence.
+        self.assertEqual(without_line["clarify_timed_out"], 0)
+        self.assertEqual(
+            with_line["clarify_timed_out"], len(llm_hooks.fence_omh_context([console_choices.TIMED_OUT_LINE]))
+        )
 
     def test_parts_add_so_all_surfaces_is_the_maximum(self) -> None:
         scenarios = per_turn_context.pre_llm_call_context_scenario_chars()
@@ -569,12 +1004,16 @@ class PreLlmCallScenarioTests(unittest.TestCase):
     def test_the_primer_limit_still_binds_the_primer_alone(self) -> None:
         self.assertLessEqual(len(awareness_primer_context()), AWARENESS_PRIMER_CONTEXT_CHAR_LIMIT)
         # The first-turn scenario is the primer inside the fence, plus the
-        # request's skill candidate line when it has one, and nothing else.
+        # request's skill candidate line when it has one, plus the debugging
+        # method block when the request asks to fix code, and nothing else.
+        from omh.plugin_bundle.omh.defect_fix_method import METHOD_BLOCK, asks_to_fix_code
+
         first_turn = per_turn_context.pre_llm_call_context_scenario_chars()["first_turn_without_section"]
         fence_overhead = len(llm_hooks.fence_omh_context(["x"])) - 1
         line = skill_candidate_line(skill_candidates_for_turn(per_turn_context._PLAIN_REQUEST))
         line_chars = len("\n\n" + line) if line else 0
-        self.assertEqual(first_turn, len(awareness_primer_context()) + fence_overhead + line_chars)
+        block_chars = len("\n\n" + METHOD_BLOCK) if asks_to_fix_code(per_turn_context._PLAIN_REQUEST) else 0
+        self.assertEqual(first_turn, len(awareness_primer_context()) + fence_overhead + line_chars + block_chars)
 
     def test_a_larger_injected_part_moves_the_measurement(self) -> None:
         before = per_turn_context.pre_llm_call_context_scenario_chars()["first_turn_without_section"]

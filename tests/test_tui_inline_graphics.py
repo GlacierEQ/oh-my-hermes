@@ -1,0 +1,105 @@
+"""`inline_graphics` picks kitty pixels or half-blocks from the environment, in the order Hermes' own TUI does."""
+
+from __future__ import annotations
+
+import unittest
+
+from omh.tui.terminal import INLINE_KITTY, INLINE_UNICODE, inline_graphics
+
+
+class InlineGraphicsTests(unittest.TestCase):
+    def test_empty_environment_is_unicode(self) -> None:
+        self.assertEqual(inline_graphics({}), INLINE_UNICODE)
+
+    def test_plain_xterm_is_unicode(self) -> None:
+        self.assertEqual(inline_graphics({"TERM": "xterm-256color"}), INLINE_UNICODE)
+
+    def test_vscode_is_unicode(self) -> None:
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "vscode"}), INLINE_UNICODE)
+
+    def test_vscode_with_inherited_kitty_window_is_unicode(self) -> None:
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "vscode", "KITTY_WINDOW_ID": "1"}), INLINE_UNICODE)
+
+    def test_dashboard_host_is_unicode(self) -> None:
+        self.assertEqual(inline_graphics({"HERMES_PTY_HOST": "dashboard", "TERM": "xterm-kitty"}), INLINE_UNICODE)
+
+    def test_tmux_is_unicode(self) -> None:
+        self.assertEqual(inline_graphics({"TMUX": "/tmp/tmux-1/default,1,0"}), INLINE_UNICODE)
+
+    def test_screen_is_unicode(self) -> None:
+        self.assertEqual(inline_graphics({"STY": "1.pts-0", "TERM": "xterm-kitty"}), INLINE_UNICODE)
+
+    def test_empty_tmux_does_not_count(self) -> None:
+        self.assertEqual(inline_graphics({"TMUX": "", "KITTY_WINDOW_ID": "1"}), INLINE_KITTY)
+
+    def test_kitty_inside_tmux_is_unicode(self) -> None:
+        self.assertEqual(inline_graphics({"KITTY_WINDOW_ID": "1", "TMUX": "x"}), INLINE_UNICODE)
+
+    def test_wezterm_program_is_unicode(self) -> None:
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "WezTerm", "KITTY_WINDOW_ID": "1"}), INLINE_UNICODE)
+
+    def test_wezterm_pane_is_unicode(self) -> None:
+        self.assertEqual(inline_graphics({"WEZTERM_PANE": "3", "TERM": "xterm-kitty"}), INLINE_UNICODE)
+
+    def test_kitty_window_id_is_kitty(self) -> None:
+        self.assertEqual(inline_graphics({"KITTY_WINDOW_ID": "1"}), INLINE_KITTY)
+
+    def test_ghostty_resources_dir_is_kitty(self) -> None:
+        self.assertEqual(inline_graphics({"GHOSTTY_RESOURCES_DIR": "/Applications/Ghostty.app"}), INLINE_KITTY)
+
+    def test_kitty_term_is_kitty(self) -> None:
+        self.assertEqual(inline_graphics({"TERM": "xterm-kitty"}), INLINE_KITTY)
+
+    def test_ghostty_term_is_kitty(self) -> None:
+        self.assertEqual(inline_graphics({"TERM": "xterm-ghostty"}), INLINE_KITTY)
+
+    def test_ghostty_program_is_kitty(self) -> None:
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "Ghostty"}), INLINE_KITTY)
+
+    def test_otty_is_kitty(self) -> None:
+        # Otty's own environment: an xterm TERM and no kitty variable, only its program name.
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "otty", "TERM": "xterm-256color", "COLORTERM": "truecolor"}),
+                         INLINE_KITTY)
+
+    def test_otty_inside_tmux_is_unicode(self) -> None:
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "otty", "TMUX": "x"}), INLINE_UNICODE)
+
+    def test_omher_is_kitty(self) -> None:
+        # omher's terminal pane from 1.1.4: TERM_PROGRAM=omher and its version over an xterm TERM, no kitty variable.
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "omher", "TERM_PROGRAM_VERSION": "1.1.4",
+                                          "TERM": "xterm-256color", "COLORTERM": "truecolor"}), INLINE_KITTY)
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "OMHER", "TERM_PROGRAM_VERSION": "1.2.0"}), INLINE_KITTY)
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "omher", "TERM_PROGRAM_VERSION": "2.0"}), INLINE_KITTY)
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "omher", "TERM_PROGRAM_VERSION": "1.1.10"}), INLINE_KITTY)
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "omher", "TERM_PROGRAM_VERSION": "1.1.4-beta.1"}), INLINE_KITTY)
+
+    def test_an_omher_that_paints_no_placeholders_is_unicode(self) -> None:
+        # omher 1.1.3 and earlier set no version and paint no placeholders: kitty there drew tofu boxes.
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "omher", "TERM": "xterm-256color", "COLORTERM": "truecolor"}),
+                         INLINE_UNICODE)
+        for version in ("1.1.3", "1.0.9", "0.9", "", " ", "dev", "1.x.4", "v1.2.0"):
+            with self.subTest(version=version):
+                self.assertEqual(inline_graphics({"TERM_PROGRAM": "omher", "TERM_PROGRAM_VERSION": version}),
+                                 INLINE_UNICODE)
+
+    def test_omher_inside_tmux_or_screen_is_unicode(self) -> None:
+        new = {"TERM_PROGRAM": "omher", "TERM_PROGRAM_VERSION": "1.1.4"}
+        self.assertEqual(inline_graphics({**new, "TMUX": "x"}), INLINE_UNICODE)
+        self.assertEqual(inline_graphics({**new, "STY": "x"}), INLINE_UNICODE)
+
+    def test_a_program_named_like_omher_is_not_omher(self) -> None:
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "omher-dev", "TERM_PROGRAM_VERSION": "1.1.4"}), INLINE_UNICODE)
+
+    def test_another_terminals_version_does_not_matter(self) -> None:
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "otty", "TERM_PROGRAM_VERSION": "0.1"}), INLINE_KITTY)
+
+    def test_a_program_named_like_otty_is_not_otty(self) -> None:
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "cotty"}), INLINE_UNICODE)
+        self.assertEqual(inline_graphics({"TERM_PROGRAM": "otty-preview"}), INLINE_UNICODE)
+
+    def test_comparison_is_case_insensitive(self) -> None:
+        self.assertEqual(inline_graphics({"TERM": "XTERM-KITTY"}), INLINE_KITTY)
+
+
+if __name__ == "__main__":
+    unittest.main()

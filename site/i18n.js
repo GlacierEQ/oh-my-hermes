@@ -29,17 +29,53 @@ window.OMH_I18N = {
       ja: "インストール",
       zh: "安装"
     },
+    "nav.download": {
+      en: "Download app",
+      ko: "앱 다운로드",
+      ja: "アプリをダウンロード",
+      zh: "下载应用"
+    },
+    "omher.desc": {
+      en: "Your Hermes bots and coding agents, in one window.",
+      ko: "Hermes 봇과 코딩 에이전트를 한 창에서.",
+      ja: "Hermes のボットとコーディングエージェントを、ひとつの窓で。",
+      zh: "你的 Hermes 机器人和编码智能体，尽在一个窗口。"
+    },
+    "faces.title": {
+      en: "A face for every bot.",
+      ko: "봇마다 얼굴 하나.",
+      ja: "ボットごとに、ひとつの顔。",
+      zh: "每个机器人，都有一张脸。"
+    },
+    "faces.desc": {
+      en: "Built in, or use your own picture.",
+      ko: "기본 얼굴을 쓰거나, 내 사진으로 바꾸세요.",
+      ja: "標準の顔でも、自分の画像でも。",
+      zh: "用内置的，或换成你自己的图片。"
+    },
+    "faces.cta": {
+      en: "Download omher",
+      ko: "omher 다운로드",
+      ja: "omher をダウンロード",
+      zh: "下载 omher"
+    },
     "nav.docs": {
       en: "Docs",
       ko: "문서",
       ja: "ドキュメント",
       zh: "文档"
     },
+    "nav.guide": {
+      en: "Start Guide",
+      ko: "시작 가이드",
+      ja: "スタートガイド",
+      zh: "入门指南"
+    },
     "hero.badge": {
-      en: "For Hermes Agent · v4.0.2",
-      ko: "Hermes Agent 전용 · v4.0.2",
-      ja: "Hermes Agent のための · v4.0.2",
-      zh: "为 Hermes Agent 打造 · v4.0.2"
+      en: "For Hermes Agent · v5.0.1",
+      ko: "Hermes Agent 전용 · v5.0.1",
+      ja: "Hermes Agent のための · v5.0.1",
+      zh: "为 Hermes Agent 打造 · v5.0.1"
     },
     "hero.tagline": {
       en: "All-in-one package for Hermes Agent. Install once, then just type <code>dag-ulw</code>.",
@@ -257,6 +293,12 @@ window.OMH_I18N = {
       ja: "Homebrew、Bun、npm のパッケージマネージャー経由のインストールは v1.0.6 から公開されています。",
       zh: "Homebrew、Bun 与 npm 包管理器安装方式已随 v1.0.6 正式公开。"
     },
+    "install.prereq.note": {
+      en: "Use the macOS · Linux or Windows installer; it finds Python 3.11+ itself. Homebrew, Bun, and npm install the published release: Bun and npm also need Node 18+ and Python 3.11+ on PATH, and Homebrew brings its own Python.",
+      ko: "macOS · Linux 또는 Windows 설치 스크립트를 사용하세요. Python 3.11 이상을 스스로 찾습니다. Homebrew, Bun, npm은 공개 릴리스를 설치합니다. Bun과 npm은 PATH에 Node 18 이상과 Python 3.11 이상이 더 필요하고, Homebrew는 자체 Python을 설치합니다.",
+      ja: "macOS · Linux または Windows のインストーラーを使ってください。Python 3.11 以降は自動で見つけます。Homebrew、Bun、npm は公開リリースをインストールします。Bun と npm には PATH 上の Node 18 以降と Python 3.11 以降も必要で、Homebrew は独自の Python を入れます。",
+      zh: "请使用 macOS · Linux 或 Windows 安装脚本，它会自行查找 Python 3.11+。Homebrew、Bun 与 npm 安装已发布的版本：Bun 和 npm 还需要 PATH 中有 Node 18+ 与 Python 3.11+，Homebrew 会自带 Python。"
+    },
     "install.step1": {
       en: "Install the command",
       ko: "명령어 설치",
@@ -390,10 +432,10 @@ window.OMH_I18N = {
       zh: "每条 lane 用自己的模型"
     },
     "models.lead": {
-      en: "Twelve categories ship with an ordered chain each. <code>omh model</code> opens the picker: arrow keys pick the category, left and right change the head model, minus and plus change the effort. The same picker opens inside the OMH TUI as <code>/omh-model</code>.",
-      ko: "카테고리 12개가 각자 순서 있는 chain과 함께 제공됩니다. <code>omh model</code>이 피커를 엽니다. 화살표 키로 카테고리를 고르고, 좌우로 첫 모델을, -/+로 effort를 바꿉니다. OMH TUI 안에서는 <code>/omh-model</code>이 같은 피커를 엽니다.",
-      ja: "12 のカテゴリが、それぞれ順序付きの chain とともに出荷されます。<code>omh model</code> でピッカーが開きます。矢印キーでカテゴリを選び、左右で先頭モデルを、-/+ で effort を変えます。OMH TUI では <code>/omh-model</code> が同じピッカーを開きます。",
-      zh: "十二个类别各自附带一条有序 chain。<code>omh model</code> 打开选择器：方向键选类别，左右切换首选模型，-/+ 调整 effort。在 OMH TUI 里，<code>/omh-model</code> 打开同一个选择器。"
+      en: "Eighteen categories ship with an ordered chain each. <code>omh model</code> opens the picker: arrow keys pick the category, left and right change the head model, minus and plus change the effort. The same picker opens inside the OMH TUI as <code>/omh-model</code>.",
+      ko: "카테고리 18개가 각자 순서 있는 chain과 함께 제공됩니다. <code>omh model</code>이 피커를 엽니다. 화살표 키로 카테고리를 고르고, 좌우로 첫 모델을, -/+로 effort를 바꿉니다. OMH TUI 안에서는 <code>/omh-model</code>이 같은 피커를 엽니다.",
+      ja: "18 のカテゴリが、それぞれ順序付きの chain とともに出荷されます。<code>omh model</code> でピッカーが開きます。矢印キーでカテゴリを選び、左右で先頭モデルを、-/+ で effort を変えます。OMH TUI では <code>/omh-model</code> が同じピッカーを開きます。",
+      zh: "十八个类别各自附带一条有序 chain。<code>omh model</code> 打开选择器：方向键选类别，左右切换首选模型，-/+ 调整 effort。在 OMH TUI 里，<code>/omh-model</code> 打开同一个选择器。"
     },
     "route.state.resolved": {
       en: "A confirmed model was selected.",
@@ -514,6 +556,42 @@ window.OMH_I18N = {
       ko: "최상위 깊이의 긴 작업",
       ja: "最高深度の長時間タスク",
       zh: "最高深度的长任务"
+    },
+    "chain.google-search": {
+      en: "Research grounded in Google Search",
+      ko: "Google 검색에 근거한 조사",
+      ja: "Google 検索に基づく調査",
+      zh: "以 Google 搜索为依据的调研"
+    },
+    "chain.x-search": {
+      en: "Live search on X",
+      ko: "X 실시간 검색",
+      ja: "X のリアルタイム検索",
+      zh: "X 上的实时搜索"
+    },
+    "chain.review": {
+      en: "A different model tries to break the diff",
+      ko: "다른 모델이 diff를 깨뜨려 보는 검토",
+      ja: "別のモデルが diff を壊しにかかるレビュー",
+      zh: "由另一个模型尝试攻破 diff"
+    },
+    "chain.swarm": {
+      en: "Many parallel workers on separate slices",
+      ko: "여러 병렬 작업자가 각자 나눈 조각을 처리",
+      ja: "多数の並列ワーカーが別々の断片を担当",
+      zh: "多个并行 worker 各自处理不同切片"
+    },
+    "chain.forensics": {
+      en: "Root-causing a live symptom or a captured trace",
+      ko: "실제 증상이나 수집한 trace의 근본 원인 추적",
+      ja: "実際の症状や取得した trace の根本原因の特定",
+      zh: "追查实时症状或已捕获 trace 的根因"
+    },
+    "chain.synthesize": {
+      en: "Merging many results into one answer",
+      ko: "여러 결과를 하나의 답으로 종합",
+      ja: "多くの結果を一つの答えに統合",
+      zh: "将多个结果合并为一个答案"
     },
     "chain.edit": {
       en: "Every chain is yours to reorder. Edit <code>~/.omh/routing/model-chains.json</code>, then run <code>omh model-chains show</code> to print what is in effect.",

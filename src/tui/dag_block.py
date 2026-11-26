@@ -46,6 +46,8 @@ from .width import truncate_line
 DAG_TOOL = "omh_dag"
 END = "end"  # the title an end moment opens with
 END_STATES = ("done", "stopped", "cancelled")
+# The goal verdicts an end title adds (`dag_run.VERDICTS`, held equal by tests/test_dag_transcript.py).
+VERDICTS = ("verified", "unverified", "verify_failed")
 INDENT = "  "
 
 
@@ -85,8 +87,22 @@ def moment(payload: Mapping[str, Any], ended: set[tuple[str, int]]) -> tuple[str
     # The end is the settle (or cancel) that ended the run; a later status or ready reading it says nothing new.
     if action in ("settle", "cancel") and state in END_STATES and (run, len(nodes)) not in ended:
         ended.add((run, len(nodes)))
-        return f"{END} · {state}", run, []
+        # The goal verdict the result carries (`dag_run.goal_verdict`): `end · done · unverified`, and for a run with
+        # goal criteria how many are met: `end · done · verified · 3/3 criteria met`.
+        verdict = result.get("verdict") if result.get("verdict") in VERDICTS else ""
+        return " · ".join([END, str(state), *([verdict] if verdict else []), *_criteria_count(result)]), run, []
     return None
+
+
+def _criteria_count(result: Mapping[str, Any]) -> list[str]:
+    """``["2/3 criteria met"]`` from a result's ``criteria`` (`dag_run.criteria_view`), else ``[]``."""
+    view = result.get("criteria")
+    if not isinstance(view, Mapping):
+        return []
+    met, total = view.get("met"), view.get("total")
+    if isinstance(met, bool) or isinstance(total, bool) or not isinstance(met, int) or not isinstance(total, int):
+        return []
+    return [f"{met}/{total} criteria met"]
 
 
 def read_graph(omh_home: str | None, hermes_home: str | None, session: str) -> Mapping[str, Any] | None:
@@ -125,7 +141,9 @@ MORE_NOTE = "/dag shows the whole graph"
 
 def _lanes(graph: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
-    return [node for node in nodes if isinstance(node, Mapping) and node.get("kind") != "root"]
+    # An outside_dag lane is no lane of the run: the condensed rows and tallies skip it as every view does.
+    return [node for node in nodes
+            if isinstance(node, Mapping) and node.get("kind") != "root" and node.get("outside_dag") is not True]
 
 
 def _lane_count(graph: Mapping[str, Any]) -> int:

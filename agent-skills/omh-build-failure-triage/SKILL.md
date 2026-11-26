@@ -1,6 +1,6 @@
 ---
 name: "omh-build-failure-triage"
-description: "[omh] Build or CI failure to triage: classify build, typecheck, lint, test, CI, and DCO failures into minimal safe fix handoffs. Use when the user says: build-failure-triage, build failure triage, build failure, build-failure, build fix, build failed, build failing, compile error."
+description: "[omh] Build or CI failure to triage: classify build, typecheck…"
 license: MIT
 metadata:
   hermes:
@@ -17,7 +17,7 @@ This is an OMH `build-failure-triage` workflow skill, projected for Agent Skills
 
 ## Why This Exists
 
-`build-failure-triage` adapts ECC's build-fix and PR-test-analysis posture into an OMH-native workflow so failed checks become evidence-backed minimal handoffs instead of ad hoc debugging or false-green verification claims.
+`build-failure-triage` exists so a failed check becomes an evidence-backed minimal handoff, clustered by cause and origin, instead of ad hoc debugging or a false-green claim; the posture is adapted from ECC's build-fix and PR-test-analysis surfaces.
 
 ## Do Not Use When
 
@@ -48,13 +48,13 @@ Bad example:
 - The proposed remediation is minimal, scoped to affected files, and separated from implementation evidence.
 - Every cluster carries an origin, and no FIX_READY handoff covers a `pre_existing` or `unknown` one.
 - The rerun ladder names targeted, broad local, CI, and DCO checks without claiming they already passed.
-- The final verdict is FIX_READY, NEEDS_MORE_LOGS, BLOCKED_BY_ENVIRONMENT, or ROUTE_TO_VERIFICATION_GATE.
+- The final verdict is FIX_READY, NEEDS_MORE_LOGS, BLOCKED_BY_ENVIRONMENT, or ROUTE_TO_VERIFICATION_GATE in the record; the reply says it in plain words (ready to fix, more of the log is needed, blocked by the environment, needs a fresh observed rerun or the failures were already there before this change), and record names such as handoff, cluster matrix, or evidence boundary are never reply headings.
 
 ## Recovery Notes
 
-- If the log is missing or stale, ask for the smallest fresh command output or CI job URL.
+- If the log is missing or stale, fetch it when `gh` is authenticated (`gh run view <id> --log-failed`); otherwise ask for the smallest fresh command output or CI job URL.
 - If the failure looks environmental or credentialed, mark BLOCKED_BY_ENVIRONMENT and avoid patch handoff.
-- If a fix has already been applied, route to verification-gate for fresh evidence instead of re-triaging stale failures.
+- If a fix has already been applied, route to `omh-verification-gate` for fresh evidence instead of re-triaging stale failures.
 
 
 
@@ -62,7 +62,7 @@ Bad example:
 
 Use when Hermes must inspect a failing build, typecheck, lint, test, CI, or DCO signal and prepare the smallest evidence-backed remediation handoff without redesigning the system.
 
-    Strong routing signals: `build-failure-triage`, `build failure triage`, `build failure`, `build-failure`, `build fix`, `build failed`, `build failing`, `compile error`, `compilation error`, `typecheck failed`, `typecheck failure`, `type check failed`, `tsc failed`, `lint failed`, `lint failure`, `test failed`, `test failure`, `tests failed`, `ci failed`, `ci failure`, `github actions failed`, `pr checks failed`, `pr check failure`, `dco failed`, `dco failure`, `pytest failed`, `pytest failure`, `cargo build failed`, `npm build failed`, `ビルド失敗`, `ビルドが失敗`, `コンパイルエラー`, `型チェック失敗`, `テストが落ちる`, `빌드 실패`, `배포 파이프라인`, `파이프라인 깨짐`, `파이프라인 실패`, `배포 실패`, `CI 실패`, `빌드 고쳐`, `컴파일 에러`, `타입체크 실패`, `테스트 실패`, `체크 실패`, `DCO 실패`, `构建失败`, `編譯錯誤`, `编译错误`, `类型检查失败`, `测试失败`, `build gagal`, `bantu perbaiki error kompilasi`, `cek penyebab pipeline CI gagal`, `typecheck gagal`, `tolong beresin lint yang gagal`, `tes gagal di CI`, `build thất bại`, `giúp sửa lỗi biên dịch`, `kiểm tra nguyên nhân pipeline CI thất bại`, `typecheck thất bại`, `hãy sửa lỗi lint thất bại`, `kiểm thử thất bại trên CI`
+    Strong routing signals: `build-failure-triage`, `build failure triage`, `build failure`, `build-failure`, `build fix`, `build failed`, `build failing`, `compile error`, `compilation error`, `typecheck failed`, `typecheck failure`, `type check failed`, `tsc failed`, `lint failed`, `lint failure`, `test failed`, `test failure`, `tests failed`, `ci failed`, `ci failure`, `github actions failed`, `pr checks failed`, `pr check failure`, `dco failed`, `dco failure`, `pytest failed`, `pytest failure`, `cargo build failed`, `npm build failed`, `ビルド失敗`, `ビルドが失敗`, `コンパイルエラー`, `型チェック失敗`, `テストが落ちる`, `빌드 실패`, `배포 파이프라인`, `파이프라인 깨짐`, `파이프라인 실패`, `배포 실패`, `CI 실패`, `빌드 고쳐`, `컴파일 에러`, `타입체크 실패`, `테스트 실패`, `체크 실패`, `DCO 실패`, `сборка упала`, `ci красный`, `ci упал`, `почини сборку`, `ошибка сборки проекта`, `тесты падают`, `билд не проходит`, `пайплайн упал`, `почему падает ci`, `красный ci`, `ошибка компиляции`, `ошибку компиляции`, `构建失败`, `編譯錯誤`, `编译错误`, `类型检查失败`, `测试失败`, `build gagal`, `bantu perbaiki error kompilasi`, `cek penyebab pipeline CI gagal`, `typecheck gagal`, `tolong beresin lint yang gagal`, `tes gagal di CI`, `build thất bại`, `giúp sửa lỗi biên dịch`, `kiểm tra nguyên nhân pipeline CI thất bại`, `typecheck thất bại`, `hãy sửa lỗi lint thất bại`, `kiểm thử thất bại trên CI`
 
 ## Catalog Metadata
 
@@ -77,8 +77,9 @@ Quality bar:
 - Recommend the smallest safe fix path and name when no fix is justified without more logs.
 - Prefer targeted reruns before broad expensive checks, then broaden only when the changed surface requires it.
 - Preserve exact observed failure snippets or file references without treating them as current PASS evidence.
-- Give each cluster an origin: `introduced` when the same command passes at the merge-base or the failure points at a line the diff added or changed; `pre_existing` only when an observed run of the same command fails the same way at the merge-base in a clean detached worktree (`git worktree add --detach <dir> <merge-base>`, removed afterwards), never by stashing or checking out the tree the user is working in; otherwise `unknown`. An observed merge-base run outranks a diff-line reading: a check that fails the same way at the merge-base is `pre_existing` even when its failure points at a line the diff changed. Name the proof beside the origin: a merge-base run is an observation, a diff-line reading is an inference.
-- Return FIX_READY only for `introduced` clusters; a `pre_existing` cluster gets its own follow-up handoff outside this change's fix. Clusters of different origins still share one verdict: NEEDS_MORE_LOGS while any cluster is `unknown`, naming the merge-base run as the missing evidence, even beside `introduced` ones; otherwise FIX_READY when at least one is `introduced`; otherwise, with every cluster `pre_existing`, ROUTE_TO_VERIFICATION_GATE.
+- Give each cluster an origin: `introduced` when the same command passes at the merge-base or the failure points at a line the diff added or changed; `pre_existing` only when an observed run of the same command fails the same way at the merge-base in a clean detached worktree (`git worktree add --detach <dir> <merge-base>`, removed afterwards), never by stashing or checking out the tree the user is working in; otherwise `unknown`. An observed merge-base run outranks a diff-line reading: a check that fails the same way at the merge-base is `pre_existing` even when its failure points at a line the diff changed. Name the proof beside the origin: a merge-base run is an observation, a diff-line reading is an inference. A failing test is `introduced` only after one rerun at head fails again; with no rerun, or a green one, its origin stays `unknown` and the missing evidence is the failure rate, measured at head and at the merge-base with the same command and the same N. A head rate near the merge-base rate is `pre_existing`; a higher head rate is `introduced`, with the two rates as its proof, and its remediation is a root-cause investigation (`omh-app-debugging`), not a one-line fix. For a cluster of that last kind the verdict is NEEDS_MORE_LOGS naming the missing root cause with `omh-app-debugging` as the next step, never FIX_READY.
+- For a CI-only failure (matrix entry, OS, secrets, services), take the origin from CI, citing the URL: the same job on the merge-base commit or the base branch's latest run (`gh run list --branch <base> --workflow <name> --json conclusion,headSha,url`, `gh pr checks <n>`). A `pull_request` run builds the merge ref `refs/pull/<n>/merge`, not the PR head (`gh run view <id> --json headSha` returns the PR head), so read the commit it built from its checkout log, `gh run view <id> --log | grep -m1 'HEAD is now at'` (the run-level log is refused while any job is still running, and so is `--job <job-id> --log`; read that job's log through the API instead, `gh api --allow-escape-sequences repos/{owner}/{repo}/actions/jobs/<job-id>/logs | grep -m1 'HEAD is now at'`), which names the merge commit and the base sha it merged into, and compare against that commit when the base moved.
+- Return FIX_READY only for `introduced` clusters; a `pre_existing` cluster gets its own follow-up handoff outside this change's fix. Clusters of different origins still share one verdict: NEEDS_MORE_LOGS while any cluster that can run locally is `unknown`, naming the missing rerun or merge-base run (or the failure rate, for a test), even beside `introduced` ones; otherwise FIX_READY when at least one is `introduced`; otherwise, with every cluster `pre_existing`, ROUTE_TO_VERIFICATION_GATE. A cluster that is environmental or credentialed cannot run at the merge-base, so it never counts as `unknown`: it is BLOCKED_BY_ENVIRONMENT, which takes the verdict ahead of FIX_READY and behind NEEDS_MORE_LOGS.
 
 Required inputs:
 

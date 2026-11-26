@@ -5,8 +5,9 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import os
 from pathlib import Path
+import secrets
 import shutil
-from typing import Any, TypedDict
+from typing import Any, Iterable, TypedDict
 
 from ..plugin_bundle.omh import runtime_paths
 
@@ -15,6 +16,7 @@ try:
     from ..install.config_adapter import ConfigChange, ensure_external_dir, remove_external_dir, update_config
     from ..system.local_store import atomic_write_json, read_json_object_result
     from ..system.paths import managed_command_bin_dir
+    from .generation_hold import held_generations
     from .self_update_platform import SelfUpdatePlatform
     from .self_update_state_validation import parse_gc_entries, parse_generation_entry, parse_marker, parse_state, require_generation_path, same_existing_path
 except ImportError:  # pragma: no cover - direct-source installer smoke.
@@ -22,6 +24,7 @@ except ImportError:  # pragma: no cover - direct-source installer smoke.
     from install.config_adapter import ConfigChange, ensure_external_dir, remove_external_dir, update_config
     from system.local_store import atomic_write_json, read_json_object_result
     from system.paths import managed_command_bin_dir
+    from install.generation_hold import held_generations
     from install.self_update_platform import SelfUpdatePlatform
     from install.self_update_state_validation import parse_gc_entries, parse_generation_entry, parse_marker, parse_state, require_generation_path, same_existing_path
 
@@ -35,7 +38,11 @@ class GenerationEntry(TypedDict):
     version: str
 
 
-class CleanupResult(TypedDict):
+class _CleanupFields(TypedDict, total=False):
+    reason: str
+
+
+class CleanupResult(_CleanupFields):
     collected: list[str]
 
 
@@ -49,6 +56,17 @@ def now() -> str:
 
 def state_path(root: Path) -> Path:
     return root / "self-update.json"
+
+
+def committed_generation(root: Path) -> str:
+    """The generation the last finished update left active, read from its state file; "" while an activation is under
+    way, or when the file cannot be read. The pointer moves first: the re-entry that installs the new plugin bundle
+    runs after that, and its failure moves the pointer back and deletes the candidate."""
+    state, _error = read_json_object_result(state_path(root))
+    if state is None or state.get("activation_in_progress"):
+        return ""
+    active = state.get("active")
+    return str(active.get("id", "")) if isinstance(active, dict) else ""
 
 
 def generation_entry(path: Path, kind: str = "generation", version: str = "") -> GenerationEntry:
@@ -133,6 +151,8 @@ def interrupted_activation(
         pointed = require_generation_path(root, pointed, None, "current pointer target")
         if same_existing_path(pointed, candidate):
             return candidate, previous
+    if state["activation_in_progress"].get("restore_required") is True:
+        return candidate, previous
     shutil.rmtree(candidate, ignore_errors=True)
     state["activation_in_progress"] = None
     save_state(root, state)
@@ -144,7 +164,59 @@ def record_pointer(state: dict[str, Any], root: Path, target: Path) -> None:
     state["pointer"] = {"path": str(root / "current"), "target": relative_target}
 
 
+def _record_activation(state: dict[str, Any], identifier: str) -> None:
+    # A Hermes gateway resolves `current/skills` to the generation behind it
+    # and caches that path until config.yaml changes or it restarts, so GC
+    # must know which generation was current at a recorded gateway start.
+    history = [entry for entry in state.get("activations") or () if isinstance(entry, dict)]
+    if not history:
+        # Activated before this record existed, at a time nobody wrote down.
+        # `None` is that unknown time, never "before every gateway start".
+        history.append({"id": str(state["active"].get("id", "")), "activated_at": None})
+    marker = state.get("activation_in_progress")
+    switched = marker.get("marker_written_at") if isinstance(marker, dict) else None
+    history.append({"id": identifier, "activated_at": switched if isinstance(switched, str) else now()})
+    state["activations"] = history
+
+
+def _held_by_gateways(state: dict[str, Any], gateway_starts: Iterable[float]) -> tuple[set[str], list[float]]:
+    """The newest generation activated at or before each recorded gateway start.
+
+    Also returns the starts no stamped activation precedes: the generation
+    current then was activated before the history began (its row, if any,
+    has no time) or its row is gone, so the history cannot name it.
+    """
+    activations: list[tuple[str, float]] = []
+    for entry in state.get("activations") or ():
+        if not isinstance(entry, dict) or not isinstance(entry.get("id"), str) or entry.get("activated_at") is None:
+            continue
+        try:
+            activated = datetime.fromisoformat(str(entry["activated_at"])).timestamp()
+        except (ValueError, OverflowError, OSError):
+            continue
+        activations.append((entry["id"], activated))
+    held: set[str] = set()
+    unresolved: list[float] = []
+    for start in gateway_starts:
+        current = [identifier for identifier, activated in activations if activated <= start]
+        if current:
+            held.add(current[-1])
+        else:
+            unresolved.append(start)
+    return held, unresolved
+
+
+def _created_after(name: str, moment: float) -> bool:
+    """Whether a generation id's creation stamp proves it was made after `moment`."""
+    try:
+        created = datetime.strptime(name[:20], "%Y%m%d%H%M%S%f").replace(tzinfo=UTC).timestamp()
+    except ValueError:
+        return False
+    return created > moment
+
+
 def commit_activation(root: Path, state: dict[str, Any], candidate: Path) -> None:
+    _record_activation(state, candidate.name)
     state["previous_known_good"] = state["active"]
     state["active"] = generation_entry(candidate)
     state["activation_in_progress"] = None
@@ -153,6 +225,7 @@ def commit_activation(root: Path, state: dict[str, Any], candidate: Path) -> Non
 
 
 def restore_known_good(root: Path, state: dict[str, Any], target: Path) -> None:
+    _record_activation(state, target.name)
     state["active"] = generation_entry(target, str(state.get("active", {}).get("kind", "generation")))
     state["activation_in_progress"] = None
     state["recovery_selected"] = target.name
@@ -180,17 +253,40 @@ def collect_garbage(
     result: GarbageCollectionResult,
     *,
     running_generation: Path | None,
+    gateway_starts: Iterable[float] = (),
 ) -> None:
     keep = parse_gc_entries(root, state)
     if running_generation is not None:
         keep.add(running_generation.name)
+    # An open OMH TUI (and the gateway attach under it) imports from the
+    # generation it started on for as long as it runs.
+    keep |= held_generations(root)
+    # A gateway still serves the generation current at its last recorded
+    # start; deleting it leaves Hermes with zero OMH skills until a restart.
+    held, unresolved = _held_by_gateways(state, gateway_starts)
+    keep |= held
+    # When the history cannot say which generation a gateway started on, only
+    # a generation created after that start is provably not it.
+    latest_unresolved = max(unresolved) if unresolved else None
     generations = root / "generations"
     for item in generations.iterdir() if generations.exists() else ():
         junction = getattr(item, "is_junction", None)
+        if latest_unresolved is not None and item.name not in keep and not _created_after(item.name, latest_unresolved):
+            keep.add(item.name)
+            stamp = datetime.fromtimestamp(latest_unresolved, UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            result["cleanup"]["reason"] = (
+                f"kept generations created before the Hermes gateway start recorded at {stamp}: "
+                "no recorded activation says which one that gateway serves; "
+                "an update collects them once that gateway has restarted, or once its gateway.pid record is gone"
+            )
         if item.name not in keep and not item.is_symlink() and not (junction and junction()):
             shutil.rmtree(item, ignore_errors=True)
             result["cleanup"]["collected"].append(str(item))
     state["retained_generations"] = sorted(keep & {item.name for item in generations.iterdir()}) if generations.exists() else []
+    if isinstance(state.get("activations"), list):
+        state["activations"] = [
+            entry for entry in state["activations"] if isinstance(entry, dict) and entry.get("id") in state["retained_generations"]
+        ]
 
 
 def _retarget_launcher(root: Path, platform: SelfUpdatePlatform) -> bool:
@@ -207,10 +303,15 @@ def _retarget_launcher(root: Path, platform: SelfUpdatePlatform) -> bool:
     if not launcher.exists() and not launcher.is_symlink():
         return False
     target = platform.scripts_dir(root / "current" / "venv") / "omh"
-    temporary = launcher.with_name(f".{launcher.name}.{os.getpid()}.tmp")
-    temporary.unlink(missing_ok=True)
+    # A random name, created exclusively by `os.symlink`: the old predictable
+    # name was unlinked first, which left a window for a planted entry.
+    temporary = launcher.with_name(f".{launcher.name}.{secrets.token_hex(16)}.tmp")
     os.symlink(str(target), temporary)
-    os.replace(temporary, launcher)
+    try:
+        os.replace(temporary, launcher)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
     return True
 
 
@@ -239,7 +340,7 @@ def migrate_legacy(root: Path, state: dict[str, Any], paths: Any, platform: Self
         text = original
         for stale in (legacy_skills, default_skills, paths.omh_home / "skills"):
             text = remove_external_dir(text, stale).text
-        text = ensure_external_dir(text, root / "current" / "skills").text
+        text = ensure_external_dir(text, root / "current" / "skills", hermes_home=paths.hermes_home).text
         return ConfigChange(text != original, "retargeted skills.external_dirs", text)
 
     update_config(paths.hermes_config_path, _retarget_registration, omh_home=paths.omh_home)

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 
 from ..skin_pack import hex_to_rgb
 
@@ -76,6 +77,7 @@ def nearest_16(rgb: tuple[int, int, int]) -> int:
     return min(range(16), key=lambda at: _distance(_ANSI_16[at], rgb))
 
 
+@lru_cache(maxsize=16384)
 def _colour_parameter(base: int, value: str | None, depth: str = TRUECOLOR) -> str:
     if value is None or depth == NO_COLOR:
         return ""
@@ -101,6 +103,17 @@ class Style:
     underline: bool = False
     reverse: bool = False
     depth: str = TRUECOLOR  # how its colours are painted (`COLOR_DEPTHS`)
+    # A cell that frames the text and is no part of it (a block's rail, a reply's margin): never painted differently,
+    # and left out of what the pager copies (`Pager.handle_mouse`).
+    gutter: bool = False
+    # A gutter painted as one run with a neighbour of the same look (`screen.paint_line`): a framed question's bar and
+    # the context beside it, which were one run before the bar became a gutter.
+    joins: bool = False
+    # On the empty span `wrap_mark` makes: this row is the one above it, wrapped to fit the width (WRAP_SPACE where
+    # the break dropped spaces, WRAP_CUT inside a word, WRAP_VERBATIM in code, whose spaces stay on the rows), so a
+    # copy joins the two instead of putting a line break between them (`pager.Selection.text`). Never painted: an
+    # empty span has no cells, and `screen.paint_line` drops it with the rest of a row's empty spans.
+    wrap: str | None = None
 
     def sgr(self) -> str:
         """The SGR sequence that turns this style on; "" for the default style."""
@@ -143,3 +156,18 @@ def fill(style: Style) -> Span:
 
 def is_fill(span: Span) -> bool:
     return not span.text and span.style.bg is not None
+
+
+WRAP_SPACE = "space"  # the row went on after a space the wrap dropped: a copy joins it with one space
+WRAP_CUT = "cut"  # a word too long for the row went on here: a copy joins it with nothing
+WRAP_VERBATIM = "verbatim"  # a code row went on here, its spaces on the rows: a copy joins it as it is
+
+
+def wrap_mark(kind: str) -> Span:
+    """The empty span at the start of a row that goes on from the row above (`Style.wrap`)."""
+    return Span("", Style(wrap=kind))
+
+
+def wrap_of(line: Line) -> str | None:
+    """How `line` goes on from the row above it (`Style.wrap`); None for a row that starts a line of its own."""
+    return next((span.style.wrap for span in line if span.style.wrap is not None), None)

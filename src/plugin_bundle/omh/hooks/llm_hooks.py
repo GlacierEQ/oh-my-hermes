@@ -16,37 +16,67 @@ from ..awareness import (
     awareness_context_matches_message,
     awareness_route_hint,
     awareness_route_hint_context_from_payload,
+    capability_family_verdict,
+    capability_off_block,
     route_hint_for_installed_skills,
+    route_hint_without_disabled_skills,
     route_hint_without_engine_workflows,
     search_helper_hint,
 )
+from ..console_choices import console_choices_line
 from ..context_brief import build_context_brief
 from ..degradation import (
+    COMPONENT_CAPABILITY_POLICY_READ,
     COMPONENT_LOCALIZED_ROUTING_TEXT,
     COMPONENT_RUNTIME_STATUS_READ,
     degradation_payload,
     safe_error_type,
     runtime_binding_degradation,
 )
-from ..active_workflow_context import active_workflow_context, render_active_workflow_context
+from ..active_workflow_context import (
+    ACTIVE_WORKFLOW_ENDED_LINE,
+    ACTIVE_WORKFLOW_HEAD,
+    ActiveWorkflowContext,
+    active_workflow_context,
+    render_active_workflow_context,
+)
 from ..approval_bypass import record_approval_bypass
 from ..awareness_delivery import claim_route_guidance_delivery, record_awareness_delivery
 from ..context_budget_plan import context_budget_continuation, render_context_budget
 from ..dag_define_gate import note_turn as note_dag_define_turn
 from ..dag_define_gate import starts_dag_run
-from ..hermes_session_commands import host_command_turn, person_request_text
+from ..dag_open_run_nudge import open_run_line
+from ..hermes_session_commands import host_command_turn, host_context_removed, person_request_text
 from ..host_context import record_active_main_agent_model
 from ..host_observation import observe_plugin_hook_call
-from ..installed_skills import installed_skill_names
+from ..capability_off import read_disabled_family_ids, skill_families_for
+from ..owner_preference_record import setup_profile_owner
+from ..installed_skills import hermes_loadable_skill_names, routable_skill_names
 from ..kanban_board_reader import conversation_session_ids, kanban_db_path, read_kanban_lanes
 from ..native_todo import held_native_write_note
+from ..named_owner_choice import clear_turn_owners, note_turn_owners
+from ..user_owner_ids import configured_owner_ids
 from ..omh_roles import extract_role_marker, role_context_payload
+from ..plan_follow_on import DAG_ULW, acceptance_line, plan_turn_line
+from ..omh_identities import (
+    extract_identity_marker,
+    identity_catalog_context,
+    identity_context_payload,
+    bound_identity,
+)
 from ..dispatch_outcomes import unacknowledged_outcomes
 from ..runtime_reader import read_omh_activity, read_omh_hud, read_omh_status, read_omh_todo
+from ..defect_fix_method import METHOD_BLOCK, asks_to_fix_code, claim_method_block
 from ..skill_shortlist import claim_candidate_line, skill_candidate_line, skill_candidates_for_turn
 from .session_attendance import note_session_platform
+from .verify_hooks import clear_round_end_answer
+from ..consistency_trigger import note_turn_posture
+from ..test_expectation_check import note_request as note_test_request
 from .nudge_budget import session_is_delegated
+from ..remote_wait_nudge import failed_wait_context
 from ..jev_consent import MESSAGING_ATTENDED_PLATFORMS
+from ..messenger_gate import GATED_PLATFORMS, session_room_key
+from ..messenger_judgement import turn_instruction
 from ..jev_consent import clear_turn as clear_jev_turn
 from ..jev_consent import note_turn as note_jev_turn
 from ..todo_reconciliation import (
@@ -286,14 +316,36 @@ def _touch_section_session(session_id: str, state: str) -> None:
         del _awareness_section_sessions[next(iter(_awareness_section_sessions))]
 
 
+# Platforms no person types into. Copied as data from Hermes
+# `agent/prompt_caching.py` `MACHINE_PACED_SOURCES` (rev caafe5389a), the
+# list Hermes gives the 5m cache tier; Hermes is not importable from here.
+# Only the identity catalog is skipped for them: a cron or webhook run picks
+# no identity for a person, so the directory is paid prefix nobody reads. The
+# primer, with its boundary and reply lines, is kept on every platform.
+MACHINE_PACED_PLATFORMS = frozenset({
+    "subagent", "cron", "oneshot", "webhook", "kanban", "api", "api_server", "tool", "batch", "curator",
+    "a2a", "msgraph_webhook", "gateway_hygiene"})
+
+
 def awareness_system_prompt_section(session_info: object) -> str:
     """The primer, for Hermes to freeze into a new session's system prompt.
 
-    The text is the same for every session. `session_info` is read only for
-    the session id, to record that a prompt built under it carries the primer.
+    Human-paced sessions also carry a bounded identity directory from their
+    bound store; children and other machine-paced sessions carry the primer
+    alone. Record primer delivery by session id.
     """
     primer = turn_budget.render("primer")
     session_id = str(session_info.get("session_id") or "") if isinstance(session_info, Mapping) else ""
+    info = session_info if isinstance(session_info, Mapping) else {}
+    if str(info.get("platform") or "").strip().lower() not in MACHINE_PACED_PLATFORMS:
+        try:
+            store, _ = runtime_paths.resolve_homes(info.get("omh_home"), info.get("hermes_home"))
+            available = max(0, AWARENESS_SECTION_MAX_CHARS - len(primer) - 2)
+            identity_catalog = identity_catalog_context(store, max_chars=available)
+        except runtime_paths.RuntimeBindingError:
+            identity_catalog = ""
+        if identity_catalog:
+            primer += "\n\n" + identity_catalog
     if session_id and 0 < len(primer.strip()) <= AWARENESS_SECTION_MAX_CHARS:
         with _awareness_section_lock:
             state = _awareness_section_sessions.get(session_id, _SECTION_RECORDED)
@@ -342,21 +394,180 @@ def _primer_already_in_api_history(conversation_history: object, primer: str) ->
     subtracting the clean message prefix, so a user quoting
     ``[OMH Awareness]`` cannot suppress guidance.
     """
-    if not primer or not isinstance(conversation_history, (list, tuple)):
+    if not primer:
         return False
+    return any(primer in injected for injected in _replayed_injections(conversation_history))
+
+
+def _replayed_injections(conversation_history: object) -> list[str]:
+    """The host-injected suffix of every replayed user turn, newest first.
+
+    A string turn carries its injection in the ``api_content`` sidecar; the
+    clean message prefix is subtracted. A multimodal turn has no sidecar:
+    Hermes appends the injection to its parts and stamps what the person typed
+    as ``display_metadata.typed_ask`` (`_typed_ask_injection`). Either way
+    text a person typed (quoting an `[OMH ...]` line, say) is never read as
+    something OMH already injected.
+    """
+    if not isinstance(conversation_history, (list, tuple)):
+        return []
+    injections: list[str] = []
     for message in reversed(conversation_history):
         if not isinstance(message, dict):
             continue
         api_content = message.get("api_content")
         if not isinstance(api_content, str):
+            injected = _typed_ask_injection(message)
+            if injected:
+                injections.append(injected)
             continue
         clean_content = message.get("content")
         injected_content = api_content
         if isinstance(clean_content, str) and api_content.startswith(clean_content):
             injected_content = api_content[len(clean_content) :]
-        if primer in injected_content:
-            return True
-    return False
+        injections.append(injected_content)
+    return injections
+
+
+# `session_persistence._image_marker`: the line an image part becomes when
+# Hermes flattens a multimodal row into the session DB.
+_SCREENSHOT_MARKER = re.compile(r"\[screenshot(?: detail=(?:low|high|auto))?\]")
+
+
+def _typed_ask_injection(message: Mapping[str, object]) -> str:
+    """What Hermes appended after the person's ask on a multimodal turn, or ``""``.
+
+    A list-content turn takes no ``api_content`` sidecar: Hermes appends the
+    turn's injected context (memory, ``pre_llm_call``, gateway notes) as a
+    trailing text part and, whenever it does, stamps the ask itself -- the
+    turn's text parts joined by newlines -- as ``display_metadata.typed_ask``
+    (Hermes ``agent/turn_context.py`` `_append_multimodal_context`,
+    `_merge_gateway_notes`; ``agent/message_metadata.py`` ``TYPED_ASK``).
+    That stamp is the host's own boundary: the injection is what follows it.
+    A row rebuilt from the session DB is the same parts flattened to one
+    string with each image as a ``[screenshot]`` line, which the ask never
+    contains. No stamp, or text that does not begin with the stamped ask,
+    reads as no injection, so a person's quoted line is never counted.
+    """
+    metadata = message.get("display_metadata")
+    typed_ask = metadata.get("typed_ask") if isinstance(metadata, Mapping) else None
+    if not isinstance(typed_ask, str):
+        return ""
+    content = message.get("content")
+    if isinstance(content, list):
+        texts = (
+            part.get("text")
+            for part in content
+            if isinstance(part, Mapping) and part.get("type") == "text"
+        )
+        flattened = "\n".join(text for text in texts if isinstance(text, str) and text)
+    elif isinstance(content, str):
+        return _flattened_row_injection(content, typed_ask)
+    else:
+        return ""
+    if not flattened.startswith(typed_ask):
+        return ""
+    injected = flattened[len(typed_ask) :]
+    if typed_ask and not injected.startswith("\n"):
+        return ""
+    return injected
+
+
+# `gateway/run.py` timestamp prefix (`[Wed 2026-11-11 21:26:40 KST] `) a gateway with
+# message timestamps on puts before a replayed user row's first line.
+_REPLAY_STAMP = re.compile(r"\[[^\]\n]{1,80}\] ")
+
+
+def _flattened_row_injection(content: str, typed_ask: str) -> str:
+    """What follows the stamped ask in a session-DB row, or ``""``.
+
+    The row is the turn's parts flattened one per line, each image a
+    ``[screenshot]`` line, then the injected suffix (Hermes
+    ``session_persistence._durable_content``). The ask's own lines are found
+    in order: an image line or an empty part's blank line may sit before or
+    between them, a line the person typed is matched as typed (a literal
+    ``[screenshot]`` too), and the first may carry the gateway's timestamp
+    prefix. Image lines right after the ask belong to the turn; the rest is
+    the injection. An ask that is not all there reads as no injection.
+    """
+    lines = content.split("\n")
+    at = 0
+    for index, wanted in enumerate(typed_ask.split("\n") if typed_ask else []):
+        while at < len(lines):
+            line = lines[at]
+            if index == 0 and (stamp := _REPLAY_STAMP.match(line)) and line[stamp.end():] == wanted:
+                line = wanted
+            if line == wanted:
+                break
+            if not (_SCREENSHOT_MARKER.fullmatch(line) or (wanted and not line)):
+                return ""
+            at += 1
+        else:
+            return ""
+        at += 1
+    while at < len(lines) and (_SCREENSHOT_MARKER.fullmatch(lines[at]) or not lines[at]):
+        at += 1
+    return "\n" + "\n".join(lines[at:]) if at < len(lines) else ""
+
+
+def _replayed_workflow_line(conversation_history: object) -> str:
+    """The latest `[OMH Active Workflow]` line Hermes is still replaying, or ``""``.
+
+    Hermes replays each turn's injection byte for byte, so the reminder sent
+    once stays in front of the model until a compaction drops it; this is how
+    the hook knows whether it is still there and what it said last.
+    """
+    for injected in _replayed_injections(conversation_history):
+        at = injected.rfind(ACTIVE_WORKFLOW_HEAD)
+        if at >= 0:
+            return injected[at:].split("\n", 1)[0]
+    return ""
+
+
+def _active_workflow_delta(
+    workflow_context: ActiveWorkflowContext | None, conversation_history: object
+) -> str:
+    """This turn's workflow line: only what replayed history does not already say.
+
+    The reminder rides the message when the latest replayed workflow line is
+    not this exact text (first turn, after a compaction dropped it, or after
+    the workflow changed). With no active workflow, a replayed reminder that
+    is still standing gets `ACTIVE_WORKFLOW_ENDED_LINE` once. Keyed on the
+    rendered text, as opencode keys an instruction source on its content hash
+    and emits only added, changed and removed sources
+    (packages/core/src/instructions/index.ts:143-160).
+    """
+    replayed = _replayed_workflow_line(conversation_history)
+    if workflow_context:
+        rendered = render_active_workflow_context(workflow_context)
+        return "" if replayed == rendered else rendered
+    if replayed and replayed != ACTIVE_WORKFLOW_ENDED_LINE:
+        return ACTIVE_WORKFLOW_ENDED_LINE
+    return ""
+
+
+def _without_replayed_boundary(
+    route_hint_context: str, route_hint_payload: dict[str, object], conversation_history: object
+) -> str:
+    """The route hint without its closing `Boundary:` line once history already carries it.
+
+    The line is the same sentence on every hint, and Hermes replays each
+    turn's injection from `api_content`, so a session routed on several
+    turns kept one copy per turn (3,090 characters over 15 hints in one
+    owner's three days). The first hint of a session keeps it, and so does
+    any turn whose history the hook cannot read. The check reads only the
+    host-injected suffix (`_primer_already_in_api_history`), so a person
+    quoting the line cannot remove it. The route fingerprint is taken before
+    this, from the whole hint, so delivery dedupe is unchanged.
+    """
+    claim = str(route_hint_payload.get("claim_boundary", "") or "")
+    boundary = "Boundary: " + claim
+    suffix = "\n" + boundary
+    if not claim or not route_hint_context.endswith(suffix):
+        return route_hint_context
+    if not _primer_already_in_api_history(conversation_history, boundary):
+        return route_hint_context
+    return route_hint_context[: -len(suffix)]
 
 
 def _last_assistant_text(conversation_history: object) -> str:
@@ -482,6 +693,44 @@ def _reset_board_card_state() -> None:
         _board_card_sessions.clear()
 
 
+# The package modules a session's first turns import: the capability families the first turn's
+# brief reads (`context_brief._capability_family_cards`) and the router a later turn's route hint
+# asks (`awareness._user_trigger_pack_route_decision`). Importing them costs 80-300 ms, paid by the
+# first user turn that reaches each. `register()` starts this thread so they load while the person
+# types; `pre_llm_call` waits for it before doing anything, so no turn imports the same modules from
+# another thread at the same time (two threads entering one import cycle from different sides is
+# what CPython's deadlock detection fails one of). Both call sites keep their own guarded import,
+# so a host without `omh`, or an import that fails here, is still reported where it was before.
+_import_warmup: threading.Thread | None = None
+
+
+def _warm_imports() -> None:
+    try:
+        from omh.capabilities.families import capability_family_cards  # noqa: F401
+        from omh.routing.chat import user_trigger_pack_route_hint  # noqa: F401
+    except Exception:  # noqa: BLE001 - the call sites import again and report the failure themselves
+        return
+
+
+def start_import_warmup() -> None:
+    """`register()`: import the first turns' package modules on a daemon thread, once per process copy."""
+    global _import_warmup
+    if _import_warmup is not None:
+        return
+    thread = threading.Thread(target=_warm_imports, name="omh-import-warmup", daemon=True)
+    try:
+        thread.start()
+    except RuntimeError:  # no thread to spare: the first turns import as they did
+        return
+    _import_warmup = thread
+
+
+def _await_import_warmup() -> None:
+    thread = _import_warmup
+    if thread is not None:
+        thread.join()
+
+
 def _tracker_event_is_present(kwargs: dict) -> bool:
     """Recognize a host-labelled tracker event without inspecting its text."""
     for key in ("tracker_event", "github_event"):
@@ -494,7 +743,11 @@ def _tracker_event_is_present(kwargs: dict) -> bool:
 
 
 def _rendered_route_hint(
-    payload: dict[str, object], installed: frozenset[str] | None, *, delegated: bool
+    payload: dict[str, object],
+    installed: frozenset[str] | None,
+    *,
+    delegated: bool,
+    disabled: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """The route hint this turn renders: installed skills only, no orchestrating engine for a child.
 
@@ -508,12 +761,51 @@ def _rendered_route_hint(
     included. Only the rendered block is cut -- the payload the brief and the
     candidate line read still records what the message named.
     """
-    hint = route_hint_for_installed_skills(payload, installed)
+    hint = route_hint_without_disabled_skills(route_hint_for_installed_skills(payload, installed), disabled or {})
     return route_hint_without_engine_workflows(hint) if delegated else hint
 
 
 def pre_llm_call(**kwargs) -> dict[str, object] | None:
-    """Inject bounded OMH role/status context without storing prompts."""
+    """Inject bounded OMH role/status context without storing prompts.
+
+    The turn's OMH context, plus, in a Slack or Discord room where the model
+    judges "be quiet" and "not for me" (`messenger_judgement`), the short
+    marker instruction, inside the same fence.
+    """
+    return _with_room_instruction(_turn_context(**kwargs), _room_instruction(kwargs))
+
+
+def _room_instruction(kwargs: dict) -> str:
+    """The judged room's instruction for this turn, or "".
+
+    Only the room's own turn gets it. A delegated child inherits the parent's
+    session ContextVars (`copy_context`), so its room key alone would name the
+    person's thread, and its ``[SHUTUP]`` would mute it. A child runs under
+    ``platform="subagent"`` and names a parent, as a detached fork does.
+    """
+    if str(kwargs.get("parent_session_id") or "").strip():
+        return ""
+    if str(kwargs.get("platform") or "").strip().casefold() not in GATED_PLATFORMS:
+        return ""
+    return turn_instruction(kwargs.get("turn_id"), session_room_key())
+
+
+def _with_room_instruction(payload: dict[str, object] | None, note: str) -> dict[str, object] | None:
+    if not note:
+        return payload
+    payload = dict(payload or {})
+    context = payload.get("context")
+    if isinstance(context, str) and context.endswith(OMH_CONTEXT_FENCE_CLOSE):
+        payload["context"] = f"{context[: -len(OMH_CONTEXT_FENCE_CLOSE)]}\n{note}\n{OMH_CONTEXT_FENCE_CLOSE}"
+    elif isinstance(context, str) and context.strip():
+        payload["context"] = f"{context}\n\n{fence_omh_context([note])}"
+    else:
+        payload["context"] = fence_omh_context([note])
+    return payload
+
+
+def _turn_context(**kwargs) -> dict[str, object] | None:
+    """The turn's OMH context: role, status, route hint and the rest."""
     # A detached fork is not one of the session's turns, and gets nothing.
     # Hermes builds its background review and the `/btw` side question as a
     # fork of the live agent that keeps the parent's session id and names
@@ -534,6 +826,22 @@ def pre_llm_call(**kwargs) -> dict[str, object] | None:
     # asked for Jev until its own request is read below. A marker left from
     # the previous turn must never survive a degraded turn.
     clear_jev_turn(kwargs.get("session_id"))
+    # The same for the coding owners a dag-ulw request named: a choice counts only for the request it was made in.
+    clear_turn_owners(kwargs.get("session_id"))
+    # The same for the round-end answer stash: one left by the previous turn
+    # (a sentinel never came) must not be swappable in this one. Detached
+    # forks never reach this line, so a background review cannot clear the
+    # live turn's stash.
+    clear_round_end_answer(kwargs.get("session_id"))
+    # Only after both clears: a wait the host abandons at its hook timeout must not keep either.
+    _await_import_warmup()
+    # Whether this session's platform can get the round-end check at all: one that cannot (a
+    # delegated child) takes no workspace index in `pre_tool_call`, which is given no platform.
+    note_turn_posture(kwargs.get("session_id"), kwargs.get("platform"))
+    # And what this turn's request said about keeping behaviour and changing tests, for the round-end
+    # test check: set here, before anything can return early, so a previous turn's facts never apply.
+    note_test_request(kwargs.get("session_id"),
+                      "" if _tracker_event_is_present(kwargs) else kwargs.get("user_message"))
     # Bind before any observer or awareness I/O. A failed root must not reach
     # downstream defaults as None, or fail before the status classifier runs.
     try:
@@ -551,7 +859,7 @@ def pre_llm_call(**kwargs) -> dict[str, object] | None:
     # Turn start is the freshest in-process view of the Shift+Tab yolo flag:
     # a toggle shows on the HUD at the user's next message, not only at the
     # next tool call.
-    record_approval_bypass(omh_home=omh_home)
+    record_approval_bypass(omh_home=omh_home, session_id=str(kwargs.get("session_id") or ""))
     context_parts: list[str] = []
     payload: dict[str, object] = {}
     user_message = "" if _tracker_event_is_present(kwargs) else str(kwargs.get("user_message", "") or "")
@@ -625,18 +933,50 @@ def pre_llm_call(**kwargs) -> dict[str, object] | None:
     )
     message_matches_awareness = False
     degraded: list[tuple[str, str]] = []
-    # The skills this home installed. The route hint and the candidate line
-    # rank the whole catalog, and a `--core` home holds ten of its skills, so
-    # both are cut to this set before they are rendered (#1954). `None` --
-    # the set could not be read -- renders the whole catalog, as before.
-    # `route_hint_payload` itself stays unfiltered: its direct-invocation
-    # hint records that the person named a workflow, installed or not.
-    installed_skills = installed_skill_names(omh_home) if include_awareness else None
+    # Only a person's main-session request names external owners, and only for this turn's dag-ulw run.
+    # Host-written turns have no request here; a child cannot choose for its parent.
+    if request_message and not delegated:
+        note_turn_owners(session_id, request_message, configured_owner_ids(omh_home))
+    # The skills this home installed and this Hermes can load by name. The
+    # route hint and the candidate line rank the whole catalog, and a
+    # `--core` home holds ten of its skills, so both are cut to this set
+    # before they are rendered (#1954); a skill Hermes resolves to no
+    # directory, or to two, is cut too, since `skill_view` answers it "not
+    # found" or refuses it. `None` -- the set could not be read -- renders
+    # the whole catalog, as before. `route_hint_payload` itself stays
+    # unfiltered: its direct-invocation hint records that the person named a
+    # workflow, installed or not.
+    installed_skills = hermes_loadable_skill_names(omh_home) if include_awareness else None
+    # The skills of a capability family this home turned off (`omh
+    # capability-policy disable`) are cut the same way, read per turn from the
+    # setup profile the memory tool reads. Nothing off leaves the set as is.
+    disabled_skills: dict[str, str] = {}
+    if include_awareness:
+        disabled_families, policy_error = read_disabled_family_ids(omh_home)
+        disabled_skills = skill_families_for(disabled_families)
+        if policy_error:
+            # Routing goes ahead as though every family were on; say so.
+            degraded.append((COMPONENT_CAPABILITY_POLICY_READ, safe_error_type(policy_error)))
+    installed_skills = routable_skill_names(installed_skills, disabled_skills)
+    # One router pass decides. A request it answers "this family is off"
+    # gets that block and nothing else; one it asks openly about because its
+    # best match is off gets no block, and in both the route hint and the
+    # candidate line are withheld, since either would name a stand-in skill.
+    # A child's brief is its orchestrator's words, not a request for the family.
+    capability_verdict = (
+        capability_family_verdict(request_message, disabled_skills) if disabled_skills and not delegated else {}
+    )
+    capability_off_context = capability_off_block(capability_verdict)
     rendered_route_hint: dict[str, object] = {}
     if include_awareness:
         if is_first_turn:
-            route_hint_payload = awareness_route_hint(request_message)
-            rendered_route_hint = _rendered_route_hint(route_hint_payload, installed_skills, delegated=delegated)
+            route_hint_payload = awareness_route_hint(
+                request_message, context_removed=host_context_removed(user_message),
+                profile_owner=setup_profile_owner(omh_home),
+            )
+            rendered_route_hint = _rendered_route_hint(
+                route_hint_payload, installed_skills, delegated=delegated, disabled=disabled_skills
+            )
             route_hint_context = awareness_route_hint_context_from_payload(rendered_route_hint)
             message_matches_awareness = bool(route_hint_context)
             route_degradation = route_hint_payload.get("degradation")
@@ -654,9 +994,19 @@ def pre_llm_call(**kwargs) -> dict[str, object] | None:
             if match_error:
                 degraded.append((COMPONENT_LOCALIZED_ROUTING_TEXT, match_error))
         if message_matches_awareness and route_hint_payload is None:
-            route_hint_payload = awareness_route_hint(request_message)
-            rendered_route_hint = _rendered_route_hint(route_hint_payload, installed_skills, delegated=delegated)
+            route_hint_payload = awareness_route_hint(
+                request_message, context_removed=host_context_removed(user_message),
+                profile_owner=setup_profile_owner(omh_home),
+            )
+            rendered_route_hint = _rendered_route_hint(
+                route_hint_payload, installed_skills, delegated=delegated, disabled=disabled_skills
+            )
             route_hint_context = awareness_route_hint_context_from_payload(rendered_route_hint)
+        if capability_verdict:
+            # The best match is off; a next hint would hand the work to
+            # another workflow after all.
+            rendered_route_hint = {}
+            route_hint_context = ""
         if route_hint_context:
             route_fingerprint = hashlib.sha256(route_hint_context.encode("utf-8")).hexdigest()
             if not claim_route_guidance_delivery(
@@ -731,7 +1081,11 @@ def pre_llm_call(**kwargs) -> dict[str, object] | None:
             route_hint_payload=route_hint_payload,
         )
         if route_hint_context:
-            context_parts.append(route_hint_context)
+            context_parts.append(
+                _without_replayed_boundary(
+                    route_hint_context, rendered_route_hint, kwargs.get("conversation_history")
+                )
+            )
             helper_hint = search_helper_hint(rendered_route_hint, request_message)
             if helper_hint:
                 context_parts.append(helper_hint)
@@ -750,17 +1104,32 @@ def pre_llm_call(**kwargs) -> dict[str, object] | None:
     # workflow themselves, and it reads `request_message`, so a host-written
     # notice gets none. A session is shown a given candidate set once; the
     # line comes back only when the set changes.
-    if include_awareness:
+    if capability_off_context:
+        # The person asked for work whose family this home turned off: the
+        # turn says so, and lists no other skill in its place.
+        context_parts.append(capability_off_context)
+    elif include_awareness and not capability_verdict:
         candidates = skill_candidates_for_turn(
             request_message, route_hint_payload=route_hint_payload, installed=installed_skills
         )
         if claim_candidate_line(session_id, candidates):
             context_parts.append(skill_candidate_line(candidates))
+    # A request to fix a code defect gets the debugging and verification
+    # method itself, once per session: Hermes' skills index tells the model
+    # not to open process skills, so app-debugging stays closed on exactly
+    # this turn (`defect_fix_method`). Every other turn gets nothing here.
+    if include_awareness and not capability_off_context and asks_to_fix_code(request_message):
+        if claim_method_block(session_id):
+            context_parts.append(METHOD_BLOCK)
 
     # The person's own text, so a marker inside a quoted reply or backfill is
     # someone else's and sets nothing. A host turn keeps its frame here, as it
     # kept the whole turn before.
-    marker = extract_role_marker(person_text)
+    selected_identity = bound_identity(session_id, omh_home, hermes_home)
+    if selected_identity is not None and selected_identity.get("status") != "available":
+        return {"block": True, "reason": "OMH selected identity cannot be delivered: "
+                + str(selected_identity.get("status"))}
+    marker = "" if selected_identity is not None else extract_role_marker(person_text)
     if marker:
         role_payload = role_context_payload(marker)
         if role_payload["status"] == "available":
@@ -777,6 +1146,47 @@ def pre_llm_call(**kwargs) -> dict[str, object] | None:
             context_parts.append(
                 "[OMH Role Warning] "
                 f"Unknown role '{marker}'. Available roles: {', '.join(role_payload['available_roles']) or '(none)'}."
+            )
+
+    # An explicit `[omh-identity:<name>]` selects one of the user's identity
+    # profiles for this turn. The read is `request_message`, a notch tighter
+    # than the role marker's `person_text`: gateway-stripped quotes, relay
+    # prefixes and host frames never reach it, and a host-synthesized or
+    # host-command turn has no request at all, so host-written text cannot
+    # select an identity. A delegated child's own goal text IS its request,
+    # which is the structured-handoff channel the marker rides in on.
+    # Ordinary words never match; the prompt rides inside the shared fence --
+    # no second injection path -- and it is the ONLY place prompt text goes:
+    # nothing below or in `payload` copies it. The marker extract keeps the
+    # first marker only, so an identity lands exactly once.
+    identity_marker = "" if selected_identity is not None else extract_identity_marker(request_message)
+    if identity_marker or selected_identity is not None:
+        identity_payload = selected_identity or identity_context_payload(
+            identity_marker if ":" in identity_marker else f"custom:{identity_marker}", omh_home=omh_home)
+        if selected_identity is None:
+            identity_payload["identity"] = identity_marker
+        if identity_payload["status"] == "available":
+            context_parts.append(
+                "\n".join(
+                    [
+                        f"[OMH Identity: {identity_payload['identity']}]",
+                        str(identity_payload["context"]),
+                        str(identity_payload["claim_boundary"]),
+                    ]
+                )
+            )
+        else:
+            available = identity_payload.get("available_identities")
+            names = (
+                ", ".join(str(n) for n in available)
+                if isinstance(available, (list, tuple))
+                else ""
+            )
+            context_parts.append(
+                "[OMH Identity Warning] "
+                f"Unknown identity '{identity_marker}'. Available identities: "
+                + (names or "(none)")
+                + "."
             )
 
     # An open plan is a state, not a phrasing: while one exists, every turn
@@ -820,7 +1230,32 @@ def pre_llm_call(**kwargs) -> dict[str, object] | None:
         )
         if workflow_context:
             payload["omh_active_workflow"] = workflow_context
-            context_parts.append(render_active_workflow_context(workflow_context))
+        workflow_line = _active_workflow_delta(workflow_context, kwargs.get("conversation_history"))
+        if workflow_line:
+            context_parts.append(workflow_line)
+        # `dag-ulw` as one option beside carrying a plan out, on `/plan`'s own
+        # turn and, conditionally, on the turn right after a plan was made
+        # (`plan_follow_on`). A child is never offered dag-ulw, nor a home
+        # that cannot load it.
+        if not delegated and (installed_skills is None or DAG_ULW in installed_skills):
+            follow_on = plan_turn_line(user_message) or acceptance_line(
+                request_message, kwargs.get("conversation_history"), workflow_context, session_id
+            )
+            if follow_on:
+                context_parts.append(follow_on)
+        # In a console session, a choice the reply stops on goes through
+        # Hermes' `clarify` picker rather than a prose list: on the session's
+        # first turn, and on the person's next turn after a clarify timed out
+        # (`console_choices`). A messaging platform and a child get nothing.
+        if not delegated:
+            console_choices = console_choices_line(
+                kwargs.get("platform"),
+                kwargs.get("conversation_history"),
+                is_first_turn=is_first_turn,
+                person_turn=bool(request_message),
+            )
+            if console_choices:
+                context_parts.append(console_choices)
         budget_context = context_budget_continuation(
             omh_home, session_id, str(kwargs.get("model", "") or "")
         )
@@ -875,6 +1310,30 @@ def pre_llm_call(**kwargs) -> dict[str, object] | None:
         board_card = _board_lanes_card(hermes_home, session_id)
         if board_card and _claim_board_card(session_id):
             context_parts.append(board_card)
+
+    # A turn a failed background process opened, with nothing else armed to
+    # wake the session after it (`remote_wait_nudge.failed_wait_context`).
+    # Not behind the awareness opt-out: like the unarmed-wait directive on a
+    # tool result, it is about this session stalling, not about OMH itself.
+    failed_wait = failed_wait_context(
+        user_message=kwargs.get("user_message"),
+        display_kind=turn_display_kind,
+        session_id=session_id,
+        turn_id=kwargs.get("turn_id"),
+        hermes_home=hermes_home,
+        delegated=delegated,
+    )
+    if failed_wait:
+        context_parts.append(failed_wait)
+    # A dag-ulw run of this conversation that no running child will re-open,
+    # named once with the one `omh_dag` call that moves it
+    # (`dag_open_run_nudge`). Outside the awareness opt-out for the same
+    # reason as the line above: it is about this session's run stalling.
+    open_run = open_run_line(
+        session_id=session_id, omh_home=omh_home, hermes_home=hermes_home, delegated=delegated
+    )
+    if open_run:
+        context_parts.append(open_run)
 
     try:
         try:
@@ -941,6 +1400,11 @@ def pre_llm_call(**kwargs) -> dict[str, object] | None:
                 omh_home=omh_home,
                 session_id=session_id,
             )
+        if "omh_active_workflow" in payload:
+            # The reminder is already in replayed history, but the metadata
+            # rides every call; Hermes skips a result with empty context.
+            payload["context"] = ""
+            return payload
         return None
 
     if status.get("active_executors"):

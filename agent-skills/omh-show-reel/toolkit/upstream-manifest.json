@@ -16,7 +16,7 @@
     "README.md": {
       "classification": "original_omh",
       "license": "MIT",
-      "local_sha256": "ea4b359f18d7ea3d3fd6819439c6b4f139611f7bf33a7ae339a1da575464d94b",
+      "local_sha256": "c59075b09e6a79d8ff18d22757e004b41fa9d320b2bdc6b42a3ea121936405f5",
       "modification_notice": "Original OMH companion guidance/helper/example",
       "upstream": []
     },
@@ -140,8 +140,8 @@
     "scripts/finish.py": {
       "classification": "modified_derivative",
       "license": "MIT",
-      "local_sha256": "e5a2ace0345754485773375bdc785b67b6fdef4859cff4a8204bf9a88fcdd48e",
-      "modification_notice": "English messages and suffixes, tool paths overridable (default from PATH), outputs must be new, failing spec exits 1",
+      "local_sha256": "2b59d88edd2d79649048e1d1c788a6eddf1eb4ee0de1285aacd3cf6a8bf30e24",
+      "modification_notice": "English messages and suffixes, tool paths overridable (default from PATH), outputs must be new, failing spec exits 1, 1080p share copy pinned to H.264 level 4.2",
       "upstream": [
         {
           "path": "scripts/finish.py",
@@ -159,8 +159,8 @@
     "scripts/mix.py": {
       "classification": "modified_derivative",
       "license": "MIT",
-      "local_sha256": "dcfc3f01d9ceda45bfa41f53073144985673093cefaefcbf638cdacd199e3643",
-      "modification_notice": "Cue placement, speech ducking and gain automation adapted to stdlib PCM; required tracks fail closed",
+      "local_sha256": "481664087918ed94757bb917bfcc794c159531ea292bb136fb0333085145635a",
+      "modification_notice": "Cue placement, speech ducking and gain automation adapted to stdlib PCM; required tracks fail closed; reports SFX buried under the bed",
       "upstream": [
         {
           "path": "scripts/mix.py",
@@ -171,8 +171,8 @@
     "scripts/motion_check.py": {
       "classification": "modified_derivative",
       "license": "MIT",
-      "local_sha256": "828956f1469cea52ec368bcdb1cdb11e97b035b226194b435831fda62dfaf61f",
-      "modification_notice": "Freeze/flash heuristics with authored intentional holds; stdlib",
+      "local_sha256": "7996fd01f8576cea033bc25028c1f53d443749f5f529349f65f719d3a3dcde98",
+      "modification_notice": "Native-fps change-area stills, cuts and opposing-pair flashes with general/kinetic profiles, end-card exclusion, reference comparison and authored intentional holds; stdlib",
       "upstream": [
         {
           "path": "scripts/motion_check.py",
@@ -183,8 +183,8 @@
     "scripts/music_tools.py": {
       "classification": "modified_derivative",
       "license": "MIT",
-      "local_sha256": "f1e6a54ac66e264920a2933964cdd06ff708d464053dfb4b8d33f5f540899c9e",
-      "modification_notice": "English messages, tool paths overridable (default from PATH), outputs must be new, numpy only for analyze/gap, synth_music event keys accepted, gap writes 16-bit PCM for mix.py",
+      "local_sha256": "3b73212027c6cb51e12f6f59f137174cd3acc8052ebaa85b03b7af905ad8c915",
+      "modification_notice": "English messages, tool paths overridable (default from PATH), outputs must be new, numpy only for analyze/gap, synth_music event keys accepted, gap writes 16-bit PCM for mix.py; analyze takes a tempo hint and fit window and reports grid strength, alternatives and drops",
       "upstream": [
         {
           "path": "scripts/music_tools.py",
@@ -207,7 +207,7 @@
     "scripts/new_project.py": {
       "classification": "modified_derivative",
       "license": "MIT",
-      "local_sha256": "63f326fdb4502bc555ab4878f6d3bea898b374b06d6637b3bdb271cba3ff4eee",
+      "local_sha256": "e788a58b81932bff00b74ab788c923a3e2750acd13b2420faf3f52c550437ed5",
       "modification_notice": "Upstream folder layout and engine template; explicit local fonts with family/weight read from the font, no download or npm setup, existing project refused",
       "upstream": [
         {
@@ -243,8 +243,8 @@
     "scripts/qa_check.py": {
       "classification": "modified_derivative",
       "license": "MIT",
-      "local_sha256": "f8fd7935a5a0cfec1833439b0097ba2633179a44d50a8a7813a3bcb8a97c752a",
-      "modification_notice": "Audio-mode-aware decode and measurements; no STT client",
+      "local_sha256": "218868658a6bc45132b2ed9e8880547742d56b8c80629208fd56cf9a4c761834",
+      "modification_notice": "Audio-mode-aware decode and measurements; H.264 level ceiling and macOS hardware-decode policy keys; no STT client",
       "upstream": [
         {
           "path": "scripts/qa_check.py",
@@ -255,8 +255,8 @@
     "scripts/render.mjs": {
       "classification": "modified_derivative",
       "license": "MIT",
-      "local_sha256": "e90a5e6de48291295825964c8f7ea757289cd8b400fe244be0724f729a9696e4",
-      "modification_notice": "Puppeteer adapter with a realpath allowlist server; keeps upstream --scale/--sub/--shutter/--crf 16/--preset/--from/--to/--every; serial capture piped to FFmpeg",
+      "local_sha256": "46c6fee6e49e9ccbfb022414e448642f58d3ae24d0b293b4dcf153d6b7c51acd",
+      "modification_notice": "Puppeteer adapter with a realpath allowlist server; keeps upstream --scale/--sub/--shutter/--crf 16/--preset/--from/--to/--every; serial capture piped to FFmpeg with frame-clock throttling off; project.json cuts keep sub-frame samples inside each shot",
       "upstream": [
         {
           "path": "scripts/render.mjs",
@@ -279,8 +279,8 @@
     "scripts/timeline.py": {
       "classification": "modified_derivative",
       "license": "MIT",
-      "local_sha256": "511bbd685c1965f807369516eff97e080963c8951cf03fd4880eb79a60a5cfaa",
-      "modification_notice": "Explicit cue graph plus the upstream script.json composition with a stdlib envelope",
+      "local_sha256": "7bacdb971c2d02c1c2ebf604ef81e0fc39bd8033175de0fd70e367df2358c7dc",
+      "modification_notice": "Explicit cue graph plus the upstream script.json composition with a stdlib envelope; music.dropN cues from the analysis",
       "upstream": [
         {
           "path": "scripts/timeline.py",
@@ -306,7 +306,7 @@
     "references/craft-audio.md": {
       "classification": "translated_derivative",
       "license": "MIT",
-      "local_sha256": "59b56e68b4a054ce61c9d29bc960e7d5b9d459a45fc0c3b8f3fe0cc3e4e17f68",
+      "local_sha256": "130b7866a4b8e4f33c91064bd5b54827c8579f37433e704138cd410a11754430",
       "modification_notice": "Translated from upstream references/audio.md@64521220a: complete English translation; cross-references renamed to references/craft-*.md; host install paths made placeholders; the default narration voice named by role; inline OMH notes where the locale/brief policy overrides an upstream default; OMH header",
       "upstream": [
         {
@@ -318,7 +318,7 @@
     "references/craft-brief.md": {
       "classification": "translated_derivative",
       "license": "MIT",
-      "local_sha256": "07bc811513f97edeb0d48adabd9542ff7ac2ec2b904f96cf206a85a5da16a8d1",
+      "local_sha256": "b645f0f2de47978bf7667613781607b02c1a81217588f418b6f91196649d8425",
       "modification_notice": "Translated from upstream references/brief.md@64521220a: complete English translation; cross-references renamed to references/craft-*.md; host install paths made placeholders; the default narration voice named by role; inline OMH notes where the locale/brief policy overrides an upstream default; OMH header",
       "upstream": [
         {
@@ -330,7 +330,7 @@
     "references/craft-design.md": {
       "classification": "translated_derivative",
       "license": "MIT",
-      "local_sha256": "61f3d00ba1dfadccb2b969ceb0a9668bdbd37f1a3d270a21a49bbb39581e04c3",
+      "local_sha256": "6aed8b89137f89bdab228020cf6317c0bada7720c39a56cc94061f5c28068142",
       "modification_notice": "Translated from upstream references/design.md@64521220a: complete English translation; cross-references renamed to references/craft-*.md; host install paths made placeholders; the default narration voice named by role; inline OMH notes where the locale/brief policy overrides an upstream default; OMH header",
       "upstream": [
         {
@@ -342,7 +342,7 @@
     "references/craft-engine.md": {
       "classification": "translated_derivative",
       "license": "MIT",
-      "local_sha256": "14717e24adc8756c86259fbc20bd095f2a5b055519c4c90450ab0ec2380bcf9a",
+      "local_sha256": "0a60cc67a3b1ffa32a07cf82b6da3354b4e8c25ce6c32d51a7aba953d383f607",
       "modification_notice": "Translated from upstream references/engine.md@64521220a: complete English translation; cross-references renamed to references/craft-*.md; host install paths made placeholders; the default narration voice named by role; inline OMH notes where the locale/brief policy overrides an upstream default; OMH header",
       "upstream": [
         {
@@ -354,7 +354,7 @@
     "references/craft-images.md": {
       "classification": "translated_derivative",
       "license": "MIT",
-      "local_sha256": "72108124eee318537f9c835750969be1c3b9ae6ca5152b5549a7f2d0db2f31a0",
+      "local_sha256": "43803a8aeccf2d6f8432f8ecc439689847c9763b21434ed1c09a66818b46c8c8",
       "modification_notice": "Translated from upstream references/images.md@64521220a: complete English translation; cross-references renamed to references/craft-*.md; host install paths made placeholders; the default narration voice named by role; inline OMH notes where the locale/brief policy overrides an upstream default; OMH header",
       "upstream": [
         {
@@ -366,7 +366,7 @@
     "references/craft-qa.md": {
       "classification": "translated_derivative",
       "license": "MIT",
-      "local_sha256": "4a6991417ba630b922365e2f685ba6694b0797ceea70d8a5916196c375a978ed",
+      "local_sha256": "2c1fa45e8f587b0db40adf3e9bdb936b2ffd95c2a99bd3d1deb7eb5d8aa66df4",
       "modification_notice": "Translated from upstream references/qa.md@64521220a: complete English translation; cross-references renamed to references/craft-*.md; host install paths made placeholders; the default narration voice named by role; inline OMH notes where the locale/brief policy overrides an upstream default; OMH header",
       "upstream": [
         {
@@ -378,7 +378,7 @@
     "references/craft-story.md": {
       "classification": "translated_derivative",
       "license": "MIT",
-      "local_sha256": "93e3316f38e94bb05557399548f220e0af3b7c91fb923062d606c70a62fa17fd",
+      "local_sha256": "10009256d084798352037a7f2725978bf1bd93e7dcd11b7e74ecb04223da7ac9",
       "modification_notice": "Translated from upstream references/story.md@64521220a: complete English translation; cross-references renamed to references/craft-*.md; host install paths made placeholders; the default narration voice named by role; inline OMH notes where the locale/brief policy overrides an upstream default; OMH header",
       "upstream": [
         {
@@ -414,7 +414,7 @@
     "references/craft-workflow.md": {
       "classification": "translated_derivative",
       "license": "MIT",
-      "local_sha256": "8115165d81e616ba345f21415554f831b4d1989dbd0704e1ceb23db0dabdff4a",
+      "local_sha256": "4ec5bf0a670e41d314ecca56bdcf0cb0449ac6bf3a8ac2811dce93041aa66cea",
       "modification_notice": "Translated from upstream SKILL.md@64521220a: complete English translation; cross-references renamed to references/craft-*.md; host install paths made placeholders; the default narration voice named by role; inline OMH notes where the locale/brief policy overrides an upstream default; OMH header",
       "upstream": [
         {

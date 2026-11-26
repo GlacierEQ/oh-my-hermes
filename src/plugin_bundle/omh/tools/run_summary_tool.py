@@ -27,8 +27,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .. import dag_run
 from ..host_observation import OBSERVATION_SCHEMA, attach_public_observation, observe_plugin_tool_call
 from ..cost_receipt import build_cost_receipt
+from ..delegation_graph import closing_usage, graph_segments, run_usage_text
+from ..delegation_ledger import read_ledger
 from ..sqlite_readonly import connect_readonly
 
 RUN_SUMMARY_CLAIM_BOUNDARY = (
@@ -52,6 +55,25 @@ _SUMMARY_LABELS: dict[str, tuple[str, str, str]] = {
 # ("unknown") when the value is unmeasured, matching the sentinel word used
 # elsewhere in OMH's status renderers (e.g. `src/coding/status_board.py`).
 _ELAPSED_UNITS: dict[str, str] = {"en": "s", "ko": "초", "ja": "秒", "zh": "秒"}
+# The closing line of a conversation whose newest dag-ulw run is finished: its goal verdict (`dag_run.goal_verdict`),
+# the English word in every language, as `unknown` is.
+_GOAL_LABELS: dict[str, str] = {
+    "en": "Goal check (DAG {run}): {verdict}", "ko": "목표 검증 (DAG {run}): {verdict}",
+    "ja": "目標の検証 (DAG {run}): {verdict}", "zh": "目标验证 (DAG {run}): {verdict}",
+}
+# The line before it: what the run's children used, as Hermes recorded it (`delegation_graph.run_usage_text`).
+_DAG_USAGE_LABELS: dict[str, str] = {
+    "en": "DAG usage ({run}): {figures}", "ko": "DAG 사용량 ({run}): {figures}",
+    "ja": "DAG の使用量 ({run}): {figures}", "zh": "DAG 用量 ({run}): {figures}",
+}
+# The cache line after the tokens line: the share of input read from the prompt cache. Percent is an integer, tokens
+# are the cache-read count, rendered with thousands separators like every other number here.
+_CACHE_LABELS: dict[str, str] = {
+    "en": "Prompt cache: {percent}% of input read from cache ({tokens} tokens)",
+    "ko": "프롬프트 캐시: 입력의 {percent}%를 캐시에서 읽음 ({tokens} 토큰)",
+    "ja": "プロンプトキャッシュ: 入力の{percent}%をキャッシュから読み込み ({tokens} トークン)",
+    "zh": "提示缓存: 输入的{percent}%从缓存读取 ({tokens} Token)",
+}
 _ELAPSED_UNKNOWN: str = "unknown"
 
 OMH_RUN_SUMMARY_SCHEMA = {
@@ -86,7 +108,7 @@ OMH_RUN_SUMMARY_SCHEMA = {
             },
             "hermes_home": {
                 "type": "string",
-                "description": "Standalone operator override only. Native Hermes calls reject this field; omit it to use the active profile.",
+                "description": "Standalone operator use only. Native Hermes calls reject it; omit.",
             },
             "observation": OBSERVATION_SCHEMA,
         },
@@ -150,6 +172,31 @@ def _rows(
         connection.close()
 
 
+def _dag_goal(omh_home: Path, hermes_home: Path, session_id: str) -> dict[str, Any] | None:
+    """The conversation's newest dag-ulw run with its goal verdict once it is finished, else None. Read-only.
+
+    The verdict is the record's own (`dag_run.goal_verdict`): the outcomes
+    the parent settled and the handoff reads, never the model's words.
+    """
+    segments = graph_segments(hermes_home, session_id)
+    runs = [item for segment in segments for item in dag_run.session_runs(omh_home, segment)]
+    if not runs:
+        return None
+    record = max(runs, key=lambda item: float(item[0].get("updated_at") or 0.0))[0]
+    derived = dag_run.derive(record, [], time.time())
+    state = dag_run.run_state(record, derived)
+    if state not in dag_run.FINISHED_STATES:
+        return None
+    verdict, reasons = dag_run.goal_verdict(record, derived)
+    goal = {"run": record["run"], "name": record["name"], "state": state, "verdict": verdict, "reasons": reasons,
+            "claim_boundary": dag_run.VERDICT_CLAIM_BOUNDARY}
+    children = [child for segment in segments for child in (read_ledger(omh_home, segment) or {}).get("children", [])]
+    usage = closing_usage(hermes_home, record, children)
+    if usage is not None:
+        goal["usage"] = usage
+    return goal
+
+
 def _number(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return 0.0
@@ -172,7 +219,7 @@ def _optional_number(value: Any) -> float | None:
 
 def omh_run_summary_handler(args: dict[str, Any], **kwargs) -> str:
     if error := runtime_paths.tool_home_error(args):
-        return json.dumps(error, sort_keys=True)
+        return json.dumps(error, ensure_ascii=False, sort_keys=True)
     observation = observe_plugin_tool_call("omh_run_summary", args, kwargs)
     language = str(args.get("language", "") or "en").strip().lower()
     if language not in _SUMMARY_LABELS:
@@ -191,7 +238,7 @@ def omh_run_summary_handler(args: dict[str, Any], **kwargs) -> str:
             "the host did not supply a session id and none was passed; "
             "run summaries need the session's accounting row"
         )
-        return json.dumps(attach_public_observation(payload, observation), sort_keys=True)
+        return json.dumps(attach_public_observation(payload, observation), ensure_ascii=False, sort_keys=True)
 
     # Metadata only; built beside the summary so a cost question and the
     # closing lines read the same accounting.
@@ -204,7 +251,7 @@ def omh_run_summary_handler(args: dict[str, Any], **kwargs) -> str:
     if session is None:
         payload["status"] = "not_observed"
         payload["error"] = f"no session row observed for {session_id!r}"
-        return json.dumps(attach_public_observation(payload, observation), sort_keys=True)
+        return json.dumps(attach_public_observation(payload, observation), ensure_ascii=False, sort_keys=True)
 
     started = _optional_number(session.get("started_at"))
     ended_raw = _optional_number(session.get("ended_at"))
@@ -219,6 +266,17 @@ def omh_run_summary_handler(args: dict[str, Any], **kwargs) -> str:
     cache_read = int(sum(_number(row.get("cache_read_tokens")) for row in scope))
     reasoning = int(sum(_number(row.get("reasoning_tokens")) for row in scope))
     tokens_used = input_tokens + output_tokens
+    # Hermes' canonical usage keeps `input_tokens` as the uncached bucket: on the Anthropic shape it is the uncached
+    # input reported directly, and on the Codex/Chat shapes the cache buckets are subtracted back out
+    # (agent/usage_pricing.py:667-673; CanonicalUsage.prompt_tokens at :77 sums input + cache_read + cache_write).
+    # So the prompt total, and the denominator of the cached share, is input + cache_read.
+    # The share is taken from the unrounded ratio and rounded half up once per output: rounding the three-decimal
+    # field again would print 50.51% as 50% (round-half-even on 50.5). A session whose prompt was read wholly from
+    # cache (no uncached input) still shows its line, at 100%.
+    prompt_total = input_tokens + cache_read
+    # A negative count is malformed accounting: show nothing rather than 101% or a division by zero.
+    cache_ratio: float | None = cache_read / prompt_total if cache_read > 0 and input_tokens >= 0 else None
+    cache_read_share: float | None = round(cache_ratio, 3) if cache_ratio is not None else None
     cost = sum(
         _number(row.get("actual_cost_usd")) or _number(row.get("estimated_cost_usd"))
         for row in scope
@@ -229,8 +287,22 @@ def omh_run_summary_handler(args: dict[str, Any], **kwargs) -> str:
         elapsed_line.format(elapsed=elapsed_text),
         tokens_line.format(tokens=f"{tokens_used:,}"),
     ]
+    if cache_ratio is not None:
+        lines.append(
+            _CACHE_LABELS[language].format(
+                # Half up in integers: a float 100 * 5750 / 10000 lands a hair under 57.5 and would print 57%.
+                percent=(200 * cache_read + prompt_total) // (2 * prompt_total),
+                tokens=f"{cache_read:,}",
+            )
+        )
     if models:
         lines.append(models_line.format(models=", ".join(models)))
+    goal = _dag_goal(runtime_paths.plugin_home(args.get("omh_home")), home, session_id)
+    if goal is not None:
+        payload["dag_goal"] = goal
+        if "usage" in goal:
+            lines.append(_DAG_USAGE_LABELS[language].format(run=goal["name"], figures=run_usage_text(goal["usage"])))
+        lines.append(_GOAL_LABELS[language].format(run=goal["name"], verdict=goal["verdict"]))
     payload.update(
         {
             "status": "observed",
@@ -242,6 +314,7 @@ def omh_run_summary_handler(args: dict[str, Any], **kwargs) -> str:
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "cache_read_tokens": cache_read,
+                "cache_read_share": cache_read_share,
                 "reasoning_tokens": reasoning,
                 "api_calls": int(sum(_number(row.get("api_call_count")) for row in scope)),
                 "cost_usd": round(cost, 4),
@@ -250,4 +323,4 @@ def omh_run_summary_handler(args: dict[str, Any], **kwargs) -> str:
             "summary_text": "\n".join(lines),
         }
     )
-    return json.dumps(attach_public_observation(payload, observation), sort_keys=True)
+    return json.dumps(attach_public_observation(payload, observation), ensure_ascii=False, sort_keys=True)

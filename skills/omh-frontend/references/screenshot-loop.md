@@ -17,6 +17,18 @@ opinion from the source. Reviewing the implementation by reading what
 was supposed to produce it is working blind; the capture, not the
 diff, is the surface under review.
 
+## During implementation
+
+The loop below judges a finished surface. Before it, every change that
+affects what renders gets its own look: after the change, capture the
+affected page, state, or (for a 3D or canvas scene) the default camera and
+each declared preset, and read the capture before making the next change. A
+batch of unseen edits compounds: a shifted layout, a wrong colour, or a
+broken frame hides behind the next edit, and the final loop then has to
+unwind several defects at once. A change that was not looked at is not done.
+This does not replace the loop: the 1440/768/375 pass still runs once the
+work lands.
+
 ## The loop
 
 1. Implement against `DESIGN.md` (the contract from
@@ -24,7 +36,12 @@ diff, is the surface under review.
 2. Capture the affected pages and states at 1440px, 768px, and 375px
    wide — desktop, tablet, and mobile. These are the web minimum, the
    counterpart of the TUI's 80x24 and 120x40; add the widths the
-   product actually targets.
+   product actually targets. Capture each in every theme the contract
+   defines, and once with `prefers-reduced-motion: reduce` for any surface
+   that animates. Take the 375 capture with touch and mobile-user-agent
+   emulation on when the session can set them; a width-only capture is
+   named as such. A surface people use on a phone also goes through
+   `references/mobile-density-gate.md`.
 3. Compare each capture against the comparison target, side by side.
 4. List every difference — spacing, weight, color, alignment,
    truncation, state treatment — however small. A difference you did
@@ -60,17 +77,17 @@ that shows it, cropped or annotated when the defect is small. Triage
 orders the fixing and, when a loop is cut short, states exactly what
 remains at which severity.
 
-## Where visual-qa takes over
+## Where `omh-visual-qa` takes over
 
 This loop is the builder's inner iteration, not the QA verdict. The
 enumeration of what to capture — every route, viewport, scroll
 position, modal/tab state, and CJK-heavy region — is owned by
-`visual-qa`'s viewport_state_capture_matrix/v1; when the surface has
+`omh-visual-qa`'s viewport_state_capture_matrix/v1; when the surface has
 more than the pages just touched, capture from that matrix instead of
 re-deriving a private list, and read 1440/768/375 as this loop's
 minimum widths inside the matrix's viewport axis. An empty difference
 list ends the loop; it is not PASS. PASS, REVISE, or BLOCK stays with
-`visual-qa`, judged on observed captures whose source lineage matches
+`omh-visual-qa`, judged on observed captures whose source lineage matches
 the target.
 
 ## Boundary

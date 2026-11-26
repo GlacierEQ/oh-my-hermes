@@ -55,10 +55,12 @@ it renders choices. Acting on a choice is the dispatcher's job.
 
 from __future__ import annotations
 
+from pathlib import Path
 import subprocess
+import tempfile
 from typing import Any, Callable, Mapping, Sequence
 
-from ..executors import executor_label
+from ..executors import canonical_executor_profile, executor_label
 from ..system.local_store import locked_json_update, read_json_object_result, utc_now
 from ..system.paths import OmhPaths
 from .executor_auth_signals import LIMIT_SIGNAL_STALE_AFTER_SECONDS, signal_age_seconds
@@ -508,7 +510,7 @@ def parse_on_failure(value: str, *, known_owners: Sequence[str] = ()) -> tuple[s
     if raw in {ON_FAILURE_REPORT, ON_FAILURE_HERMES, ON_FAILURE_WAIT}:
         return raw, ""
     if raw.startswith(ON_FAILURE_RETARGET_PREFIX):
-        owner = raw[len(ON_FAILURE_RETARGET_PREFIX) :].strip()
+        owner = canonical_executor_profile(raw[len(ON_FAILURE_RETARGET_PREFIX) :].strip())
         if not owner:
             raise OnFailureModeError("--on-failure=retarget: requires an owner, for example retarget:codex")
         if known_owners and owner not in known_owners:
@@ -831,7 +833,22 @@ def dispatch_unit_via_hermes_child(
             for key, value in (result.usage or {}).items()
             if value is None or isinstance(value, (str, int, float, bool))
         },
+        # A scratch home the dispatch had to leave; reported, never a status.
+        # The temp root's own path stays out of the record (it can name the user); stderr keeps the full path.
+        **({"cleanup_note": _record_note(result.cleanup_note, result.scratch_left)[:_MAX_CARD_TEXT]}
+           if result.cleanup_note else {}),
     }
+
+
+def _record_note(note: str, left: str) -> str:
+    """The cleanup note with the left scratch home named relative to the temp root."""
+    if not left:
+        return note
+    try:
+        relative = Path(left).relative_to(tempfile.gettempdir())
+    except ValueError:
+        return note
+    return note.replace(left, f"<temp>/{relative.as_posix()}")
 
 
 def recovery_decision(

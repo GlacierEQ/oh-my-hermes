@@ -4,7 +4,7 @@ The entitlement document (`routing/providers.json`) is what the operator
 SAID they hold, recorded once by the `omh setup` interview. Most machines
 never answer it, and the ones that did answered before the next `hermes
 auth` login or the next provider block in `config.yaml`. This module reads
-the three places Hermes keeps a linked provider and turns them into the same
+the four places Hermes keeps a linked provider and turns them into the same
 `provider id -> kind` shape the document uses, so the chain shaping and the
 pickers can count a provider the moment Hermes can use it:
 
@@ -25,12 +25,22 @@ pickers can count a provider the moment Hermes can use it:
   This is where a subscription login lands (`hermes auth` for Codex, Nous,
   Qwen, xAI). Only ids and the `source` label are read; no token, key, or
   timestamp is copied anywhere.
+- `plugins/`: a model-provider plugin Hermes itself would load, found by
+  the rules of Hermes' own provider discovery (`providers/__init__.py`): a
+  directory under `plugins/model-providers/`, or one cloned flat into
+  `plugins/` whose `plugin.yaml` (or `plugin.yml`) declares top-level
+  `kind: model-provider`, with an `__init__.py`, and not named in
+  `plugins.disabled` by its directory, `model-providers/<dir>`, or its
+  manifest `name`. A model-provider plugin needs no `plugins.enabled`
+  entry. Only a plugin whose name is in `HERMES_PLUGIN_PROVIDER_KINDS`
+  counts; the manifest's `kind` and `name` are the only fields read.
 - `.env`: the variable NAMES Hermes' registry lists for its API-key
-  providers. Values are never read, and the process environment is not: a
-  key exported only in a shell is not something Hermes recorded, and
-  reading it would make the same home answer differently per terminal
-  (and every test answer differently per developer). The setup interview,
-  where a person confirms each row, still offers shell-exported names.
+  providers. A value is only told apart from an empty one and never copied
+  or returned, and the process environment is not read: a key exported only
+  in a shell is not something Hermes recorded, and reading it would make the
+  same home answer differently per terminal (and every test answer
+  differently per developer). The setup interview, where a person confirms
+  each row, still offers shell-exported names.
 
 Detection is read-only and invokes nothing. A found id is evidence that
 Hermes is linked to the provider, not that the account works or has quota;
@@ -40,8 +50,10 @@ StepFun, LM Studio) are ignored rather than mapped to `unknown`, because
 `unknown` is a multi-vendor kind and would count every model as served on
 the strength of a key OMH cannot place. `CLAUDE_CODE_OAUTH_TOKEN` is
 likewise not evidence: Hermes' own registry marks it implicit (Claude Code
-sets it, the operator did not configure Anthropic in Hermes), and a Claude
-subscription is a Maestro-lane entitlement Hermes cannot spend.
+sets it, the operator did not configure Anthropic in Hermes). Hermes can
+spend a Claude subscription's plan allowance only through a provider
+plugin that registers it (`claude-subscription-directsdk-experimental`),
+and that plugin -- not the token -- is what counts.
 
 Standalone: this module is copied into `$HERMES_HOME/plugins/omh` and
 imports nothing from the `omh` package. The registry tables below mirror
@@ -58,16 +70,24 @@ import re
 from typing import Any, Collection, Iterable, Mapping
 
 from . import runtime_paths
+from .route_endpoint_guard import managed_config_layer
 
 PROVIDER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$")
 
 LINKED_SOURCE_LOGIN = "login"
 LINKED_SOURCE_CONFIG = "config"
+LINKED_SOURCE_PLUGIN = "plugin"
 LINKED_SOURCE_ENV = "env"
 # Strongest evidence first: a login is an authenticated account, a config
-# key is a selection, a variable name is a hint. One row per id; the
+# key is a selection, an installed provider plugin is a provider Hermes
+# registers on its own, a variable name is a hint. One row per id; the
 # strongest source names it.
-LINKED_SOURCE_ORDER: tuple[str, ...] = (LINKED_SOURCE_LOGIN, LINKED_SOURCE_CONFIG, LINKED_SOURCE_ENV)
+LINKED_SOURCE_ORDER: tuple[str, ...] = (
+    LINKED_SOURCE_LOGIN,
+    LINKED_SOURCE_CONFIG,
+    LINKED_SOURCE_PLUGIN,
+    LINKED_SOURCE_ENV,
+)
 
 # Hermes provider id -> entitlement kind. Vendor providers carry their
 # family; relays that serve models of every family are `gateway`. Hermes
@@ -95,8 +115,6 @@ HERMES_PROVIDER_KINDS: dict[str, str] = {
     "nous": "gateway",
     "copilot": "gateway",
     "copilot-acp": "gateway",
-    "ai-gateway": "gateway",
-    "kilocode": "gateway",
     "nvidia": "gateway",
     "ollama-cloud": "gateway",
     "bedrock": "gateway",
@@ -104,6 +122,20 @@ HERMES_PROVIDER_KINDS: dict[str, str] = {
     "azure-foundry": "gateway",
     "custom": "gateway",
 }
+
+# Model-provider plugin name -> entitlement kind. The name is the manifest
+# `name` (else the directory name), which is the provider id the plugin
+# registers with Hermes. Same rule as the table above: a plugin absent here
+# contributes nothing, and none maps to `unknown` or `gateway` on a guess.
+HERMES_PLUGIN_PROVIDER_KINDS: dict[str, str] = {
+    "claude-subscription-directsdk-experimental": "anthropic",
+}
+
+# The manifest `kind` Hermes' provider discovery imports from a flat
+# `plugins/<dir>/` install; every other kind there belongs to its general
+# plugin manager.
+MODEL_PROVIDER_PLUGIN_KIND = "model-provider"
+MODEL_PROVIDERS_PLUGIN_DIR = "model-providers"
 
 # Variable NAME -> Hermes provider id, from the registry's `api_key_env_vars`
 # for the providers above, plus three names the retired setup hint table
@@ -139,10 +171,23 @@ HERMES_ENV_KEY_PROVIDERS: dict[str, str] = {
     "OPENCODE_ZEN_API_KEY": "opencode-zen",
     "OPENCODE_GO_API_KEY": "opencode-go",
     "COPILOT_GITHUB_TOKEN": "copilot",
-    "AI_GATEWAY_API_KEY": "ai-gateway",
-    "KILOCODE_API_KEY": "kilocode",
     "NVIDIA_API_KEY": "nvidia",
     "OLLAMA_API_KEY": "ollama-cloud",
+}
+
+# Variable NAME -> Hermes provider id, read only by the consent check in
+# `omh_delegate_route`, never by `detect_linked_providers`. A relay in the
+# tables above counts as an account of kind `gateway`, which serves every
+# alias, so chain shaping turns off for everyone holding its key or login. A
+# provider here has no row in `HERMES_PROVIDER_KINDS` either: its key or auth
+# store entry only lets a route that names it pass, there and in the serving
+# rule (`route_only_providers` in `effective_provider_entitlements`). A
+# `providers.<id>` block or `model.provider: <id>` in `config.yaml` still
+# counts as a `gateway` the person declared.
+ROUTE_ONLY_ENV_KEY_PROVIDERS: dict[str, str] = {
+    "AI_GATEWAY_API_KEY": "ai-gateway",
+    "COMMANDCODE_API_KEY": "commandcode",
+    "KILOCODE_API_KEY": "kilocode",
 }
 
 # `model.provider: auto` is Hermes' resolution mode, not an account.
@@ -243,6 +288,59 @@ def config_provider_base_url_hosts(config_text: str) -> dict[str, str]:
     return hosts
 
 
+def config_provider_declared_models(config_text: str) -> dict[str, frozenset[str]]:
+    """`providers.<id>` -> the model ids its `models:` section lists, casefolded.
+
+    Read line-shaped like `config_provider_base_url_hosts`: under a
+    four-space `models:` key, each six-space mapping key
+    (`claude-opus-5-5:`), `- id` list item, or `- id: x` / `- name: x` item.
+    These are the entries Hermes itself matches when it maps a model back to
+    the `custom:<name>` block that serves it
+    (`find_custom_provider_identity_by_model`). `default_model` is not read:
+    a default says which model a block starts on, not which ones it has. A
+    block with no `models:` section is absent, never an empty set, so
+    "lists nothing" and "lists these" can never be confused.
+    """
+    declared: dict[str, set[str]] = {}
+    in_providers = False
+    current = ""
+    in_models = False
+    for line in config_text.splitlines():
+        stripped = line.strip()
+        if not line.startswith(" ") and stripped:
+            in_providers = stripped == "providers:"
+            current, in_models = "", False
+            continue
+        if not in_providers or not stripped or stripped.startswith("#"):
+            continue
+        if line.startswith("  ") and not line.startswith("    "):
+            key, separator, _rest = stripped.partition(":")
+            current = key.strip().strip("\"'") if separator else ""
+            in_models = False
+            continue
+        if not current:
+            continue
+        if line.startswith("    ") and not line.startswith("      "):
+            key, separator, _rest = stripped.partition(":")
+            in_models = bool(separator) and key.strip() == "models"
+            continue
+        if not in_models or line.startswith("        "):
+            continue
+        entry = stripped.split("#", 1)[0].strip()
+        if entry.startswith("- "):
+            item = entry[2:].strip()
+            key, separator, rest = item.partition(":")
+            if separator and key.strip() not in ("id", "name"):
+                continue
+            model_id = (rest if separator else item).strip().strip("\"'")
+        else:
+            key, separator, _rest = entry.partition(":")
+            model_id = key.strip().strip("\"'") if separator else ""
+        if model_id:
+            declared.setdefault(current, set()).add(model_id.casefold())
+    return {provider_id: frozenset(models) for provider_id, models in declared.items()}
+
+
 def local_config_provider_ids(config_text: str) -> list[str]:
     """`providers.<id>` keys whose `base_url` names a loopback host.
 
@@ -304,6 +402,19 @@ def configured_provider_ids(config_text: str) -> list[str]:
     return ids
 
 
+def _env_value_is_empty(raw_value: str) -> bool:
+    """Whether a `.env` value says nothing, by Hermes' own tokenizer.
+
+    Blank, or a quoted blank with at most a comment after it. An unquoted
+    `# note` stays a value, as it does for Hermes.
+    """
+    value = raw_value.strip()
+    if value[:1] not in ("'", '"'):
+        return not value
+    inner, closed, rest = value[1:].partition(value[0])
+    return bool(closed) and not inner.strip() and (not rest.strip() or rest.lstrip().startswith("#"))
+
+
 def env_key_names(
     hermes_home: Path,
     environ: Mapping[str, str] | None = None,
@@ -312,10 +423,12 @@ def env_key_names(
 ) -> list[str]:
     """Variable NAMES present in `<hermes_home>/.env`, plus ``environ`` when given.
 
-    Sorted, values never read. Only names in ``allowed`` are returned, and
-    ``allowed`` defaults to the registry table, so a caller that passes
-    nothing gets exactly the result this function always gave and the name
-    can still be printed beside a provider row. Detection passes no
+    Sorted, and no value is copied or returned. A line with an empty value
+    (`X=`, `X=""`) is not a key, because Hermes then has no credential to use;
+    as in Hermes, the last line for a name decides. ``environ`` names are taken
+    as given. Only names in ``allowed`` are returned, and ``allowed`` defaults
+    to the registry table, so the name can still be printed beside a provider
+    row. Detection passes no
     ``environ`` (see the module docstring); the setup interview passes the
     process environment because a person confirms every row it offers.
 
@@ -329,16 +442,159 @@ def env_key_names(
     """
     permitted = HERMES_ENV_KEY_PROVIDERS if allowed is None else allowed
     names = {name for name in (environ or {}) if name in permitted}
+    filled: dict[str, bool] = {}
     for line in _read_text(hermes_home / ".env").splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         if stripped.startswith("export "):
             stripped = stripped[len("export "):].lstrip()
-        name, separator, _value = stripped.partition("=")
+        name, separator, value = stripped.partition("=")
         if separator and name.strip() in permitted:
-            names.add(name.strip())
-    return sorted(names)
+            filled[name.strip()] = not _env_value_is_empty(value)
+    return sorted(names | {name for name, is_filled in filled.items() if is_filled})
+
+
+def _unquote_scalar(value: str) -> str:
+    """A YAML scalar's text: a quoted one is read before any `#`, so `"a#b"` is `a#b`.
+
+    An unquoted one ends at a comment (`#` after whitespace, or at its start).
+    """
+    cleaned = value.strip()
+    if cleaned[:1] in ("'", '"'):
+        closing = cleaned.find(cleaned[0], 1)
+        if closing > 0:
+            return cleaned[1:closing].strip()
+    return re.split(r"(?:^|\s)#", cleaned, maxsplit=1)[0].strip()
+
+
+def _flow_list_items(body: str) -> list[str]:
+    return [item for item in (_unquote_scalar(part) for part in body.split(",")) if item]
+
+
+def config_disabled_plugins(config_text: str) -> frozenset[str]:
+    """The names under `plugins.disabled` in a Hermes `config.yaml`.
+
+    Line-shaped like the other config readers here (no YAML dependency):
+    a block list (`- name` lines, at or below the key's indent) or a flow
+    `[a, b]` list, on one line or continued over several, under the
+    top-level `plugins:` mapping. A scalar is not a list and names nothing,
+    as in Hermes (`_get_disabled_plugins`).
+    """
+    names: list[str] = []
+    in_plugins = False
+    child_indent: int | None = None
+    list_indent: int | None = None
+    flow: list[str] | None = None
+    for line in config_text.splitlines():
+        if flow is not None:
+            body = re.split(r"(?:^|\s)#", line, maxsplit=1)[0]
+            if "]" in body:
+                flow.append(body.split("]", 1)[0])
+                names.extend(_flow_list_items(",".join(flow)))
+                flow = None
+            else:
+                flow.append(body)
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not line.startswith((" ", "\t")):
+            in_plugins = stripped.split("#", 1)[0].strip() == "plugins:"
+            child_indent = list_indent = None
+            continue
+        if not in_plugins:
+            continue
+        indent = len(line) - len(line.lstrip(" \t"))
+        if list_indent is not None:
+            if stripped.startswith("-") and indent >= list_indent:
+                item = _unquote_scalar(stripped[1:])
+                if item:
+                    names.append(item)
+                continue
+            list_indent = None
+        if child_indent is None:
+            child_indent = indent
+        if indent != child_indent:
+            continue
+        key, separator, rest = stripped.partition(":")
+        if not separator or key.strip().strip("\"'") != "disabled":
+            continue
+        value = re.split(r"(?:^|\s)#", rest, maxsplit=1)[0].strip()
+        if not value:
+            list_indent = indent
+        elif value.startswith("[") and value.endswith("]"):
+            names.extend(_flow_list_items(value[1:-1]))
+        elif value.startswith("["):
+            flow = [value[1:]]
+    return frozenset(names)
+
+
+def plugin_manifest_field(plugin_dir: Path, key: str) -> str | None:
+    """A top-level ``key`` of the plugin's `plugin.yaml` (else `plugin.yml`), or None.
+
+    Mirrors Hermes' `_manifest_field`: the first manifest file that exists
+    decides, and a key it lacks is None even when the other spelling has it.
+    Only unindented lines are read, so a nested `kind:` never answers.
+    """
+    for filename in ("plugin.yaml", "plugin.yml"):
+        manifest = plugin_dir / filename
+        if not manifest.is_file():
+            continue
+        for line in _read_text(manifest).splitlines():
+            if not line or line[0] in " \t#":
+                continue
+            name, separator, value = line.partition(":")
+            if separator and name.strip() == key:
+                return _unquote_scalar(value) or None
+        return None
+    return None
+
+
+def _plugin_child_dirs(directory: Path) -> list[Path]:
+    try:
+        return sorted(child for child in directory.iterdir() if child.is_dir() and not child.name.startswith(("_", ".")))
+    except OSError:
+        return []
+
+
+def installed_provider_plugins(hermes_home: Path, config_text: str) -> list[tuple[str, str]]:
+    """`(provider name, evidence)` for each model-provider plugin Hermes would load.
+
+    Mirrors Hermes' `_scan_home_layer` and `_plugin_disabled`:
+    `plugins/model-providers/<dir>/` first, then `plugins/<dir>/` whose
+    manifest declares `kind: model-provider` (the `model-providers`
+    directory itself and names starting `_` or `.` skipped in both), each
+    with an `__init__.py`, minus a plugin `plugins.disabled` names by its
+    directory, `model-providers/<dir>`, or manifest `name`. The disabled
+    names are read from the home's `config.yaml` and from Hermes' managed
+    config (`managed_config_layer`), and a name either one disables is not
+    counted. The name is the manifest `name`, else the directory name; the
+    evidence is the plugin's path under the home. Nothing is imported or
+    executed.
+    """
+    plugins_dir = hermes_home / "plugins"
+    _managed_path, managed_text, _managed_error = managed_config_layer()
+    disabled = config_disabled_plugins(config_text) | config_disabled_plugins(managed_text or "")
+    candidates = [
+        (child, f"plugins/{MODEL_PROVIDERS_PLUGIN_DIR}/{child.name}")
+        for child in _plugin_child_dirs(plugins_dir / MODEL_PROVIDERS_PLUGIN_DIR)
+    ]
+    candidates += [
+        (child, f"plugins/{child.name}")
+        for child in _plugin_child_dirs(plugins_dir)
+        if child.name != MODEL_PROVIDERS_PLUGIN_DIR
+        and plugin_manifest_field(child, "kind") == MODEL_PROVIDER_PLUGIN_KIND
+    ]
+    found: list[tuple[str, str]] = []
+    for plugin_dir, evidence in candidates:
+        if not (plugin_dir / "__init__.py").is_file():
+            continue
+        manifest_name = plugin_manifest_field(plugin_dir, "name")
+        if {plugin_dir.name, f"{MODEL_PROVIDERS_PLUGIN_DIR}/{plugin_dir.name}", manifest_name} & disabled:
+            continue
+        found.append((manifest_name or plugin_dir.name, evidence))
+    return found
 
 
 def _pool_entry_is_explicit(entry: object, env_names: frozenset[str]) -> bool:
@@ -350,7 +606,7 @@ def _pool_entry_is_explicit(entry: object, env_names: frozenset[str]) -> bool:
     if lowered.startswith("env:"):
         # A stale env-seeded row outlives the variable it was seeded from;
         # Hermes counts it only while the variable still resolves. Without
-        # reading values, "still in .env" is the closest honest check.
+        # keeping values, "still filled in .env" is the closest honest check.
         return source.split(":", 1)[1].strip() in env_names
     return bool(lowered) and (lowered in EXPLICIT_POOL_SOURCES or lowered.startswith("manual:"))
 
@@ -390,6 +646,19 @@ def auth_store_provider_ids(text: str, env_names: Iterable[str] = ()) -> list[st
     return sorted(name for name in found if PROVIDER_ID_RE.fullmatch(name))
 
 
+def route_only_provider_ids(hermes_home: str | Path | None = None) -> set[str]:
+    """Route-only providers this home holds a filled key or an auth store entry for.
+
+    An unbound profile home holds none, as in `detect_linked_providers`.
+    """
+    home = _hermes_home(hermes_home)
+    if home is None:
+        return set()
+    names = env_key_names(home, allowed=ROUTE_ONLY_ENV_KEY_PROVIDERS)
+    stored = auth_store_provider_ids(_read_text(home / "auth.json"), names)
+    return {ROUTE_ONLY_ENV_KEY_PROVIDERS[name] for name in names} | (set(ROUTE_ONLY_ENV_KEY_PROVIDERS.values()) & set(stored))
+
+
 def _hermes_home(value: str | Path | None) -> Path | None:
     if value is not None:
         return Path(value).expanduser()
@@ -407,8 +676,9 @@ def detect_linked_providers(
     """Every provider Hermes is linked to on this machine, strongest source first.
 
     Rows are `{"id", "kind", "source", "evidence"}` where `source` is one of
-    `login`, `config`, `env` and `evidence` is the place it was found (a
-    section of `auth.json`, a config key, a variable NAME). One row per id,
+    `login`, `config`, `plugin`, `env` and `evidence` is the place it was
+    found (a section of `auth.json`, a config key, a plugin directory under
+    the home, a variable NAME). One row per id,
     ordered by source strength then id; a provider found in several places
     keeps the strongest. `env_names` lets a caller supply the variable names
     it already read (the setup interview does, and includes the shell's);
@@ -427,6 +697,12 @@ def detect_linked_providers(
     config_ids = [provider_id for provider_id in configured_provider_ids(config_text) if provider_id not in local_ids]
     custom_ids = {provider_id for provider_id in config_ids if provider_id not in HERMES_PROVIDER_KINDS}
     names = env_key_names(home) if env_names is None else sorted(str(name) for name in env_names)
+    plugin_rows = [
+        (provider_id, HERMES_PLUGIN_PROVIDER_KINDS[provider_id], evidence)
+        for provider_id, evidence in installed_provider_plugins(home, config_text)
+        if provider_id in HERMES_PLUGIN_PROVIDER_KINDS
+    ]
+    plugin_kinds = {provider_id: kind for provider_id, kind, _evidence in plugin_rows}
     rows: dict[str, dict[str, str]] = {}
 
     def config_kind(provider_id: str) -> str:
@@ -437,8 +713,10 @@ def detect_linked_providers(
         provider, which outranks the URL under it. `gateway` is not such an
         answer: it is what an id that says nothing falls back to, so for
         those the endpoint host gets to answer before the fallback stands.
+        An installed provider plugin the config names (`model.provider` on
+        it) answers like a registry id.
         """
-        kind = HERMES_PROVIDER_KINDS.get(provider_id, GATEWAY_KIND)
+        kind = HERMES_PROVIDER_KINDS.get(provider_id) or plugin_kinds.get(provider_id, GATEWAY_KIND)
         if kind != GATEWAY_KIND:
             return kind
         return endpoint_family_for_host(base_url_hosts.get(provider_id, "")) or kind
@@ -456,6 +734,8 @@ def detect_linked_providers(
             add(provider_id, config_kind(provider_id), LINKED_SOURCE_LOGIN, "auth.json")
     for provider_id in config_ids:
         add(provider_id, config_kind(provider_id), LINKED_SOURCE_CONFIG, "config.yaml")
+    for provider_id, kind, evidence in plugin_rows:
+        add(provider_id, kind, LINKED_SOURCE_PLUGIN, evidence)
     for name in names:
         provider_id = HERMES_ENV_KEY_PROVIDERS.get(name)
         if provider_id is None:

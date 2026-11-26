@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import marshal
+import os
 import sys
 import tempfile
 from types import CodeType
@@ -203,6 +204,22 @@ def host_managed_plugin(
     }
 
 
+def _dangling_link_target(target: Path) -> str | None:
+    """Where a link at `target` points, when that place no longer exists; else None."""
+    if not is_directory_link(target) or target.exists():
+        return None
+    try:
+        pointed = os.readlink(target)
+    except OSError:
+        # A junction Windows will not read back still dangles; name the link.
+        return str(target)
+    # Windows reads a link back in extended-length form (`\\?\C:\...`); the
+    # person reads the path they would type.
+    if pointed.startswith("\\\\?\\UNC\\"):
+        return "\\\\" + pointed[len("\\\\?\\UNC\\"):]
+    return pointed.removeprefix("\\\\?\\")
+
+
 def install_plugin_bundle(paths: OmhPaths, *, force: bool = False, dry_run: bool = False) -> dict[str, Any]:
     target = paths.hermes_plugin_dir
     source_records = bundled_plugin_records()
@@ -222,13 +239,20 @@ def install_plugin_bundle(paths: OmhPaths, *, force: bool = False, dry_run: bool
     existing_manifest = read_plugin_manifest(target)
     if existing_manifest is not None and not force and not _protection_inventory_valid(existing_manifest):
         raise PluginPackError("invalid OMH plugin manifest inventory; plugin directory left unchanged")
-    dirty = plugin_local_modifications(existing_manifest, target)
+    # A file already holding the incoming bundle's bytes is not a conflict:
+    # replacing it loses nothing, so only real divergence needs --force.
+    dirty = plugin_local_modifications(existing_manifest, target, incoming=_record_file_map(source_records))
     # `is_directory_link` as well as `exists`: `Path.exists` follows the link,
     # so a dangling plugin symlink or junction reads as absent and would slip
     # past the ownership guard into the replacement path without --force. The
     # guard asks whether anything occupies the path OMH cannot prove it wrote.
     unmanaged = (target.exists() or is_directory_link(target)) and existing_manifest is None
-    if unmanaged and not force:
+    # A link whose target is gone holds no plugin anyone owns: nothing behind
+    # it can be lost, so it is repaired without --force and the result names
+    # where it pointed. On 2026-11-04 four bench profiles' `plugins/omh`
+    # links to deleted worktrees refused every update, which rolled back.
+    dangling_link = _dangling_link_target(target) if unmanaged else None
+    if unmanaged and not force and dangling_link is None:
         raise PluginPackError(f"{target} exists without an OMH plugin manifest; use --force to replace it")
     if dirty and not force:
         raise PluginContentProtectedError(f"managed plugin files changed: {', '.join(dirty)}; use --force to replace them")
@@ -240,21 +264,46 @@ def install_plugin_bundle(paths: OmhPaths, *, force: bool = False, dry_run: bool
                 "move these entries outside the plugin directory, or use --force to replace them"
             )
 
-    changed = force or unmanaged or existing_manifest is None or _manifest_file_map(existing_manifest) != _record_file_map(source_records)
+    # A bundle reached through a directory link (an older layout) is
+    # replaced by a real directory even when its files already match.
+    files_changed = (
+        force
+        or unmanaged
+        or existing_manifest is None
+        or is_directory_link(target)
+        or _manifest_file_map(existing_manifest) != _record_file_map(source_records)
+    )
+    # A package that moved (an upgrade's new generation, a reinstall through
+    # another channel) changes no bundle file, but the recorded `package_site`
+    # the bundle imports from has to follow it (#2166). Only the manifest is
+    # rewritten for that, and it keeps its `installed_at`: a running gateway
+    # already runs these exact bundle bytes, and the restart hint reads that
+    # stamp, so a move alone must not ask anyone to restart.
+    site = package_site_record()
+    site_moved = existing_manifest is not None and not files_changed and existing_manifest.get(PACKAGE_SITE_KEY) != site
     result = _plugin_distribution_payload(
         paths,
         dry_run=dry_run,
         observed=False if dry_run else True,
-        changed=changed,
+        changed=files_changed or site_moved,
         file_records=source_records,
         dirty_files=dirty,
     )
+    result["bundle_files_changed"] = files_changed
+    if dangling_link is not None:
+        result["replaced_dangling_link"] = dangling_link
     if dry_run:
         result["observed_scope"] = "dry run only; no plugin files were written"
         return result
-    _copy_plugin_bundle(
-        target, source_records, existing_manifest=existing_manifest, initially_occupied=bool(unmanaged), force=force
-    )
+    if files_changed:
+        _copy_plugin_bundle(
+            target, source_records, existing_manifest=existing_manifest, initially_occupied=bool(unmanaged), force=force
+        )
+    elif site_moved and existing_manifest is not None:
+        moved = {key: value for key, value in existing_manifest.items() if key != PACKAGE_SITE_KEY}
+        if site is not None:
+            moved[PACKAGE_SITE_KEY] = site
+        atomic_write_json(target / PLUGIN_MANAGED_MANIFEST, moved)
     smoke = inspect_plugin_bundle(paths)
     result.update(
         {
@@ -284,7 +333,11 @@ def inspect_plugin_bundle(paths: OmhPaths) -> dict[str, Any]:
     if target.exists() and not manifest and host_install is None:
         errors.append(f"{target / PLUGIN_MANAGED_MANIFEST} is missing or unreadable")
     manifest_valid = _manifest_valid(manifest, target)
-    manifest_current = manifest_valid and manifest_file_map == bundled_file_map
+    # The package the bundle imports from (#2166) is part of being current:
+    # a manifest recording another directory, or none, leaves a PM-managed
+    # Hermes without the package-backed tools until `omh setup` rewrites it.
+    package_site_current = manifest is not None and manifest.get(PACKAGE_SITE_KEY) == package_site_record()
+    manifest_current = manifest_valid and manifest_file_map == bundled_file_map and package_site_current
     if target.exists() and not manifest_valid and host_install is None:
         errors.append("plugin manifest is invalid or managed files changed")
     if target.exists() and manifest_valid and not manifest_current:
@@ -333,6 +386,8 @@ def inspect_plugin_bundle(paths: OmhPaths) -> dict[str, Any]:
         "plugin_manifest_valid": manifest_valid,
         "plugin_manifest_current": manifest_current,
         "plugin_bundle_stale": target.exists() and manifest_valid and not manifest_current,
+        "plugin_package_site": (manifest or {}).get(PACKAGE_SITE_KEY) or {},
+        "plugin_package_site_current": package_site_current,
         "plugin_host_managed": host_install is not None,
         "plugin_host_install": host_install or {},
         # `plugin_distribution_ready` below cannot hold a Hermes-pinned tree
@@ -441,11 +496,19 @@ def bundled_plugin_records() -> list[dict[str, str]]:
 def read_plugin_manifest(plugin_dir: Path) -> dict[str, Any] | None:
     try:
         return read_json_object(plugin_dir / PLUGIN_MANAGED_MANIFEST)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
 
 
-def plugin_local_modifications(manifest: dict[str, Any] | None, plugin_dir: Path) -> list[str]:
+def plugin_local_modifications(
+    manifest: dict[str, Any] | None, plugin_dir: Path, *, incoming: Mapping[str, str] | None = None
+) -> list[str]:
+    """Managed files whose bytes differ from the manifest record.
+
+    With ``incoming`` (path -> sha256 of the bundle about to be installed), a
+    file whose bytes already equal its incoming record is not reported: the
+    install would write exactly what is there, so no local change is lost.
+    """
     if not manifest:
         return []
     modified: list[str] = []
@@ -464,7 +527,8 @@ def plugin_local_modifications(manifest: dict[str, Any] | None, plugin_dir: Path
             continue
         except (OSError, ValueError) as exc:
             raise PluginPackError(f"could not inspect managed plugin path: {exc}") from exc
-        if sha256_file(path) != expected:
+        digest = sha256_file(path)
+        if digest != expected and digest != (incoming or {}).get(rel):
             modified.append(rel)
     return modified
 
@@ -478,6 +542,10 @@ def _plugin_unmanaged_entries(manifest: dict[str, Any], plugin_dir: Path) -> lis
     """
     managed = set(_manifest_file_map(manifest)) | {PLUGIN_MANAGED_MANIFEST}
     managed_dirs = {parent.as_posix() for rel in managed for parent in Path(rel).parents}
+    # `atomic_write_json` stages a manifest rewrite as
+    # `.<manifest>.<pid>-<hex>.tmp` beside it; one a crash left behind is
+    # OMH's own, not the person's, and must not block the next update.
+    manifest_temp_prefix = f".{PLUGIN_MANAGED_MANIFEST}."
     unknown: list[str] = []
 
     def visit(directory: Path) -> None:
@@ -491,6 +559,8 @@ def _plugin_unmanaged_entries(manifest: dict[str, Any], plugin_dir: Path) -> lis
                 unknown.append(rel)
             elif entry.is_dir():
                 visit(entry)
+            elif rel.startswith(manifest_temp_prefix) and rel.endswith(".tmp") and "/" not in rel:
+                continue
             elif rel not in managed and not _generated_plugin_bytecode(entry, plugin_dir, managed):
                 unknown.append(rel)
 
@@ -501,13 +571,34 @@ def _plugin_unmanaged_entries(manifest: dict[str, Any], plugin_dir: Path) -> lis
     return sorted(unknown)
 
 
+def _bytecode_source(path: Path) -> tuple[Path, str] | None:
+    """The source a `__pycache__` file is the cache of, and the interpreter tag in its name; None when it names neither.
+
+    pytest's assertion rewriting caches a module whose file name matches its test patterns as
+    `<module>.<cache tag>-pytest-<version>.pyc`, which `source_from_cache` refuses for its extra dots. The bundle
+    ships one such module (`test_expectation_check.py`), so a pytest run that imports the installed plugin leaves
+    that cache beside it.
+    """
+    try:
+        return Path(importlib.util.source_from_cache(str(path))), path.name.split(".")[1]
+    except ValueError:
+        pass
+    stem, _, rest = path.name.partition(".")
+    tag, marker, version = rest[: -len(".pyc")].partition("-pytest-")
+    if not (stem and marker and tag and "." not in tag):
+        return None
+    if not (version.isascii() and version[:1].isdigit() and all(char.isalnum() or char in ".+!_-" for char in version)):
+        return None
+    return path.parent.parent / f"{stem}.py", tag
+
+
 def _generated_plugin_bytecode(path: Path, plugin_dir: Path, managed: set[str]) -> bool:
     if path.parent.name != "__pycache__" or path.suffix != ".pyc" or not path.is_file():
         return False
-    try:
-        source = Path(importlib.util.source_from_cache(str(path)))
-    except ValueError:
+    named = _bytecode_source(path)
+    if named is None:
         return False
+    source, tag = named
     if source.relative_to(plugin_dir).as_posix() not in managed:
         return False
     # Parsing marshal data creates a code object but never executes it. Cap
@@ -529,7 +620,7 @@ def _generated_plugin_bytecode(path: Path, plugin_dir: Path, managed: set[str]) 
         # magic and a payload this marshal cannot read. Accept a well-formed
         # header under a foreign cache tag; a foreign magic under our own tag
         # is not something an interpreter writes.
-        return path.name.split(".")[1] != sys.implementation.cache_tag
+        return tag != sys.implementation.cache_tag
     try:
         code = marshal.load(stream)
     except (EOFError, TypeError, ValueError):
@@ -599,7 +690,7 @@ def _copy_plugin_bundle(
             if not force and existing_manifest is not None and not is_directory_link(backup):
                 if read_plugin_manifest(backup) != existing_manifest:
                     raise PluginPackError("plugin manifest changed during staging; original bundle restored")
-                dirty = plugin_local_modifications(existing_manifest, backup)
+                dirty = plugin_local_modifications(existing_manifest, backup, incoming=_record_file_map(file_records))
                 if dirty:
                     raise PluginPackError(f"managed plugin files changed: {', '.join(dirty)}; original bundle restored")
                 unknown = _plugin_unmanaged_entries(existing_manifest, backup)
@@ -643,7 +734,7 @@ def _copy_resource_tree(root: Any, dest: Path) -> None:
 
 
 def _new_plugin_manifest(target: Path, file_records: list[dict[str, str]]) -> dict[str, Any]:
-    return {
+    manifest: dict[str, Any] = {
         "schema_version": PLUGIN_SCHEMA_VERSION,
         "package": "oh-my-hermes",
         "version": __version__,
@@ -655,6 +746,38 @@ def _new_plugin_manifest(target: Path, file_records: list[dict[str, str]]) -> di
         "requires_hermes_plugin_enable": True,
         "enable_hint": PLUGIN_ENABLE_HINT,
     }
+    site = package_site_record()
+    if site is not None:
+        manifest[PACKAGE_SITE_KEY] = site
+    return manifest
+
+
+PACKAGE_SITE_KEY = "package_site"
+
+
+def package_site_record() -> dict[str, str] | None:
+    """Where this running `omh` package is installed, for the bundle to import it from (#2166).
+
+    The directory that holds the `omh` package directory and the
+    `oh_my_hermes-*.dist-info` beside it -- `site-packages` of a pip, uv, or
+    installer venv, the Homebrew libexec venv, or the npm/Bun launcher's
+    extracted cache. None when the running package is not an installed
+    distribution of this version (a source checkout, an editable install
+    whose metadata lives elsewhere): recording a directory that holds no
+    matching metadata would only make the bundle refuse it later.
+    """
+    import omh
+
+    from ..plugin_bundle.omh.package_site import installed_distribution_version
+
+    site = Path(omh.__file__).resolve().parent.parent
+    try:
+        version = installed_distribution_version(str(site))
+    except OSError:
+        return None
+    if version != __version__:
+        return None
+    return {"path": str(site), "version": __version__}
 
 
 def _plugin_distribution_payload(

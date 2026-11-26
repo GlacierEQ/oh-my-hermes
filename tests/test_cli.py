@@ -45,6 +45,7 @@ from omh.wrapper_sessions import (
     record_plan_decision,
     select_wrapper_session_executor,
 )
+from omh.coding.pi_family_interop import RUNTIME_CONFIG_FILES, RUNTIME_HOME
 
 
 # Fake `_detect_external_cli_profiles` result for setup-wizard tests that
@@ -439,7 +440,7 @@ class CliTests(unittest.TestCase):
         cases = (
             ("codex", "$ai-slop-cleaner clean delegation code", "executor_handoff", "ai-slop-cleaner", "command_template", "$ai-slop-cleaner {message}", True),
             ("omx-runtime", "$ultrawork complete the goal", "runtime_handoff", "ultrawork", "display_only", "$ultrawork {message}", False),
-            ("omo-runtime", "$ultrawork complete the goal", "runtime_handoff", "ultrawork", "skill_reference", "", False),
+            ("pi-family-runtime", "$ultrawork complete the goal", "runtime_handoff", "ultrawork", "skill_reference", "", False),
             ("omc-runtime", "$ultrawork complete the goal", "runtime_handoff", "ultrawork", "descriptor_only", "", False),
             ("hermes", "$ultrawork complete the goal", "runtime_handoff", "ultrawork", "display_only", "/ulw-work {message}", False),
         )
@@ -2565,7 +2566,8 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             hermes_home = root / ".hermes"
             base = ["--omh-home", str(omh_home), "--hermes-home", str(hermes_home)]
 
-            status, stdout, stderr = run_cli(base + ["setup", "--interactive"], output_json=False, stdin_text="")
+            with patch("omh.commands.setup._wizard_has_terminal", return_value=True):
+                status, stdout, stderr = run_cli(base + ["setup", "--interactive"], output_json=False, stdin_text="")
 
             self.assertEqual(status, 0, stderr)
             self.assertEqual(stderr, "")
@@ -2617,7 +2619,8 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
                 "omh.commands.setup._ask_yes_no",
                 return_value=True,
             ) as yes_no:
-                status, stdout, stderr = run_cli(base + ["setup", "--interactive"], output_json=False)
+                with patch("omh.commands.setup._wizard_has_terminal", return_value=True):
+                    status, stdout, stderr = run_cli(base + ["setup", "--interactive"], output_json=False)
 
             self.assertEqual(status, 0, stderr)
             self.assertEqual(stderr, "")
@@ -2639,6 +2642,10 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
     def test_setup_interactive_asks_exactly_one_scope_question(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
+            # The wizard answers "project", so the fixture is its own project:
+            # without this barrier an ancestor checkout (a home directory kept
+            # in git) became the project and setup wrote into its live `.omh`.
+            (root / ".git").write_bytes(b"gitdir: .nonexistent-project-fixture-barrier\n")
 
             titles: list[str] = []
 
@@ -2660,7 +2667,8 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             ) as yes_no, patch(
                 "omh.commands.setup._try_star_github_repo"
             ) as star:
-                status, stdout, stderr = run_cli(["setup", "--interactive"], output_json=False)
+                with patch("omh.commands.setup._wizard_has_terminal", return_value=True):
+                    status, stdout, stderr = run_cli(["setup", "--interactive"], output_json=False)
 
             self.assertEqual(status, 0, stderr)
             # Exactly one of the single choices is about scope, and it is the
@@ -2725,7 +2733,8 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
                 "omh.commands.setup._ask_yes_no",
                 side_effect=[True, False, False],
             ) as yes_no:
-                status, stdout, stderr = run_cli(base + ["setup", "--interactive"], output_json=False)
+                with patch("omh.commands.setup._wizard_has_terminal", return_value=True):
+                    status, stdout, stderr = run_cli(base + ["setup", "--interactive"], output_json=False)
 
             self.assertEqual(status, 0, stderr)
             # The maestro-delegation question, the category-maestro interview
@@ -2764,7 +2773,8 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             ), patch("omh.commands.setup._env_key_names", return_value=set()), patch(
                 "omh.commands.setup._ask_yes_no", side_effect=[False]
             ) as yes_no:
-                status, stdout, stderr = run_cli(base + ["setup", "--interactive"], output_json=False)
+                with patch("omh.commands.setup._wizard_has_terminal", return_value=True):
+                    status, stdout, stderr = run_cli(base + ["setup", "--interactive"], output_json=False)
 
             self.assertEqual(status, 0, stderr)
             # Maestro delegation (no). The provider-entitlement question has
@@ -2794,7 +2804,8 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
                     "codex": {"binary_present": False, "login_marker": "absent"},
                 },
             ), patch("omh.commands.setup._ask_yes_no", return_value=True):
-                status, _, stderr = run_cli(base + ["setup", "--interactive"], output_json=False)
+                with patch("omh.commands.setup._wizard_has_terminal", return_value=True):
+                    status, _, stderr = run_cli(base + ["setup", "--interactive"], output_json=False)
 
             self.assertEqual(status, 0, stderr)
             self.assertEqual(dispatch_models_path.read_text(encoding="utf-8"), existing)
@@ -3348,7 +3359,7 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             dry_run=False,
             from_skills_dir=None,
             source=None,
-            channel="preview",
+            channel=None,  # a bare `omh update`; --channel preview is refused here
             version="",
             package_url="",
         )
@@ -3487,7 +3498,7 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             dry_run=False,
             from_skills_dir=None,
             source=None,
-            channel="preview",
+            channel=None,  # a bare `omh update`; --channel preview is refused here
             version="",
             package_url="",
         )
@@ -3540,7 +3551,7 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             dry_run=False,
             from_skills_dir=None,
             source=None,
-            channel="preview",
+            channel=None,  # a bare `omh update`; --channel preview is refused here
             version="",
             package_url="",
         )
@@ -3759,7 +3770,7 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             dry_run=False,
             from_skills_dir=None,
             source=None,
-            channel="preview",
+            channel=None,  # a bare `omh update`; --channel preview is refused here
             version="",
             package_url="",
         )
@@ -4360,7 +4371,7 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
         commands = [step["command"] for step in payload["steps"]]
         self.assertEqual(commands[0], ["omh-dev", "--omh-home", str(omh_home.resolve()), "--hermes-home", str(hermes_home.resolve()), "setup"])
         self.assertIn(["hermes", "skills", "list", "--enabled-only"], commands)
-        self.assertIn(["hermes", "skills", "check", "oh-my-hermes"], commands)
+        self.assertIn(["hermes", "skills", "check", "omh-routing"], commands)
         self.assertIn(["omh-dev", "--omh-home", str(omh_home.resolve()), "--hermes-home", str(hermes_home.resolve()), "doctor"], commands)
         self.assertNotIn(["hermes", "skills", "inspect", "oh-my-hermes"], commands)
         installed_commands = [step["command"] for step in payload["installed_command_smoke"]["steps"]]
@@ -10167,9 +10178,9 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             base = ["--omh-home", str(root / ".omh"), "--hermes-home", str(root / ".hermes")]
-            omo = root / ".omo" / "omo.json"
-            omo.parent.mkdir(parents=True)
-            omo.write_text(json.dumps({"models": [{"provider": "anthropic", "model_id": "claude-opus-5-5"}]}), encoding="utf-8")
+            runtime_config = root / RUNTIME_HOME / RUNTIME_CONFIG_FILES[0]
+            runtime_config.parent.mkdir(parents=True)
+            runtime_config.write_text(json.dumps({"models": [{"provider": "anthropic", "model_id": "claude-opus-5-5"}]}), encoding="utf-8")
             event = root / "event.json"
             event.write_text(
                 json.dumps(
@@ -10590,7 +10601,7 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             self.assertIn("plain OMX runtime", strategy["fallback"])
             self.assertIn("Runtime capability discovery:", payload["runtime_handoff"]["prompt_template"])
             self.assertIn("runtime-native workflow templates, skills, worker lanes, subagents, MCP tools", payload["runtime_handoff"]["prompt_template"])
-            self.assertIn("OMX/OMO/OMC templates when actually available", payload["runtime_handoff"]["prompt_template"])
+            self.assertIn("OMX/pi-family/OMC templates when actually available", payload["runtime_handoff"]["prompt_template"])
             self.assertIn("These are examples, not proof of availability.", payload["runtime_handoff"]["prompt_template"])
             self.assertIn("continue with solo runtime execution", payload["runtime_handoff"]["prompt_template"])
             self.assertIn("local_capabilities_used", payload["runtime_handoff"]["prompt_template"])
@@ -12054,8 +12065,10 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
         self.assertIn("--from-plan", coding_delegate["argv_template"])
         self.assertIn("{plan_artifact}", coding_delegate["argv_template"])
         self.assertNotIn("{message}", coding_delegate["argv_template"])
+        # No owner was named, so the template carries the neutral default, never Codex.
         self.assertIn("--executor", coding_delegate["argv_template"])
-        self.assertIn("codex", coding_delegate["argv_template"])
+        self.assertIn("generic", coding_delegate["argv_template"])
+        self.assertNotIn("codex", coding_delegate["argv_template"])
         self.assertEqual(coding_delegate["plan_artifact_arg"], "--from-plan")
         self.assertEqual(coding_delegate["recorded_run_field"], "runtime.run.run_id")
         self.assertNotIn("command_template", coding_delegate)
@@ -12073,7 +12086,7 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
         self.assertNotIn("command_template", coding_delegate)
         self.assertEqual(coding_delegate["argv_template"][-1], "{plan_artifact}")
         self.assertIn("--executor", coding_delegate["argv_template"])
-        self.assertIn("codex", coding_delegate["argv_template"])
+        self.assertIn("generic", coding_delegate["argv_template"])
         self.assertNotIn(hostile, json.dumps(coding_delegate))
 
     def test_hermes_plan_wrapper_contract_rejects_substring_coding_matches(self) -> None:
@@ -12173,6 +12186,8 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
                 + [
                     "coding",
                     "delegate",
+                    "--executor",
+                    "codex",
                     "--from-plan",
                     str(plan_path),
                     "--record",
@@ -12211,7 +12226,14 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             self.assertEqual(status, 2)
             self.assertIn("requires a hermes_plan/v1 artifact", stderr)
 
-            status, stdout, stderr = run_cli(base + ["hermes", "plan", "accept", str(plan_path)])
+            # The plan was recorded without --plan-file, so it is the generated
+            # scaffold: acceptance is refused unless the operator asks for it.
+            status, _, stderr = run_cli(base + ["hermes", "plan", "accept", str(plan_path)])
+            self.assertEqual(status, 2)
+            self.assertIn("only the generated scaffold", stderr)
+            self.assertIn("status: draft", plan_path.read_text(encoding="utf-8").split("---", 2)[1])
+
+            status, stdout, stderr = run_cli(base + ["hermes", "plan-accept", "--allow-scaffold", str(plan_path)])
             self.assertEqual(stderr, "")
             self.assertEqual(status, 0)
             accepted = json.loads(stdout)
@@ -12220,14 +12242,26 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             self.assertEqual(accepted["journal_event"]["target_type"], "plan")
             self.assertIn("status: accepted", plan_path.read_text(encoding="utf-8").split("---", 2)[1])
 
-            status, stdout, stderr = run_cli(base + ["hermes", "plan-accept", str(plan_path), "--write-context-pack"])
+            status, stdout, stderr = run_cli(
+                base + ["hermes", "plan-accept", str(plan_path), "--allow-scaffold", "--write-context-pack"]
+            )
             self.assertEqual(stderr, "")
             self.assertEqual(status, 0)
             context_pack_path = Path(json.loads(stdout)["context_pack"]["path"])
             self.assertTrue(context_pack_path.exists())
 
             status, stdout, stderr = run_cli(
-                base + ["coding", "delegate", "--from-plan", str(plan_path), "--record", "--include-message-full"]
+                base
+                + [
+                    "coding",
+                    "delegate",
+                    "--executor",
+                    "codex",
+                    "--from-plan",
+                    str(plan_path),
+                    "--record",
+                    "--include-message-full",
+                ]
             )
             self.assertEqual(stderr, "")
             self.assertEqual(status, 0)
@@ -12280,6 +12314,46 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             self.assertEqual(shown["lifecycle"]["plan_status"], "accepted")
             self.assertTrue(shown["lifecycle"]["prepared_handoff"])
             self.assertEqual(shown["lifecycle"]["observation_status"], "prepared_not_observed")
+
+    def test_from_plan_without_executor_resolves_the_plain_default(self) -> None:
+        # Coding ownership stays executor-neutral: `--from-plan` once selected
+        # Codex when `--executor` was left out, while the same command without
+        # `--from-plan` resolved `generic`. Codex is selected only when named.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = ["--omh-home", str(root / ".omh"), "--hermes-home", str(root / ".hermes")]
+            task = ["implement", "durable", "observation", "journal", "with", "tests"]
+            reviewed = root / "reviewed-plan.md"
+            reviewed.write_text("## Plan\n- T1 append journal events\n", encoding="utf-8")
+
+            status, stdout, stderr = run_cli(base + ["hermes", "plan", "--record", "--plan-file", str(reviewed), *task])
+            self.assertEqual((status, stderr), (0, ""))
+            planned = json.loads(stdout)
+            plan_path = Path(planned["artifact"]["path"])
+            self.assertNotIn("codex", planned["wrapper_contract"]["coding_delegate"]["argv_template"])
+
+            status, stdout, stderr = run_cli(base + ["hermes", "plan-accept", str(plan_path), "--write-context-pack"])
+            self.assertEqual((status, stderr), (0, ""))
+            self.assertEqual(json.loads(stdout)["context_pack"]["context_pack"]["executor_target"], "generic")
+
+            status, stdout, stderr = run_cli(base + ["coding", "delegate", *task])
+            self.assertEqual((status, stderr), (0, ""))
+            plain = json.loads(stdout)
+
+            status, stdout, stderr = run_cli(base + ["coding", "delegate", "--record", "--from-plan", str(plan_path)])
+            self.assertEqual((status, stderr), (0, ""))
+            from_plan = json.loads(stdout)
+            self.assertEqual(from_plan["selected_executor_profile"], plain["selected_executor_profile"])
+            self.assertEqual(from_plan["selected_executor_profile"], "generic")
+            self.assertEqual(from_plan["work_owner_mode"], plain["work_owner_mode"])
+            self.assertNotIn("executor_handoff", from_plan)
+            self.assertFalse(from_plan["runtime"]["recorded"])
+
+            status, stdout, stderr = run_cli(
+                base + ["coding", "delegate", "--executor", "codex", "--from-plan", str(plan_path)]
+            )
+            self.assertEqual((status, stderr), (0, ""))
+            self.assertEqual(json.loads(stdout)["selected_executor_profile"], "codex")
 
     def test_hermes_plan_records_context_for_weak_request(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -12771,6 +12845,8 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             # Every profile shares the primary's OMH home, so one setup run
             # writes the same runtime/state.json once per Hermes home.
             (hermes_home / "profiles" / "bot").mkdir(parents=True, exist_ok=True)
+            # A real named profile has host identity; an empty shell is ignored.
+            (hermes_home / "profiles" / "bot" / "SOUL.md").write_text("Profile identity\n", encoding="utf-8")
             base = ["--omh-home", str(omh_home), "--hermes-home", str(hermes_home)]
             config_path = hermes_home / "config.yaml"
 
@@ -12838,6 +12914,8 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             hermes_home = root / ".hermes"
             profile = hermes_home / "profiles" / "bot"
             profile.mkdir(parents=True, exist_ok=True)
+            # Seed genuine profile identity before expecting setup to configure it.
+            (profile / "SOUL.md").write_text("Profile identity\n", encoding="utf-8")
             base = ["--omh-home", str(omh_home), "--hermes-home", str(hermes_home)]
 
             self.assertEqual(run_cli(base + ["setup", "--with-plugin", "--yes"])[0], 0)
@@ -12921,6 +12999,7 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             fake_python.write_text("# fake python\n", encoding="utf-8")
             fake_omh = fake_venv_bin / "omh"
             fake_omh.write_text("# fake omh\n", encoding="utf-8")
+            (fake_venv / "pyvenv.cfg").write_text("home = synthetic-python\n", encoding="utf-8")
             fake_bin = root / "bin"
             fake_bin.mkdir()
             fake_link = fake_bin / "omh"
@@ -12968,6 +13047,7 @@ Latest runtime run: 20260625T090917585910Z-loop-goal-loop-8b5bec.
             fake_python.symlink_to(external_python)
             fake_omh = fake_venv_bin / "omh"
             fake_omh.write_text("# fake omh\n", encoding="utf-8")
+            (fake_venv / "pyvenv.cfg").write_text("home = synthetic-python\n", encoding="utf-8")
             fake_bin = root / "bin"
             fake_bin.mkdir()
             fake_link = fake_bin / "omh"

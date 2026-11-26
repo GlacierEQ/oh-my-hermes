@@ -43,11 +43,12 @@ observable from OMH and stays prepared guidance, not observed benefit.
 
 The deterministic report currently evaluates three route sets:
 
-- 144 fixed routing boundaries: 47 negative controls and 97 expected
-  interventions, including over-route and missed-intervention checks
-- 90 common Hermes requests spanning 10 popular plugin-style families
-- 22 representative English and Korean requests, including focused intents and
-  collision-prone near neighbors
+- `fixed_precision`: the fixed routing boundaries, negative controls plus
+  expected interventions, including over-route and missed-intervention checks
+- `common_requests`: common Hermes requests spanning the popular plugin-style
+  families
+- `representative`: representative English and Korean requests, including
+  focused intents and collision-prone near neighbors
 
 The focused cases lock distinctions that broad keyword matching commonly gets
 wrong: TDD versus an article about testing, literature review versus project
@@ -81,6 +82,187 @@ check only for surfaces where ordinary code tests are insufficient:
 - frontend changes require rendered desktop and mobile checks
 - dependency or build metadata changes require installation or import smoke
 - CI workflow changes require a syntax check or the workflow's local command
+
+A turn in the coding posture that edited a file with a source suffix can also
+get a round-end consistency check, once, at its first stop (`attempt == 0`). The
+coding posture means Hermes's `cli`, `tui`, `acp` or `desktop` surface in a
+code workspace, or `agent.coding_context: on`; the suffixes are listed in
+`_CODE_SUFFIXES` in `hooks/verify_hooks.py`.
+
+When the check would be the only nudge continuing the turn, it fires only
+when it can pay off (`consistency_trigger.py`).
+
+- At the turn's first tool call, `pre_tool_call` records the size and
+  modification time of the workspace's Python files.
+- Before each `patch` or `write_file`, it keeps the pre-edit text of each
+  Python file that call edits. Before each `terminal` or `execute_code` call,
+  it does the same for every Python file the call's arguments name, so a
+  `printf ... >> tests/test_x.py` is diffed like a patch. Those snapshots have
+  a budget of their own (16 files, 512 KB), and the ones the command left
+  unchanged are dropped at the next tool call.
+- At the first stop, the workspace is indexed again, so every Python file the
+  turn changed is found, whatever tool changed it.
+- The definitions the changed lines touch are compared with the other files,
+  the ones the turn did not edit. Module and class level are read, including
+  `if`, `try` and `with` bodies.
+
+The check fires when one of these is true:
+
+- a touched top-level definition is also defined in another file. No text in
+  that file suppresses this: a note saying the look-alike differs on purpose
+  was tried (`declared_divergent`) and dropped after four review rounds,
+  because every wording rule it grew still let some note hide a real copy;
+- a definition the edit removed or renamed is still named in another Python
+  file, or in a `.toml`, `.cfg`, `.ini`, `.yaml`, `.yml` or `.json` file;
+- a touched function's signature changed, or a class's `__init__`, `__new__`
+  or `__call__` signature, annotated fields or abstract methods changed, and
+  another file names that function or class;
+- a replaced line of 30 or more characters appears in another file.
+
+It also fires, as before, in every case where the trigger cannot rule a copy
+or a reference out:
+
+- a changed source file that is not Python;
+- a Python file changed without a pre-edit text of its own (`opaque_edit`,
+  or `no_snapshot` when the session kept none): a command or an
+  `execute_code` write that did not name the file, a delegated child's edit,
+  or a file over the 32-file or 4 MB snapshot cap;
+- a changed file that does not parse or is over 512 KB;
+- a non-trivial change that touches no definition, import or docstring
+  (`unattributed`);
+- a workspace walk past 5,000 entries visited, or past 0.5 s at the turn's
+  start or 2 s at the stop; a root that ran over is not walked again for five
+  minutes in that process, and those turns fire too;
+- a Python file or a directory in the workspace that is a symlink leaving it
+  (`outside_link`); the target is never read;
+- an unedited Python file over 512 KB or unreadable;
+- an error.
+
+Otherwise the turn ends at its first stop. That includes changes the four
+signals cannot see: a function body that changes behaviour without changing its
+signature, and a reference that exists only in prose. Prose files (`.md`,
+`.rst`, `.txt`) are not searched, because docs and changelogs name old APIs on
+purpose. The walk skips hidden directories, version-control and virtualenv
+directories, caches and `node_modules`. It also skips build output: a `build`
+directory that holds a `lib`, `lib.*`, `bdist.*`, `temp.*` or `__editable__*`
+directory (what setuptools and distutils leave) or no `.py` file in its first
+two levels (a CMake or JS build tree), and a `dist` directory that holds no
+top-level `.py` file. Any other `build` or `dist` is scanned, such as a scripts
+directory or a namespace subpackage of that name. A session on a
+platform that never gets the check (a delegated child) takes no index.
+Oversized config files are skipped rather than fired on, because they are
+lockfiles and data dumps.
+
+Beside another nudge, the export note below included, the check rides along without a verdict.
+
+The check asks the model to look for other copies or call sites of the logic
+it changed that have to change with it, and to fix any it finds. It also tells
+the model not to re-run tests for this check, unless something beside it asks
+for a run or a re-check: the served-surface request above, or the opt-in impact
+check's note about importers the edit broke. The message keeps a fixed order:
+served-surface gate, impact note, export note, consistency check, plan
+directive, and one closing sentence for the final answer.
+
+The export note is always on and needs no language server. At the same first
+stop it parses each `.py` file the turn edited and names, as `path:line` rows,
+an `__all__` entry the module no longer defines or imports, or a top-level
+`from module import name` whose workspace module no longer binds that name: the
+leftover a rename leaves that no type error reports. Only top-level `from`
+statements are checked. An absolute import is resolved only from the project
+root or a `src/` directly under it. When the importer's own directory is not a
+package and also holds a module of that name, either one may be what the import
+reads: a script or a pytest test module reads its sibling (`tests/conftest.py`),
+a namespace-package module the root's. The name is then reported only when both
+lack it. It says nothing when there is none. It
+skips a file that does not parse, and a module whose names it cannot know: a
+star import, a module-level `__getattr__`, `globals()` / `vars()` / `locals()`,
+`setattr` on a module, or `sys.modules[__name__]`. The note is always on, so a
+delegated child that leaves a stale export also gets it, together with the
+full-answer closing: one more round for that child. `src/plugin_bundle/omh/export_check.py` lists the rules. The note
+continues the turn whatever the consistency trigger says, because fixing the
+line it names is the work. A line the impact note already names, an edited
+importer's stale `from module import name` that the language server also
+reports, is not named twice. The consistency trigger never names a line: its
+verdict only decides whether the check fires.
+
+The test check is also always on at the first stop. It names an existing test
+that lost an expected value this turn: a literal constant in an `assert` or a
+`self.assert*` call is gone from the file. Subscript keys are not counted:
+`quote["total_cents"]` becoming `quote.total_cents` reaches the same value. It
+speaks only when all of these hold:
+
+- the turn's request asked for behaviour to stay the same, as a whole: the
+  subject is the behaviour, the output, the result, the return value, "what
+  `fetch` returns", the tests or an unscoped "everything", and it stays /
+  remains the same, is unchanged, or must not change; or the request says
+  "without changing" the behaviour, the output or the tests, or "do not change
+  the tests". The keep must end its clause (only "exactly", "as before", "as
+  today" or "as it is now" may follow), so "the output stays the same shape"
+  and "the result stays the same, just a different container" keep nothing,
+  nor does one narrowed by a comma or semicolon clause with no verb, or one
+  ending in a `-wise` / `-ly` word ("..., format-wise", "..., structurally",
+  "...; I mean the format"). A
+  clause with a scope word (`else`, `other`, `otherwise`, `for`, `when`,
+  `only`) keeps nothing, and neither does a keep of a named part: "the
+  signature stays the same", "the public API is unchanged" and "the return
+  type stays the same" draw no note;
+- the request does not name the test file or the test, does not ask to update
+  a test ("update its docstring and tests", "refresh the kib test", "the test
+  is outdated", "bring it up to date"), and states no result the code must
+  now give (`must return`, `to return`). A negated ask ("don't update any
+  tests") asks for nothing;
+- the turn also changed a Python file that is not a test;
+- the test file existed at the turn's start and has its pre-edit text.
+
+Expected values are compared by presence, pooled over every test file the
+turn changed, so an assertion moved between test files, folded into a
+`@pytest.mark.parametrize` table, or folded into a module constant
+(`RETRIES = 1`) loses nothing, and a unittest message (`msg=`, or a trailing
+string) is not an expected value.
+
+`pre_llm_call` keeps those three facts about the request, never its text. The
+note continues the turn like the export note, and asks for the expected value
+back and the code changed until the original test passes.
+`src/plugin_bundle/omh/test_expectation_check.py` lists the rules.
+
+Hermes keeps the answer the model stopped with only as an interim message, and
+returns whatever follows the nudge as the turn's final response. So when no
+plan is open, the message ends with one closing sentence: if nothing more
+changed, the model replies with the single line `OMH: no further changes.`.
+
+- `pre_verify` stashes the answer the turn stopped with, in process and per
+  session.
+- `transform_llm_output` swaps that line back to the stashed answer before
+  Hermes persists it.
+- The stash is consumed only by that swap. A leftover is cleared at the
+  session's next turn start (`pre_llm_call`, which Hermes's detached review
+  forks do not reach), overwritten by the next stash, or dropped after an hour.
+- The stored transcript, `--oneshot`, API callers and parents of delegated runs
+  get the original answer byte for byte.
+- Each surface shows it differently:
+  - The OMH TUI keeps the streamed line, so the answer is not shown twice.
+  - Hermes's own CLI prints the restored answer a second time under
+    "[Response transformed after streaming]".
+  - Desktop and Hermes's Ink TUI replace the streamed line with the restored
+    answer.
+- The replay history holds the answer twice, the interim row and the final
+  row. Later turns pay for that in tokens.
+
+With an open plan the turn goes on, so there is no closing and nothing is
+stashed.
+
+Delegated children (`platform == "subagent"`) never get the check, and when
+only the impact note fires for one, its closing asks for the full answer and
+nothing is stashed. The child's reply is its parent's tool result. The skip
+only matters under `agent.coding_context: on`, because otherwise Hermes gives
+non-interactive platforms no coding posture.
+
+The cost is one extra round of the turn whenever the check fires. Measured
+costs and gains are in the 2026-10-30 sections of
+`benchmarks/live-model-tools/v1/README.md`: the always-on check, and the
+trigger that limits it to edits with a copy or a reference elsewhere.
+`agent.max_verify_nudges: 0` turns this off together with every other
+`pre_verify` nudge.
 
 The same hook carries one further directive: when the session's own OMH plan
 still has open work, or a finished dispatch is unacknowledged, the message also
@@ -125,3 +307,21 @@ same Hermes tasks with and without OMH, blind the outputs, and score correctness
 completeness, evidence use, artifact quality, recovery behavior, and wasted
 tool/context cost. Until that evaluator exists, OMH can prove routing and local
 contracts, but it should not claim overall superiority.
+
+Two scenario suites (operator/maintainer) hold the baseline for the skill text
+that later changes will edit, each with a tuning split and a held-out split
+that is never used for tuning:
+
+- [`benchmarks/automation-intent/v1`](../benchmarks/automation-intent/v1/README.md):
+  does a plain-language request become the right prepared automation
+  (schedule, target, delivery, filters), or correctly a clarifying question,
+  no automation, or an edit of the existing job.
+- [`benchmarks/orchestration/v1`](../benchmarks/orchestration/v1/README.md):
+  does the parent hand coding to the owner the person named, in the right
+  repository, citing only links the evidence returned, within a word budget.
+
+Both grade structurally (no model judge) and report `omh_reported_rate/v1`
+with a Wilson 95% interval and infrastructure failures excluded by name. Their
+live arms run only through `omh coding hermes-child dispatch
+--confirm-dispatch`, behind explicit paid-live flags. Neither has been run
+live: both are `prepared_not_observed`, with no headline number.

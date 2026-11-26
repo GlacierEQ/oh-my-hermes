@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import json
 import os
+import sys
 from pathlib import Path
 
 from .advisory import AdvisoryReport, run_config_advisories
 from .structural_search import inspect_structural_search
 from ..command_path import inspect_omh_command_path
 from ..config_adapter import (
+    anchored_external_dir,
     external_dir_registered,
     external_dirs,
     memory_provider_selection,
@@ -22,10 +24,12 @@ from ..config_adapter import (
     plugin_is_enabled,
     plugin_load_timeout_setting,
     plugins_enabled_extension_error,
+    config_stream_error,
     read_config,
 )
 from ..hashutil import sha256_file, sha256_text
 from ..local_store import can_write_dir, read_json_object
+from ..install import agent_skills_projection
 from ..install.guidance_projection import build_guidance_projection_status, catalog_revision
 from ..install.hook_integrity import HOOK_HOST_TARGET, VALID_HOOK_EVENTS, build_hook_integrity_status
 from ..install.curator_ledger import LedgerWrite, read_ledger_writes
@@ -41,6 +45,8 @@ from ..install.installer import (
     profile_skill_names,
 )
 from ..install.plugin_bundle_import_scan import describe_findings, scan_bundle_core_imports
+from ..install.self_update_base_python import pinned_base_finding
+from ..install.support_materialization import legacy_support_paths
 from ..install.plugin_load_deadline import (
     ABANDONED_LOADER_CAP,
     LOAD_TIMEOUT_RECORDED,
@@ -57,15 +63,25 @@ from ..install.skill_registration import (
     registration_home_label,
 )
 from ..manifest import local_modifications, read_manifest
+from ..core.errors import OmhError
 from ..paths import (
     OmhPaths,
     managed_command_generations_dir,
     managed_command_self_update_state_path,
+    managed_command_venv_dir,
     managed_current_workflow_pack_dir,
 )
 from ..plugin_bundle.omh import runtime_paths
+from ..plugin_bundle.omh.installed_skills import (
+    TIER_CREATE_DIR,
+    TIER_EXTERNAL,
+    TIER_LOCAL,
+    installed_skill_labels,
+    skill_label_copies,
+)
 from ..plugin_bundle.omh.installed_skills import installed_skill_names as hint_installed_skill_names
 from ..plugin_bundle.omh.installed_skills import skill_not_installed
+from ..plugin_bundle.omh.skill_ownership import configured_create_dir
 from ..plugin_bundle.omh.memory_dreaming import read_dreaming_state, read_latest_consolidation
 from ..workflows.memory import (
     _OPEN_MAX_DAYS,
@@ -176,8 +192,47 @@ class Check:
             object.__setattr__(self, "next_action", _default_next_action(self.name))
 
 
-def run_doctor(paths: OmhPaths) -> list[Check]:
+def _writable_without_probe(path: Path) -> bool:
+    """Whether the OS reports `path` (or the ancestor that would hold it) writable, without writing.
+
+    The `--no-state-write` stand-in for `can_write_dir`: no directory is
+    created and no probe file is written, so the answer is the permission
+    bits' claim, not an observed write.
+    """
+    candidate = path
+    while not candidate.exists() and candidate.parent != candidate:
+        candidate = candidate.parent
+    return candidate.is_dir() and os.access(candidate, os.W_OK)
+
+
+def _dir_write_access(path: Path, *, state_write: bool) -> tuple[bool, str]:
+    """The writability verdict for one OMH directory and the words that say how it was reached."""
+    if state_write:
+        return can_write_dir(path, probe_name=".doctor-write-test"), "writable"
+    writable = _writable_without_probe(path)
+    return writable, (
+        "write access not probed (--no-state-write); "
+        + ("permissions allow writing" if writable else "permissions do not allow writing")
+    )
+
+
+def run_doctor(paths: OmhPaths, *, state_write: bool = True) -> list[Check]:
+    """Every doctor check, in report order.
+
+    ``state_write=False`` replaces the two `.doctor-write-test` probe writes
+    with a permission check that writes nothing under the OMH home; those two
+    checks then report ``observed=False``.
+    """
     checks: list[Check] = []
+    # Read the pack where the installer reads it. On a host migrated from the
+    # pre-pointer layout, the running bootstrap generation's `skills` is a
+    # directory link to `<omh_home>/skills`, and the support reader refuses
+    # every link component, so reading through the alias aborted the whole
+    # report on exactly those hosts (#2378). A link the translation refuses
+    # is reported here rather than raised.
+    paths, skills_dir_link = _support_readable_paths(paths)
+    if skills_dir_link is not None:
+        checks.append(skills_dir_link)
     command_path = inspect_omh_command_path()
     checks.append(
         Check(
@@ -215,37 +270,48 @@ def run_doctor(paths: OmhPaths) -> list[Check]:
         hermes_edited_paths = {str(item["path"]) for item in hermes_edits}
         missing = _missing_skills_on_next_install(paths, manifest)
         missing_paths = {str(item["path"]) for item in missing}
-        modified = [
-            rel
-            for rel in local_modifications(manifest, paths.skills_dir)
-            if rel not in hermes_edited_paths and rel not in missing_paths
-        ]
-        checks.append(
-            Check(
-                "local_modifications",
-                not modified,
-                "managed files match manifest" if not modified else f"changed managed files: {', '.join(modified)}",
+        try:
+            modified = [
+                rel
+                for rel in local_modifications(manifest, paths.skills_dir)
+                if rel not in hermes_edited_paths and rel not in missing_paths
+            ]
+        except OmhError as exc:
+            # A support path the reader refuses (a link inside the pack, or a
+            # bootstrap link it would not translate) is a finding about this
+            # pack, not a reason to withhold every other check.
+            checks.append(Check("local_modifications", False, f"managed files not compared: {exc}"))
+        else:
+            checks.append(
+                Check(
+                    "local_modifications",
+                    not modified,
+                    "managed files match manifest" if not modified else f"changed managed files: {', '.join(modified)}",
+                )
             )
-        )
         checks.append(_skill_freshness_check(paths, manifest, exclude=hermes_edited_paths))
         if missing:
             checks.append(_missing_managed_skills_check(manifest, missing))
     checks.append(_hermes_skill_edits_check(hermes_edits, ledger_writes, ledger_unread))
     checks.append(Check("skills_dir", paths.skills_dir.exists(), f"{paths.skills_dir}"))
     checks.append(_route_hint_skills_check(paths))
-    runtime_writable = can_write_dir(paths.runtime_dir, probe_name=".doctor-write-test")
-    checks.append(Check("runtime_artifacts", runtime_writable, f"{paths.runtime_dir} writable"))
-    workflow_state_writable = can_write_dir(paths.workflow_state_dir, probe_name=".doctor-write-test")
+    checks.extend(_hermes_skill_visibility_checks(paths))
+    runtime_writable, runtime_access = _dir_write_access(paths.runtime_dir, state_write=state_write)
+    checks.append(
+        Check("runtime_artifacts", runtime_writable, f"{paths.runtime_dir} {runtime_access}", observed=state_write)
+    )
+    workflow_state_writable, workflow_access = _dir_write_access(paths.workflow_state_dir, state_write=state_write)
     states, state_errors = list_workflow_states(paths)
     checks.append(
         Check(
             "workflow_state",
             workflow_state_writable and not state_errors,
             (
-                f"{paths.workflow_state_dir} writable; {len(states)} workflow state file(s) readable"
+                f"{paths.workflow_state_dir} {workflow_access}; {len(states)} workflow state file(s) readable"
                 if workflow_state_writable and not state_errors
                 else f"{paths.workflow_state_dir} has unreadable state: {state_errors}"
             ),
+            observed=state_write,
         )
     )
     if state_error:
@@ -267,7 +333,7 @@ def run_doctor(paths: OmhPaths) -> list[Check]:
     checks.append(Check("hermes_config", hermes_config_present, f"{paths.hermes_config_path}"))
     # By text or by real path: the installer registers the `current` pointer,
     # the running command knows its generation, and both name this directory.
-    external_registered = external_dir_registered(dirs, paths.skills_dir)
+    external_registered = external_dir_registered(dirs, paths.skills_dir, hermes_home=paths.hermes_home)
     checks.append(Check("external_dir", external_registered, f"{paths.skills_dir} in skills.external_dirs"))
     # Both named with the `external_dir` prefix so the summary groups them
     # under Hermes registration beside the check above.
@@ -490,12 +556,21 @@ def run_doctor(paths: OmhPaths) -> list[Check]:
     checks.extend(_toolcall_rule_checks(paths))
     checks.extend(_plugin_hook_error_checks(paths))
     checks.append(_retired_skill_install_check(paths))
+    checks.append(_staged_update_recovery_check())
+    checks.append(_generation_base_python_check())
     checks.append(_flat_skill_layout_check(paths))
+    checks.append(_agent_skills_pack_check())
     checks.append(_plugin_ulw_lifecycle_check(paths))
     checks.append(_omh_tui_check(paths))
+    checks.append(_tui_own_runtime_check(paths))
+    checks.append(_auto_resume_check(paths))
+    checks.extend(_hermes_gateway_checks(paths))
+    checks.append(_gateway_health_check(paths))
     checks.append(_delegation_protocol_platform_check(paths))
+    checks.append(_delegate_route_fallback_chain_check(paths))
     checks.append(_hermes_model_routing_check(paths))
     checks.append(_provider_entitlements_check(paths))
+    checks.append(_prompt_cache_route_check(paths))
     checks.append(_jev_sidekick_check(paths))
     profile_installs = state.get("last_team_profile_install") if isinstance(state, dict) else None
     if not profile_installs:
@@ -647,11 +722,6 @@ def _omh_tui_check(paths: OmhPaths) -> Check:
     from ..tui.launch import FRONTEND_ENTRY, node_available
 
     fallback = "bare `omh` opens Hermes' own terminal until then"
-    if os.name == "nt":
-        return Check(
-            "omh_tui_support", True,
-            "Windows: the OMH TUI needs termios, so bare `omh` opens Hermes' own terminal",
-        )
     if not FRONTEND_ENTRY.is_file():
         return Check(
             "omh_tui_support", True, f"the OMH TUI shim is missing ({FRONTEND_ENTRY})",
@@ -683,6 +753,185 @@ def _omh_tui_check(paths: OmhPaths) -> Check:
         "omh_tui_support", True,
         "bare `omh` can open the OMH TUI: shim installed, Hermes launcher hook and gateway present, Node found"
         + versions,
+    )
+
+
+def _auto_resume_check(paths: OmhPaths) -> Check:
+    """Whether a bare `omh` reopens a dropped OMH session (`omh auto-resume`), and which shell rc holds the hook.
+
+    Read-only and informational: the stored mode, `OMH_AUTO_RESUME=0` in this environment, and whether each
+    supported shell's rc carries the marked block (`tui/shell_hook.hook_state`). Never a failure.
+    """
+    from ..maintenance.auto_resume_state import environment_off, read_auto_resume_mode
+    from ..tui.shell_hook import SHELLS, hook_state
+
+    mode = read_auto_resume_mode(paths.omh_home)
+    off_here = environment_off(os.environ)
+    hooks = [hook_state(shell, os.environ) for shell in SHELLS]
+    installed = [f"{state['shell']} ({state['rc']})" for state in hooks if state["installed"]]
+    effective = "off in this environment (OMH_AUTO_RESUME=0)" if mode == "on" and off_here else mode
+    hook_text = f"shell hook in {', '.join(installed)}" if installed else "no shell hook installed"
+    return Check(
+        "omh_auto_resume", True, f"auto-resume is {effective}; {hook_text}",
+        detail={"mode": mode, "environment_off": off_here, "shell_hooks": hooks},
+    )
+
+
+def _tui_own_runtime_check(paths: OmhPaths) -> Check:
+    """Where bare `omh` opens its sessions, and the state of the TUI's own runtime home when it has one.
+
+    Read-only (`tui_home_status`): the saved choice, the home's build marker,
+    its skill links, its `.env`, and the record of its gateway. On the shared
+    gateway the row says so and names the alternative. On the own runtime it
+    warns when the home is not built yet (the next `omh` builds it), was built
+    from another root than this doctor's Hermes home, has links to skills that
+    went, carries a messaging credential (a scrub that should never miss), or
+    runs a gateway with a messaging adapter connected, or was built from a root
+    config that connects a platform (never expected: the TUI runtime must not
+    poll a bot's token beside the bots' gateway). The home findings are
+    warnings, cleared by `omh update` or the next launch; a credential or an
+    adapter on the TUI runtime fails the row.
+    """
+    from ..skin_pack import RUNTIME_OWN, read_runtime_choice
+    from ..tui.own_runtime import tui_home_status
+
+    name = "omh_tui_runtime"
+    try:
+        status = tui_home_status(Path(paths.hermes_home), read_runtime_choice(paths.omh_home))
+    except OSError as error:
+        return Check(name, True, f"the TUI's own runtime home could not be read: {error}", observed=False)
+    if status.runtime != RUNTIME_OWN:
+        kept = f"; the TUI home at {status.home} is kept" if status.exists else ""
+        return Check(
+            name, True,
+            f"bare `omh` opens its sessions on the shared Hermes gateway (`omh theme runtime shared`){kept}",
+            detail={"runtime": status.runtime, "tui_home": str(status.home), "exists": status.exists},
+        )
+    detail: dict[str, object] = {
+        "runtime": status.runtime, "tui_home": str(status.home), "built_from": status.built_from,
+        "served": list(status.served), "skills": status.skill_count, "clashes": status.clash_count,
+        "broken_links": list(status.broken_links), "messaging_names": list(status.messaging_names),
+        "config_platform_credentials": list(status.config_platform_credentials),
+        "gateway_pid": status.gateway_pid, "platforms": list(status.platforms),
+    }
+    if not status.built:
+        return Check(
+            name, True, f"the TUI's own runtime home at {status.home} is not built yet", severity="warning",
+            next_action="run `omh` (bare) once, or `omh update`; either builds it from the root Hermes home",
+            detail=detail,
+        )
+    problems: list[str] = []
+    actions: list[str] = []
+    if Path(status.built_from).resolve() != Path(paths.hermes_home).resolve():
+        problems.append(f"built from {status.built_from}, not {paths.hermes_home}")
+        actions.append("run `omh update` to rebuild it from this Hermes home")
+    if status.broken_links:
+        problems.append(f"{len(status.broken_links)} skill link(s) point at skills that went ({', '.join(status.broken_links[:3])})")
+        actions.append("run `omh update` or `omh` to drop them")
+    credentials: list[str] = []
+    if status.messaging_names:
+        credentials.append(f"its .env carries messaging credentials ({', '.join(status.messaging_names[:3])})")
+        actions.append("run `omh update` to rebuild .env without them")
+    if status.config_platform_credentials:
+        credentials.append(f"the root config.yaml connects a platform ({', '.join(status.config_platform_credentials[:3])}), "
+                           "so bare `omh` opens on the shared gateway")
+        actions.append("move that platform's credentials out of the root config.yaml (a profile's config, or .env)")
+    if status.platforms:
+        credentials.append(f"its gateway reports messaging adapters connected ({', '.join(status.platforms)})")
+        actions.append("remove those credentials from the root .env or config, then `omh update`")
+    gateway = f"gateway running (pid {status.gateway_pid})" if status.gateway_live else "gateway not running (the next `omh` starts it)"
+    if credentials:
+        return Check(
+            name, False, f"the TUI's own runtime home at {status.home}: " + "; ".join([*credentials, *problems]) + f"; {gateway}",
+            next_action="; ".join(dict.fromkeys(actions)), detail=detail,
+        )
+    if problems:
+        return Check(
+            name, True, f"the TUI's own runtime home at {status.home}: " + "; ".join(problems) + f"; {gateway}",
+            severity="warning", next_action="; ".join(dict.fromkeys(actions)), detail=detail,
+        )
+    profiles = f" ({', '.join(status.served)} joined)" if status.served else ""
+    return Check(
+        name, True,
+        f"bare `omh` opens its sessions on the TUI's own Hermes runtime at {status.home}: built from "
+        f"{status.built_from}, {status.skill_count} skills{profiles}, no messaging credential; {gateway}",
+        detail=detail,
+    )
+
+
+def _hermes_gateway_checks(paths: OmhPaths) -> list[Check]:
+    """Does a running Hermes gateway need a restart, by its own files? One row for the primary home, one more per
+    profile only when that profile's gateway has something to say.
+
+    Read-only: `gateway.pid`, `gateway_state.json`, `gateway-starts.log`,
+    bounded tails of `logs/gateway.log` and `logs/gateway.error.log`, and the
+    bundle manifest, never the process. Every finding is Hermes' to clear, so
+    the row stays ok and only warns, with what the person can do as its next
+    action (`gateway_notices`): a session store failure Hermes logged since the
+    last start, a gateway whose last start precedes the OMH plugin bundle it
+    would load now, and a draining gateway, which starts no new turns until
+    it is done.
+    """
+    from .hermes_gateway import GATEWAY_PID_FILENAME, gateway_notice_homes, gateway_notices
+
+    checks: list[Check] = []
+    for index, (home, label, command) in enumerate(gateway_notice_homes(paths.hermes_home)):
+        name = "hermes_gateway" if index == 0 else f"hermes_gateway:{home.name}"
+        notices = gateway_notices(home, label=label, restart_command=command)
+        if notices:
+            actions = list(dict.fromkeys(notice.next_action for notice in notices))
+            commands = [notice.restart_command for notice in notices if notice.restart_command]
+            checks.append(Check(
+                name, True, " ".join(notice.text for notice in notices), severity="warning",
+                next_action="; ".join(actions),
+                detail={"findings": [notice.kind for notice in notices], "restart_command": commands[0] if commands else ""},
+            ))
+        elif index == 0:
+            running = (home / GATEWAY_PID_FILENAME).is_file()
+            checks.append(Check(
+                name, True,
+                f"{label} in {home}: no restart needed by its own records"
+                if running else f"no running Hermes gateway recorded in {home}",
+                observed=running,
+            ))
+    return checks
+
+
+def _gateway_health_check(paths: OmhPaths) -> Check:
+    """This machine's Hermes gateways: fleet against the installed build, fleet shape, messaging adapter states.
+
+    Read-only (`maintenance.gateway_health`): Hermes' gateway records, build
+    stamp, update receipt and pending-restart record, the tails of its gateway
+    logs, and the process table read from the kernel (no process is spawned:
+    `system.process_listing`). Every finding is
+    Hermes' to clear, so the row stays ok and only warns; its next action names
+    Hermes' own command. `detail` carries the whole report, `lines` included,
+    which the human summary prints as its own section. None of these files is
+    one `--no-personal-files` names (SOUL.md and Hermes' memory files): the
+    gateway log is read as the `hermes_gateway` row already reads it, and only
+    the lines that match an adapter state shape are kept, never a message.
+    """
+    from .gateway_health import gateway_health
+
+    try:
+        report = gateway_health(Path(paths.hermes_home))
+    except Exception as error:  # noqa: BLE001 -- classified below: an unread section, never the whole report
+        # Hermes' files and the kernel's process table are outside OMH's control; a shape no reader expected must
+        # cost this row, not every other row of `omh doctor`.
+        return Check(
+            "gateway_health", True, f"gateway health could not be read: {type(error).__name__}",
+            severity="warning", observed=False,
+            next_action="run `omh doctor --json` and report the `gateway_health` row; the other rows are unaffected",
+        )
+    observed = bool(report.gateways) or report.build.get("status") == "read"
+    message = " ".join(report.lines[:3]) if not report.findings else (
+        "Hermes gateways need attention: " + ", ".join(report.findings)
+    )
+    return Check(
+        "gateway_health", True, message,
+        severity="warning" if report.findings else "ok",
+        next_action="; ".join(report.next_actions) if report.findings else "",
+        observed=observed, detail=report.to_dict(),
     )
 
 
@@ -736,6 +985,112 @@ def _delegation_protocol_platform_check(paths: OmhPaths) -> Check:
     )
 
 
+def _delegate_route_fallback_chain_check(paths: OmhPaths) -> Check:
+    """Will `omh_delegate_route` write the chain into `delegation.fallback_providers`, and if not, why (#3124)?
+
+    Opt-in (`write_fallback_providers` in `routing/delegate-route.json`) and
+    host-gated: the Hermes this home runs from must honour a fallback entry's
+    `reasoning_effort` (hermes-agent PR #144787), read off its source as
+    `delegation_fallback_chain.host_support` does. A capability file newer
+    than the gateway's pid file is `restart_pending`: the running gateway
+    predates it. A TUI has no such marker, so its start is not checked here;
+    the plugin checks its own process when it routes. A person's own
+    `delegation.fallback_providers` keeps the chain out too, and is named.
+    Never fails: an option that cannot apply leaves routing exactly as it was.
+    """
+    from ..plugin_bundle.omh.delegation_fallback_chain import (
+        delegate_route_options_path,
+        host_support,
+        host_support_note,
+        load_fallback_chain_option,
+    )
+    from ..plugin_bundle.omh.delegation_route_restore import omh_written_chains, load_route_restore_record
+    from ..plugin_bundle.omh.delegation_routing import (
+        CHAIN_FOREIGN,
+        CHAIN_OMH_SHAPE,
+        CHAIN_UNSUPPORTED,
+        FALLBACK_CHAIN_KEY,
+        delegation_config_path,
+        fallback_chain_is_empty_list,
+        read_delegation_route,
+        read_fallback_chain_state,
+    )
+
+    options = delegate_route_options_path(paths.omh_home)
+    enabled, status = load_fallback_chain_option(paths.omh_home)
+    scalars = "omh_delegate_route writes only delegation.model, reasoning_effort and provider"
+    if status.startswith("invalid:"):
+        return Check(
+            "plugin_delegate_route_fallback_chain", True,
+            f"{options} is ignored ({status}), so the in-child fallback chain is off; {scalars}",
+            severity="warning",
+            next_action=f'write {{"schema_version": "delegate_route_options/v1", "write_fallback_providers": true}} to {options}',
+        )
+    if not enabled:
+        return Check(
+            "plugin_delegate_route_fallback_chain", True,
+            f"in-child fallback chain is off (opt-in: write_fallback_providers in {options}); {scalars}",
+            observed=False,
+        )
+    pid_file = paths.hermes_home / "gateway.pid"
+    try:
+        gateway_started = pid_file.stat().st_mtime if pid_file.is_file() else None
+    except OSError:
+        gateway_started = None
+    support = host_support(resolve_hermes_code_root(paths.hermes_home), started_at=gateway_started)
+    if not support["supported"]:
+        restart = support["reason"] == "restart_pending"
+        return Check(
+            "plugin_delegate_route_fallback_chain", True,
+            f"write_fallback_providers is on, but {host_support_note(support)}; so {scalars}",
+            severity="warning",
+            next_action=(
+                "restart the Hermes gateway (and any open TUI) so it runs the updated code"
+                if restart
+                else "update Hermes (`hermes update`) to a release with hermes-agent PR #144787, then restart it"
+            ),
+            observed=support["reason"] != "hermes_source_not_found",
+        )
+    state = read_fallback_chain_state(paths.hermes_home)
+    if state == CHAIN_UNSUPPORTED:
+        return Check(
+            "plugin_delegate_route_fallback_chain", True,
+            "write_fallback_providers is on, but config.yaml has more than one `delegation:` section and a list "
+            f"cannot be written into both; so {scalars}",
+            severity="warning",
+            next_action="merge the `delegation:` sections of config.yaml into one",
+        )
+    chain = read_delegation_route(paths.hermes_home, with_chain=True).get(FALLBACK_CHAIN_KEY, "")
+    record = load_route_restore_record(paths.omh_home)
+    if record and record["config_path"] != str(delegation_config_path(paths.hermes_home)):
+        record = {}  # another profile's record says nothing about this file
+    owned = state == CHAIN_OMH_SHAPE and chain not in omh_written_chains(record, paths.omh_home)
+    if state == CHAIN_FOREIGN or owned:
+        disabled = fallback_chain_is_empty_list(paths.hermes_home)
+        held = (
+            "`[]`, which turns in-child fallback off for delegated children"
+            if disabled
+            else "your own value"
+        )
+        return Check(
+            "plugin_delegate_route_fallback_chain", True,
+            f"write_fallback_providers is on, but delegation.fallback_providers in config.yaml holds {held}, "
+            f"which OMH never overwrites; so {scalars}",
+            severity="warning",
+            next_action=(
+                "unset it (`hermes config unset delegation.fallback_providers`) to opt in: OMH then writes the "
+                "chain for a routed lane and takes it back out after"
+                if disabled
+                else "remove it (`hermes config unset delegation.fallback_providers`) to let OMH write the chain"
+            ),
+        )
+    return Check(
+        "plugin_delegate_route_fallback_chain", True,
+        "omh_delegate_route also writes the chain positions after the head into delegation.fallback_providers, "
+        f"each at its own reasoning_effort; {host_support_note(support)}",
+    )
+
+
 def _hermes_model_routing_check(paths: OmhPaths) -> Check:
     """Does Hermes' config name the provider that serves `model.default`?
 
@@ -778,6 +1133,42 @@ def _hermes_model_routing_check(paths: OmhPaths) -> Check:
         "; ".join(disagreements),
         severity="warning",
         next_action=model_routing_next_action(preflight),
+    )
+
+
+def _prompt_cache_route_check(paths: OmhPaths) -> Check:
+    """Does `prompt_caching.cache_ttl` match what the main route keeps, and why did warming stop?
+
+    Reads `config.yaml` and a bounded tail of `logs/agent.log` only; no Hermes
+    import, no network, no model request. ok stays True like
+    `hermes_model_routing`: a cache TTL the user owns is not an OMH install
+    failure. A mismatch or a disabled cache is a warning whose next action is
+    the exact `hermes config set` fix; the full report rides in `detail`.
+    """
+    from .prompt_cache_route import prompt_cache_route_report
+
+    report = prompt_cache_route_report(paths.hermes_home)
+    findings = list(report.get("findings") or [])
+    fixes = list(report.get("fixes") or [])
+    if not report.get("config_read"):
+        return Check(
+            "prompt_cache_route",
+            True,
+            f"Hermes config not readable at {report['config_path']}; prompt-cache TTL not checked",
+            observed=False,
+            detail=report,
+        )
+    if not findings:
+        lines = report.get("lines")
+        summary = str(lines[0]) if isinstance(lines, list) and lines else "main route"
+        return Check("prompt_cache_route", True, f"{summary}; cache TTL matches what the route keeps", detail=report)
+    return Check(
+        "prompt_cache_route",
+        True,
+        "; ".join(findings),
+        severity="warning",
+        next_action="Run: " + " && ".join(f"`{fix}`" for fix in fixes),
+        detail=report,
     )
 
 
@@ -1150,13 +1541,20 @@ def _external_dir_ambiguity_checks(paths: OmhPaths, config_text: str) -> list[Ch
     a profile the primary home does not share.
     """
     current = managed_current_workflow_pack_dir()
-    entries = registered_managed_entries(config_text, managed_skill_dir_candidates(paths, current=current))
+    entries = registered_managed_entries(
+        config_text,
+        managed_skill_dir_candidates(paths, current=current),
+        hermes_home=paths.hermes_home,
+        current=current,
+    )
     checks = [_ambiguity_check("external_dir_ambiguity", registration_home_label(paths.hermes_config_path), entries)]
     for name, profile_dir in hermes_profile_dirs(paths.hermes_home):
         profile_paths = _profile_paths(paths, profile_dir)
         profile_entries = registered_managed_entries(
             read_config(profile_paths.hermes_config_path),
             managed_skill_dir_candidates(profile_paths, current=current),
+            hermes_home=profile_paths.hermes_home,
+            current=current,
         )
         if len(profile_entries) > 1:
             checks.append(
@@ -1207,11 +1605,12 @@ def _external_dir_unregistered_copy_check(paths: OmhPaths, config_text: str) -> 
     if not copy.is_dir():
         return Check("external_dir_unregistered_copy", True, f"no pre-pointer skills copy at {copy}")
     registered_by: list[str] = []
-    if external_dir_registered(external_dirs(config_text), copy):
+    if external_dir_registered(external_dirs(config_text), copy, hermes_home=paths.hermes_home):
         registered_by.append(registration_home_label(paths.hermes_config_path))
     for name, profile_dir in hermes_profile_dirs(paths.hermes_home):
         profile_paths = _profile_paths(paths, profile_dir)
-        if external_dir_registered(external_dirs(read_config(profile_paths.hermes_config_path)), copy):
+        profile_dirs = external_dirs(read_config(profile_paths.hermes_config_path))
+        if external_dir_registered(profile_dirs, copy, hermes_home=profile_paths.hermes_home):
             registered_by.append(registration_home_label(profile_paths.hermes_config_path, profile=name))
     if registered_by:
         return Check(
@@ -1296,6 +1695,121 @@ def _retained_generations_backed_by(copy: Path) -> list[str]:
     return backed
 
 
+def _staged_update_recovery_check() -> Check:
+    """An open staged-update marker is a finding, because it blocks every update.
+
+    While `activation_in_progress` is set, the next `omh update` first finishes
+    or undoes that activation; with `restore_required` it only retries the
+    restore and stages nothing new. On 2026-11-04 that marker stayed open
+    across every run while the output read like an ordinary stop, so updates
+    looked like they ran and nothing arrived.
+    """
+    state_path = managed_command_self_update_state_path()
+    if state_path is None or not state_path.is_file() or not _runs_from(state_path.parent):
+        # A checkout or another install has its own update path; the marker
+        # blocks only the installer-managed command, so only it reports one.
+        return Check("staged_update_recovery", True, "no staged-update state for this command", observed=False)
+    try:
+        state = read_json_object(state_path)
+    except (OSError, ValueError) as exc:
+        return Check(
+            "staged_update_recovery",
+            False,
+            f"cannot read {state_path}: {exc}",
+            severity="warning",
+            next_action="run `omh update --recover-known-good`",
+        )
+    marker = state.get("activation_in_progress")
+    if not isinstance(marker, dict):
+        return Check("staged_update_recovery", True, "no staged update is pending")
+    previous = Path(str(marker.get("previous") or "")).name
+    candidate = Path(str(marker.get("candidate") or "")).name
+    if marker.get("restore_required") is True:
+        return Check(
+            "staged_update_recovery",
+            False,
+            f"an earlier `omh update` could not restore generation {previous} after generation {candidate} failed; "
+            "every `omh update` retries that restore first and installs nothing new until it succeeds",
+            severity="warning",
+            remediation="the restore runs the same update over every Hermes home; the failure it prints (for example a bot profile whose plugins/omh points at a deleted path) is what blocks it",
+            next_action="resolve the failure the last `omh update` printed, then run `omh update`; it finishes the restore before staging",
+        )
+    return Check(
+        "staged_update_recovery",
+        False,
+        f"an `omh update` was interrupted while activating generation {candidate}",
+        severity="warning",
+        next_action="run `omh update`; it completes or rolls back that activation first",
+    )
+
+
+def _generation_base_python_check() -> Check:
+    """The active generation's venv must not hang on a base interpreter one patch upgrade removes (#2683).
+
+    Before the fix `omh update` created each generation's venv from inside a
+    venv, which bound it to the resolved, version-pinned base (a Homebrew
+    `Cellar/<version>` keg); after `brew upgrade` and cleanup the launcher
+    failed with `bad interpreter`. Read from files only.
+    """
+    state_path = managed_command_self_update_state_path()
+    if state_path is None or not state_path.is_file() or not _runs_from(state_path.parent):
+        return Check("generation_base_python", True, "no staged-update state for this command", observed=False)
+    try:
+        state = read_json_object(state_path)
+    except (OSError, ValueError):
+        # `staged_update_recovery` reports the unreadable file.
+        return Check("generation_base_python", True, "staged-update state unreadable; see staged_update_recovery", observed=False)
+    if not isinstance(state, dict):
+        return Check("generation_base_python", True, "no staged-update state for this command", observed=False)
+    active = state.get("active")
+    active_path = str(active.get("path") or "") if isinstance(active, dict) else ""
+    if not active_path:
+        return Check("generation_base_python", True, "no active generation recorded", observed=False)
+    is_windows = os.name == "nt"
+    bootstrap = managed_command_venv_dir()
+    anchors = (str(bootstrap / ("Scripts" if is_windows else "bin") / ("python.exe" if is_windows else "python")),) if bootstrap is not None else ()
+    version = f"{sys.version_info.major}.{sys.version_info.minor}"
+    finding = pinned_base_finding(
+        Path(active_path) / "venv",
+        version=(sys.version_info.major, sys.version_info.minor),
+        abiflags=getattr(sys, "abiflags", ""),
+        is_windows=is_windows,
+        anchors=anchors,
+    )
+    if finding is None:
+        return Check("generation_base_python", True, "the active generation's base interpreter survives patch upgrades")
+    repair = finding.get("repair", "")
+    if finding["state"] == "gone":
+        message = f"the active generation's base interpreter {finding['home']} no longer exists, so `omh` from that generation cannot start"
+    else:
+        message = (
+            f"the active generation's base interpreter {finding['home']} is a version-pinned path; "
+            f"the next patch upgrade that removes it breaks `omh` with `bad interpreter`. {finding['stable']} names the same interpreter and survives"
+        )
+    return Check(
+        "generation_base_python",
+        False,
+        message,
+        severity="warning",
+        remediation="repair the venv in place from the stable interpreter; the next `omh update` stages from it on its own",
+        next_action=(
+            f"run `{repair}`; the interpreter it names must run Python {version}"
+            if repair
+            else f"re-run the OMH installer with a Python {version} interpreter"
+        ),
+        detail=dict(finding),
+    )
+
+
+def _runs_from(root: Path) -> bool:
+    """Whether the running interpreter's environment lives under `root`."""
+    try:
+        Path(sys.prefix).resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _retired_skill_install_check(paths: OmhPaths) -> Check:
     """A retired skill still installed under skills_dir is a finding.
 
@@ -1365,6 +1879,67 @@ def _flat_skill_layout_check(paths: OmhPaths) -> Check:
             "Hermes banner"
         ),
         next_action="run `omh update` to move them under their category directory",
+    )
+
+
+def _agent_skills_pack_check() -> Check:
+    """The user-scope OMH Agent Skills pack Codex and other `.agents` hosts load.
+
+    Read-only: it looks at `~/.agents/skills` only, writes nothing, and never
+    fails doctor. No receipt there means the optional pack is not installed,
+    which is not a finding. A receipt is checked in its own shape -- a
+    portable single-target install, or the target+mirror pair it lists -- so
+    a pack `omh update` would refresh is reported stale here first.
+    """
+    name = "agent_skills_pack"
+    target = agent_skills_projection.agent_skills_user_home() / ".agents/skills"
+    try:
+        # Inside the try: on Python < 3.14 `is_file()` raises PermissionError
+        # for an unsearchable directory instead of returning False.
+        if not (target / agent_skills_projection.MANIFEST_NAME).is_file():
+            return Check(name, True, f"OMH Agent Skills pack for Codex/.agents hosts is not installed at {target}", severity="ok")
+        manifest = agent_skills_projection._read_manifest(target)
+        if manifest is None:
+            raise ValueError(f"Agent Skills manifest vanished: {target / agent_skills_projection.MANIFEST_NAME}")
+        target, mirror = agent_skills_projection.installed_receipt_roots(target, manifest)
+        if mirror is not None and agent_skills_projection._read_manifest(mirror) is None:
+            mirror = None
+        status = agent_skills_projection.agent_skills_status(target, mirror=mirror)
+        current = agent_skills_projection.agent_skills_manifest(agent_skills_projection.agent_skill_files())["files"]
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        return Check(
+            name,
+            True,
+            f"could not read the OMH Agent Skills pack at {target}: {exc}",
+            severity="warning",
+            next_action=f"Inspect {target / agent_skills_projection.MANIFEST_NAME}, then rerun `omh doctor`.",
+            observed=False,
+        )
+    roots = ", ".join(status["target_dirs"])
+    if status["locally_modified"]:
+        return Check(
+            name,
+            True,
+            f"{len(status['locally_modified'])} locally-modified file(s) in the OMH Agent Skills pack at {roots}",
+            severity="warning",
+            next_action=status["next_action"],
+        )
+    if status["projection"] != "fresh":
+        installed = manifest["files"]
+        differ = sum(1 for relative in installed.keys() | current.keys() if installed.get(relative) != current.get(relative))
+        detail = f": {differ} file(s) differ from the current catalog" if differ else ""
+        return Check(
+            name,
+            True,
+            f"OMH Agent Skills pack at {roots} is {status['projection']}{detail}",
+            severity="warning",
+            next_action="omh update",
+        )
+    return Check(
+        name,
+        True,
+        f"OMH Agent Skills pack at {roots} matches catalog {status['catalog_revision'][:12]}",
+        severity="ok",
     )
 
 
@@ -2282,17 +2857,23 @@ def _hermes_edit_line(item: dict) -> str:
     return f"{item['name']} at {item['path']}" + (f" ({detail})" if detail else "")
 
 
-def run_doctor_advisories(paths: OmhPaths) -> AdvisoryReport:
+def run_doctor_advisories(paths: OmhPaths, *, personal_files: bool = True) -> AdvisoryReport:
     """Read-only Hermes config advisory lane.
 
     Deliberately SEPARATE from ``run_doctor``: advisory entries are never
     appended to the ``list[Check]`` consumed by ``doctor_ok()`` or
     ``recommended_next_action()``, so they cannot change the doctor exit code.
+    ``personal_files=False`` reports the SOUL.md and Hermes memory inspectors
+    as ``skipped`` without opening those files.
     """
     return run_config_advisories(
         paths.hermes_home,
         omh_home=paths.omh_home,
         discovery_home=paths.hermes_home.parent,
+        personal_files=personal_files,
+        # The pack this command resolved, not one rebuilt from `omh_home`,
+        # which on a managed install is the pre-pointer copy or nothing (#2358).
+        skills_dir=paths.skills_dir,
     )
 
 
@@ -2706,6 +3287,21 @@ def _plugins_enabled_extension_check(paths: OmhPaths, config_text: str, config_p
             True,
             f"plugins.enabled in {config_path} is a list setup can extend",
         )
+    if config_stream_error(config_text):
+        # Not a `plugins.enabled` shape: the file is more than one YAML document (#3075).
+        return Check(
+            "hermes_config_plugins_enabled",
+            False,
+            f"{config_path}: {error}",
+            remediation=(
+                f"Keep one YAML document in {config_path}: remove the second `---` document, "
+                "the content after `...`, or the misplaced `%` directive."
+            ),
+            next_action=(
+                f"Keep one YAML document in {config_path}, then rerun `omh setup` and `omh doctor`, "
+                f"or run `hermes plugins enable {PLUGIN_NAME}`."
+            ),
+        )
     return Check(
         "hermes_config_plugins_enabled",
         False,
@@ -2875,6 +3471,197 @@ def _route_hint_skills_check(paths: OmhPaths) -> Check:
     )
 
 
+def _hermes_skill_visibility_checks(paths: OmhPaths) -> list[Check]:
+    """Can Hermes load each installed OMH skill by name, as each home's config resolves them?
+
+    `route_hint_skills` compares the manifest with the files on disk; this
+    compares it with what Hermes reads. A home is judged only when it
+    registers an OMH-managed skills directory (`registered_managed_entries`,
+    a dangling one included); one that never did is the registration
+    check's finding. Its directories are taken in Hermes' precedence: the
+    profile's own `skills`, then `skills.create_dir`, then each
+    `skills.external_dirs` entry anchored and resolved as Hermes resolves it
+    (a `current` pointer to the generation it names). Trusted project
+    directories depend on the session's working directory and are not read.
+    Every manifest label is counted the way Hermes picks
+    (`skill_label_copies`): a higher tier wins outright, and a symlinked
+    copy is one copy.
+
+    Two findings Hermes reaches by different roads are kept apart, because
+    they have different repairs. Ambiguous: two directories of one tier hold
+    the same skill, as a stale generation pack beside the pointer did on
+    27-28 Oct 2026, and Hermes refuses the name in both. Dangling: an OMH
+    entry resolves to a path that is gone, as the collected generation was
+    from 30 Oct, and Hermes lists nothing from it.
+
+    The primary home always has a row; each bot profile gets its own
+    `hermes_skill_visibility:<profile>` row when it has a finding, the way
+    `external_dir_ambiguity` walks them. Read-only, and it reads
+    `config.yaml`, not a running gateway: Hermes caches the resolved path
+    until `config.yaml` changes, so a gateway started before a repair can
+    still hold the old one, and the launch card is what says that. A
+    warning with `ok=True`, like `external_dir_ambiguity`: the hint stops
+    naming such skills on its own, so this must not flip the exit code.
+    """
+    name = "hermes_skill_visibility"
+    labels = installed_skill_labels(paths.omh_home)
+    if labels is None:
+        return [Check(name, True, "no install manifest records a skill; nothing to compare with Hermes", observed=False)]
+    current = managed_current_workflow_pack_dir()
+    checks = [
+        _hermes_home_skill_visibility(
+            name, paths, labels, current, registration_home_label(paths.hermes_config_path)
+        )
+    ]
+    for profile, profile_dir in hermes_profile_dirs(paths.hermes_home):
+        profile_paths = _profile_paths(paths, profile_dir)
+        check = _hermes_home_skill_visibility(
+            f"{name}:{profile}",
+            profile_paths,
+            labels,
+            current,
+            registration_home_label(profile_paths.hermes_config_path, profile=profile),
+        )
+        if check.severity == "warning":
+            checks.append(check)
+    return checks
+
+
+def _hermes_home_skill_visibility(
+    name: str, paths: OmhPaths, labels: frozenset[str], current: Path | None, home: str
+) -> Check:
+    try:
+        config_text = read_config(paths.hermes_config_path)
+    except (OSError, UnicodeDecodeError) as exc:
+        return Check(name, True, f"{home} was not read: {exc}", observed=False)
+    omh_entries = registered_managed_entries(
+        config_text,
+        managed_skill_dir_candidates(paths, current=current),
+        hermes_home=paths.hermes_home,
+        current=current,
+        present_only=False,
+    )
+    if not omh_entries:
+        return Check(
+            name, True, f"{home} registers no OMH skills directory; the registration check reports that", observed=False
+        )
+    local = paths.hermes_home / "skills"
+    roots: list[tuple[int, str]] = [(TIER_LOCAL, str(local))]
+    create_dir, _readable = configured_create_dir(paths.hermes_home)
+    if create_dir is not None and create_dir.is_dir():
+        roots.append((TIER_CREATE_DIR, str(create_dir)))
+    externals: list[str] = []
+    for entry in external_dirs(config_text):
+        real = os.path.realpath(anchored_external_dir(entry, paths.hermes_home))
+        if real != os.path.realpath(local) and real not in externals and os.path.isdir(real):
+            externals.append(real)
+    roots += [(TIER_EXTERNAL, real) for real in externals]
+    omh_reals = {entry: os.path.realpath(anchored_external_dir(entry, paths.hermes_home)) for entry in omh_entries}
+    dangling = [
+        entry if real == entry else f"{entry} -> {real}" for entry, real in omh_reals.items() if not os.path.isdir(real)
+    ]
+    copies = skill_label_copies(labels, roots)
+    ambiguous = sorted(label for label, held in copies.items() if len(held) > 1)
+    missing = sorted(label for label, held in copies.items() if not held)
+    if not ambiguous and not missing:
+        return Check(
+            name,
+            True,
+            f"Hermes can load all {len(labels)} installed OMH skill(s) by name as {home} resolves them. "
+            "This reads config.yaml only: a Hermes gateway started earlier may still hold an older path.",
+        )
+
+    def listed(names: list[str]) -> str:
+        return ", ".join(names[:5]) + (", ..." if len(names) > 5 else "")
+
+    parts: list[str] = []
+    actions: list[str] = []
+    if ambiguous:
+        colliding = sorted({root for label in ambiguous for root in copies[label]})
+        foreign = [root for root in colliding if root not in omh_reals.values()]
+        parts.append(
+            f"{len(ambiguous)} sit in two or more skills directories of one tier ({', '.join(colliding)}) and "
+            f"Hermes refuses a name two directories of one tier hold: {listed(ambiguous)}"
+        )
+        if foreign:
+            actions.append(
+                f"Rename or remove the copies of these skills in {', '.join(foreign)}, which OMH does not manage"
+            )
+        else:
+            pointer = external_dir_key(current) if current is not None else None
+            keep = next(
+                (
+                    entry
+                    for entry in omh_entries
+                    if external_dir_key(anchored_external_dir(entry, paths.hermes_home)) == pointer
+                ),
+                None,
+            )
+            actions.append(
+                f"Keep only {keep} of the OMH skills directories under skills.external_dirs in "
+                f"{paths.hermes_config_path} and remove {', '.join(entry for entry in omh_entries if entry != keep)}"
+                if keep is not None
+                else f"Keep one of the OMH skills directories under skills.external_dirs in {paths.hermes_config_path} "
+                f"({', '.join(omh_entries)}) and remove the others"
+            )
+    if missing:
+        where = (
+            f"skills.external_dirs names {len(dangling)} OMH path(s) that do not exist ({', '.join(dangling)})"
+            if dangling
+            else "no directory Hermes reads holds them"
+        )
+        parts.append(f"{len(missing)} are not found, because {where}: {listed(missing)}")
+        actions.append(
+            "Point the missing entry at an existing OMH skills directory"
+            if dangling
+            else f"Point the OMH entry under skills.external_dirs in {paths.hermes_config_path} at a directory "
+            "that holds the installed skills"
+        )
+    visible = len(labels) - len(ambiguous) - len(missing)
+    return Check(
+        name,
+        True,
+        f"Hermes can load {visible} of {len(labels)} installed OMH skill(s) by name as {home} resolves them; "
+        + "; ".join(parts),
+        severity="warning",
+        remediation="; ".join(actions) + ", then restart the Hermes gateway so it resolves the directories again.",
+        next_action=actions[0] + ", then restart the Hermes gateway.",
+        detail={
+            "ambiguous": ambiguous,
+            "not_found": missing,
+            "dangling_entries": dangling,
+            "omh_entries": omh_entries,
+            "directories": [root for _tier, root in roots],
+        },
+    )
+
+
+def _support_readable_paths(paths: OmhPaths) -> tuple[OmhPaths, Check | None]:
+    """`paths` with the bootstrap generation's link read as the legacy pack, as the installer reads it.
+
+    `legacy_support_paths` is the installer's own translation, so doctor and
+    `omh update` judge the same directory: it accepts only the migration's
+    direct link from `generations/bootstrap-legacy/skills` to this home's
+    pre-pointer pack and refuses any other link. Every path that is not that
+    link comes back unchanged. A refused link is returned as a blocking check
+    naming it, with the untranslated paths, because the update the operator
+    would run next refuses the same link.
+    """
+    try:
+        return legacy_support_paths(paths), None
+    except OmhError as exc:
+        return paths, Check(
+            "skills_dir_link",
+            False,
+            f"{paths.skills_dir} is a link OMH does not read through: {exc}",
+            remediation=(
+                "Point the bootstrap-legacy generation's `skills` link directly at this home's "
+                "`<omh_home>/skills`, or remove the stray link, then run `omh update`."
+            ),
+            next_action="Repair the skills link named here, then run `omh doctor` again.",
+        )
+
+
 def _guidance_projection_check(paths: OmhPaths, manifest: dict | None, *, registered: bool) -> Check:
     """Report the Hermes-visible guidance projection as one answer with four axes.
 
@@ -2890,12 +3677,17 @@ def _guidance_projection_check(paths: OmhPaths, manifest: dict | None, *, regist
     use is never a failure -- OMH cannot see a running Hermes from here, so
     `not_observed` is the honest resting state, not a fault.
     """
-    status = build_guidance_projection_status(
-        paths.skills_dir,
-        manifest,
-        registered=registered,
-        host_observed=False,
-    )
+    try:
+        status = build_guidance_projection_status(
+            paths.skills_dir,
+            manifest,
+            registered=registered,
+            host_observed=False,
+        )
+    except OmhError as exc:
+        # The support reader refused a path in the pack; `local_modifications`
+        # names the same refusal, and the rest of the report still runs.
+        return Check("guidance_projection", False, f"projection not read: {exc}")
     projection = str(status["projection"])
     drift = str(status["drift"])
     current = projection in {"fresh", "not_comparable"} and drift in {"clean", "unknown"}

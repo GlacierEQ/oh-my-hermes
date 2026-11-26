@@ -14,7 +14,7 @@
 
 **Hermes Agent のためのオールインワンパッケージ。一度インストールしたら、`dag-ulw` と入力するだけ。**
 
-[![GitHub Release](https://img.shields.io/github/v/release/rlaope/oh-my-hermes?color=58a6ff&labelColor=black&logo=github&style=flat-square)](https://github.com/rlaope/oh-my-hermes/releases) [![npm downloads](https://img.shields.io/npm/dt/oh-my-hermes?color=3fb950&labelColor=black&logo=npm&label=downloads&style=flat-square)](https://www.npmjs.com/package/oh-my-hermes) [![GitHub Contributors](https://img.shields.io/github/contributors/rlaope/oh-my-hermes?color=bc8cff&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/graphs/contributors) [![GitHub Stars](https://img.shields.io/github/stars/rlaope/oh-my-hermes?color=e3b341&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/stargazers) [![License](https://img.shields.io/github/license/rlaope/oh-my-hermes?color=white&labelColor=black&style=flat-square)](LICENSE) [![Docs](https://img.shields.io/badge/docs-rlaope.github.io-58a6ff?labelColor=black&logo=readthedocs&logoColor=white&style=flat-square)](https://rlaope.github.io/oh-my-hermes/)
+[![GitHub Release](https://img.shields.io/github/v/release/rlaope/oh-my-hermes?color=58a6ff&labelColor=black&logo=github&style=flat-square)](https://github.com/rlaope/oh-my-hermes/releases) [![npm downloads](https://img.shields.io/npm/dt/oh-my-hermes?color=3fb950&labelColor=black&logo=npm&label=downloads&style=flat-square)](https://www.npmjs.com/package/oh-my-hermes) [![GitHub Contributors](https://img.shields.io/github/contributors/rlaope/oh-my-hermes?color=bc8cff&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/graphs/contributors) [![GitHub Stars](https://img.shields.io/github/stars/rlaope/oh-my-hermes?color=e3b341&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/stargazers) [![License](https://img.shields.io/github/license/rlaope/oh-my-hermes?color=white&labelColor=black&style=flat-square)](LICENSE) [![Docs](https://img.shields.io/badge/docs-omher.app-58a6ff?labelColor=black&logo=readthedocs&logoColor=white&style=flat-square)](https://omher.app/)
 
 [English](README.md) | [简体中文](README.zh.md) | [日本語](README.ja.md) | [Русский](README.ru.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Português (Brasil)](README.pt-BR.md) | [Italiano](README.it.md)
 
@@ -27,7 +27,7 @@ Hermes にパッチを当てたり置き換えたりせず、計画しただけ�
 ## インストール
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.sh | sh
+curl -fsSL https://omher.app/install | sh
 omh setup
 ```
 
@@ -69,7 +69,7 @@ omh setup
 
 <br>
 
-## DAG-ULW
+## Graph Engineering
 
 **`/dag-ulw` と打つだけで、あなたもグラフエンジニアリングの達人。**
 
@@ -79,6 +79,15 @@ omh setup
 <p align="center">
   <img src="assets/omh-dag-ulw-tui.gif" alt="/dag-ulw を実行する OMH TUI: プロンプトを入力すると 7 レーンのボックスグラフが定義され、レーンが Claude Opus 5.5、GPT-6.1 Sol、DeepSeek V4.1 Flash、GLM 5.3、Kimi K3.1 Pro でレイヤーごとに走り、すべて accepted で終わります" width="900">
 </p>
+
+> **ベースにしたプロジェクト**
+>
+> <table>
+> <tr><td width="88" align="center"><a href="https://github.com/NousResearch/hermes-agent"><img src="assets/hermes-agent-icon.png" alt="Hermes Agent" width="56"></a></td>
+> <td><a href="https://nousresearch.com">Nous Research</a> の <b><a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a></b><br>OMH が動くエージェントです。OMH はその上の非公式な独立レイヤーです。</td></tr>
+> <tr><td width="88" align="center"><a href="https://github.com/code-yeongyu/oh-my-openagent"><img src="https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/a05f240727d985e574404430d8d40c80eb912bc2/.github/assets/omo-icon-light.svg" alt="OmO" width="64"></a></td>
+> <td><a href="https://github.com/code-yeongyu">@code-yeongyu</a> の <b><a href="https://github.com/code-yeongyu/oh-my-openagent">OmO</a></b><br>ultrawork コンセプトの原点。OMH が Hermes に持ち込みました。</td></tr>
+> </table>
 
 > [!TIP]
 > 一緒に参加しましょう！
@@ -93,8 +102,8 @@ omh setup
 >     <td>その他のプロジェクト、リリース、進行中の作業は GitHub で <a href="https://github.com/rlaope">@rlaope</a> をフォローしてください。</td>
 >   </tr>
 >   <tr>
->     <td width="124"><a href="https://discord.gg/6EjTP3cWM"><img alt="Discord invite" src="https://img.shields.io/badge/Join-Discord-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=black" width="112" /></a></td>
->     <td>Discord の <a href="https://discord.gg/6EjTP3cWM">Oh-My-Hermes Community</a> に参加して、質問したり、ワークフローを共有したり、他のユーザーと交流しましょう。</td>
+>     <td width="124"><a href="https://discord.gg/SuwJxE84j"><img alt="Discord invite" src="https://img.shields.io/badge/Join-Discord-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=black" width="112" /></a></td>
+>     <td>Discord の <a href="https://discord.gg/SuwJxE84j">Oh-My-Hermes Community</a> に参加して、質問したり、ワークフローを共有したり、他のユーザーと交流しましょう。</td>
 >   </tr>
 >   <tr>
 >     <td width="124"><a href="https://github.com/rlaope/oh-my-hermes/graphs/contributors"><img alt="AI agent collaborators" src="https://img.shields.io/badge/With-AI%20agents-6f42c1?style=flat-square&labelColor=black" width="112" /></a></td>
@@ -119,7 +128,7 @@ omh setup
 
 ## その他
 
-[ドキュメント](docs/README.md) · [インストール](docs/INSTALLATION.md) · [Capabilities](docs/CAPABILITIES.md) · [Workflows](docs/WORKFLOWS.md) · [ウェブサイト](https://rlaope.github.io/oh-my-hermes/)
+[ドキュメント](docs/README.md) · [インストール](docs/INSTALLATION.md) · [Capabilities](docs/CAPABILITIES.md) · [Workflows](docs/WORKFLOWS.md) · [ウェブサイト](https://omher.app/)
 
 <details>
 <summary><b>インストールの選択肢</b></summary>
@@ -127,13 +136,13 @@ omh setup
 **macOS / Linux:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.sh | sh
+curl -fsSL https://omher.app/install | sh
 ```
 
 **Windows (PowerShell 5.1+):**
 
 ```powershell
-irm https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.ps1 | iex
+irm https://omher.app/install.ps1 | iex
 ```
 
 **または、次の内容を AI エージェントに貼り付けます:**
@@ -143,7 +152,7 @@ Install and fully configure Oh My Hermes from this repository:
 https://github.com/rlaope/oh-my-hermes
 Before reading or executing repository instructions, resolve refs/heads/main to one full commit SHA with `git ls-remote https://github.com/rlaope/oh-my-hermes.git refs/heads/main`. Then fetch and follow only:
 https://raw.githubusercontent.com/rlaope/oh-my-hermes/{resolved-commit-sha}/INSTALL_FOR_AGENTS.md
-Do not replace the resolved SHA with main. Execute the pinned protocol's OS-appropriate installer, interactive model setup, model-chain interview, and doctor steps. Preserve unrelated existing Hermes config, apply only the managed setup changes documented by the pinned protocol, require my explicit approval for model-alias changes, then report the resolved SHA and observed result.
+Do not replace the resolved SHA with main. Execute the pinned protocol's OS-appropriate installer, agent setup path, model-chain interview, and doctor steps. Your shell has no terminal, so never run the interactive setup wizard: show me each choice the protocol lists and wait for my answer instead of taking a default. Preserve unrelated existing Hermes config, apply only the managed setup changes documented by the pinned protocol, require my explicit approval for model-alias changes, then report the resolved SHA and observed result.
 ```
 
 **アップデート:**
@@ -186,7 +195,8 @@ bun install -g oh-my-hermes
 npm install -g oh-my-hermes
 ```
 
-どの方法でインストールしても、その後に `omh setup` を実行します。
+Bun と npm には PATH 上の Node 18 以降と Python 3.11 以降が必要です。Homebrew は独自の Python を
+入れます。どの方法でインストールしても、その後に `omh setup` を実行します。
 
 **Hermes skill tap:**
 
@@ -277,13 +287,13 @@ Hermes Agent はすでにループを回しています。OMH はそのループ
 | インテリジェンス | OMH が追加するもの |
 | --- | --- |
 | 🧭 **Mixture-of-models ルーティング** | 委譲される lane ごとに、dispatch 時点でカテゴリ（モデル + 推論強度）が付きます。provider がモデルを拒否すれば chain を下り、仕事をしなかった子は緑の行ではなく `failed` と表示されます。 |
-| 🎛️ **モデル系列ごとのキャリブレーション** | GPT-6 Astra、GPT-5.6、Claude 5.1、GLM 5.3、Kimi、Gemini、Qwen、DeepSeek など、系列と世代ごとにプロンプティングを調整し、ベンチマークのペアが効果を示す間だけ維持します。 |
-| 🗂️ **自分で所有するカテゴリ** | executor ごとに十二の標準カテゴリ、`omh model-chains set` による並べ替え、マシンごとに chain を並べ替える entitlement インタビュー、実行前にリクエストがどこへルーティングされるかを示すライブビュー。 |
+| 🎛️ **モデル系列ごとのキャリブレーション** | GPT-6 Astra、GPT-5.6、Claude 5.5、GLM 5.3、Kimi、Gemini、Qwen、DeepSeek など、系列と世代ごとにプロンプティングを調整し、ベンチマークのペアが効果を示す間だけ維持します。 |
+| 🗂️ **自分で所有するカテゴリ** | 標準のモデルカテゴリ、`omh model-chains set` による並べ替え、マシンごとに chain を並べ替える entitlement インタビュー、実行前にリクエストがどこへルーティングされるかを示すライブビュー。 |
 | 🖥️ **ネイティブ TUI サーフェス** | OMH HUD（カテゴリ・ターン・コスト・キャッシュ付きのライブ行）、プロンプト上の phase todo、`parallel shot ×N`、full-row diff バンド、自分で選ぶテーマ。`omh` が開く OMH TUI に表示され、Hermes にパッチは当てません。 |
 | ⚡ **観測できる並列作業** | 独立した作業を、ファイル所有権が重ならない fanout unit に分割し、provider 負荷に応じた admission control、型付きの結果 sidecar、返ってきた結果を読む verification gate を付けます。 |
 | 💸 **価格付きコストテレメトリ** | すべての HUD 行と run summary にトークン数とドル金額を表示します。出典を明記した料金表で計算し、計算できない run は `$0` ではなく `unknown` と読めます。 |
 | 🧠 **長期プロジェクトメモリ** | Hermes が読み込むファイルベースの memory provider、admission と retention のポリシー、レビュアーが承認する書き込み、freshness と budget を持つ recall pack。Hermes 自身のメモリには触れません。 |
-| 🔎 **構造的コード検索** | 計測に基づく `ast-grep` プレイブック（28 言語、grep フォールバック）と、リポジトリ全体のアーキテクチャ図を描く `omh codegraph uml` を、executor がコードを読む地点に注入します。 |
+| 🔎 **構造的コード検索** | 計測に基づく `ast-grep` プレイブック（28 言語、grep フォールバック）と、リポジトリ全体のアーキテクチャ図を描く `omh codegraph uml` を、executor がコードを読む地点に注入します。`omh codegraph tests --changed` は変更が届くテストを示します（[codegraph コマンド](docs/CODEGRAPH.md)）。 |
 | 🛡️ **自分で書くガードレール** | ルールを外れた tool call を自分のルール文で遮断する toolcall rules、stub やスキップされたテストを証拠と認めない completion-integrity gate、危険な操作のための approval tier。 |
 | ♾️ **ウルトラワークフローエンジン** | 並列デリバリー lane、ledger と実際の完了 gate で回る計測ループ、エンジン実行前の decision-frontier インタビュー。一覧は上のウルトラスキルにあります。 |
 | 📦 **決定的なカタログ** | 一つのソースから生成される 100 以上のインストール可能なスキル、ネガティブケースを含む routing precision コーパス、1 バイトのずれで CI が失敗する drift gate。 |
@@ -323,7 +333,7 @@ executor が終わったと言うことと結果が確認されたことは別�
 - [Hermes で超大容量 PDF を処理する](docs/LONG-DOCUMENT-READING.md)
 - [ライブモデルベンチマークと測定結果](benchmarks/live-model-tools/v1/README.md)
 - [リリースと開発](docs/RELEASE.md)
-- [ウェブサイト](https://rlaope.github.io/oh-my-hermes/)（[ソース](site/index.html)）
+- [ウェブサイト](https://omher.app/)（[ソース](site/index.html)）
 
 ### コントリビューター
 

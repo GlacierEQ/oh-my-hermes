@@ -1,6 +1,6 @@
 ---
 name: "omh-skill-health"
-description: "[omh] OMH skill portfolio health overview: prepare a metadata-only OMH skill portfolio dashboard with stale surfaces, observed failure signals, pending amendments, and top actions. Use when the user says: skill-health, skill health, skill portfolio health, skill dashboard, skill health dashboard, skill failure pattern dashboard, skill failure patterns, pending skill amendments."
+description: "[omh] OMH skill portfolio health overview: prepare a metadata-only…"
 license: MIT
 compatibility: "Requires the omh CLI on PATH (pip install oh-my-hermes)."
 metadata:
@@ -32,7 +32,7 @@ Good example:
 
 - Prompt: skill-health show the OMH skill portfolio dashboard with stale surfaces, failure patterns, pending amendments, and top improvement actions.
 - Expected behavior: Produce `prepare_skill_health` with required context, wrapper actions, and not-evidence boundaries.
-- Why: The prompt names a real workflow surface that Hermes can orchestrate without hiding execution.
+- Why: Drift comes from `lint_warnings` and, on Hermes, the curator ledger, not use counts.
 
 Bad example:
 
@@ -48,6 +48,7 @@ Bad example:
 - Never present use, view, or load counts, `.usage.json` included, as a health, prune, archive, or retire signal: a rarely used skill is not an unhealthy one, and no health card recommends removing, archiving, or pruning a skill for being used little.
 - On Hermes, read the skill audit ledger read-only (that skill's entries in `skills/.curator_ledger.jsonl` under the active profile's Hermes home, or `hermes curator ledger --skill <name> --limit <n>`, which lists only the 20 newest entries by default): an entry against an OMH-managed skill means Hermes changed that managed copy outside OMH, so it may no longer match its generated body; report it as drift with the entry's `action` and `actor` (`agent`, `user`, or `curator`, which covers Hermes' curator and its background review). An OMH-managed skill is one OMH installed, under a label OMH's catalog renders such as `omh-plan` or `ulw-work`; a companion skill the person or an agent created is theirs, whatever its name. An empty ledger is unknown, not clean, because `skills.ledger: false` turns it off.
 - On Hermes, record an authoring finding only from the `lint_warnings` a `skill_manage` write returned, which are advisory and never proof a skill works; only some writes return them (an `edit` never does), so a write without them is not a clean lint. Record an available update for a hub-installed skill only from `hermes skills check` output that was seen; that hub request is Hermes' own, not OMH's.
+- Run `omh docs hermes-skill-parity --json` offline when auditing portfolio overlap: surface any upstream Hermes bundled/optional boundary findings and list `prose_template_review` skills queued for with-vs-without base-model lift verification.
 
 ## Recovery Notes
 

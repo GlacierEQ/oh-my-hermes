@@ -52,7 +52,37 @@ class SkillContextCostTests(unittest.TestCase):
         # expanding to the roughly 3% headroom prior entries permitted.
         # The feature-cost regression pins legacy body bytes, bounds these
         # two sections and also enforces (current - 1,943) < 126,000.
-        self.assertLess(profile["repeated"]["bytes"], 127_943)
+        # 127,943 -> 129,886: main measures 126,593; repro-audit's mandatory
+        # Workflow Lane and Runtime Evidence rails measure +1,943 (128,536).
+        # The old allowance (1,350 bytes) is preserved, not widened; the
+        # increment and body caps below bound the audit itself.
+        # 127,943 -> 129,950: HEAD c532cd5c4 measures 126,593; adding sprite-forge
+        # and the visual-qa/show-reel/deliverable-package rails measures 128,600.
+        # The exact +2,007 is sprite-forge's mandatory Workflow Lane (519) and
+        # Runtime Evidence (1,446) plus 42 sibling rail bytes. The old allowance
+        # (1,350 bytes) is preserved, not widened.
+        # Merged with main: 126,593 + 1,943 + 2,007 = 130,543 measured, plus the
+        # same 1,350 allowance = 131,893.
+        # 131,893 -> 133,335: the tree now measures 131,985 with systematic-review's
+        # mandatory Workflow Lane (497) and Runtime Evidence (1,446) rails (+1,943
+        # over 130,042); the same 1,350 allowance is kept, not widened.
+        self.assertLess(profile["repeated"]["bytes"], 133_335)
+
+    def test_repro_audit_context_increment_stays_bounded(self) -> None:
+        from omh.skills.context_cost import _skill_context_cost_profile
+        from omh.skills.packaging import builtin_skill_reference_templates, builtin_skill_templates
+
+        templates = builtin_skill_templates()
+        references = builtin_skill_reference_templates()
+        full = _skill_context_cost_profile("full", templates, references)
+        without = _skill_context_cost_profile(
+            "full", [template for template in templates if template.name != "repro-audit"], references
+        )
+        audit = next(template for template in templates if template.name == "repro-audit")
+        increment = full["repeated"]["bytes"] - without["repeated"]["bytes"]
+        self.assertGreaterEqual(increment, 0)
+        self.assertLessEqual(increment, 2_000)
+        self.assertLessEqual(len(audit.content.encode("utf-8")), 8_000)
 
     def test_ulw_context_reports_bounded_static_body_and_progressive_references(self) -> None:
         payload = skill_context_cost_payload()
@@ -77,8 +107,39 @@ class SkillContextCostTests(unittest.TestCase):
 
         # Pre-feature producer measurements, not token/latency estimates. This
         # feature changes opening actions only, never indexed descriptions.
-        self.assertEqual(skill_index_chars(), 13_243)  # Career adds its bounded 86-character entry.
-        baseline = {'research': 19_587, 'web-research': 11_495, 'source-finder': 9_221}
+        # Career adds its bounded 86-character entry; repro-audit its 84-character one;
+        # sprite-forge its line + newline (13,243 -> 13,328); merged with main's
+        # repro-audit line, 13,327 + 85 = 13,412; systematic-review its line +
+        # newline (+90); model-compression its line + newline (+90).
+        # 13,592 -> 12,970: the index producer cuts at a word boundary the way
+        # Hermes' `clip_skill_description` does, not at a fixed 57 characters.
+        # skill-eval then adds its line + newline; model-compression's clause
+        # then says "smaller or cheaper" again (+3). app-work-intake adds its
+        # line + newline (+87).
+        # bot-template then adds its line + newline (+82).
+        self.assertEqual(skill_index_chars(), 13_223)
+        # research and web-research add the shipped `ru` trigger pack's routing
+        # signals (+446 and +316 bytes, after its review dropped the everyday
+        # and nested phrases) to their pre-feature bodies; the search guidance
+        # increment itself (286 and 305) is unchanged. The citation receipts rule
+        # (`omh research receipts verify`, 262 bytes) joins both bodies.
+        # research's entity-match clause (answer only from a source on the exact
+        # named entity; a different name is a different entity) adds 222 bytes.
+        # The render rail writes `research` as `ulw-research` and the like in these
+        # bodies. Each pin moved by the body's measured growth against main
+        # (research +3, web-research +7, source-finder +19), plus the research-lane fixes'
+        # own lines (web-research +181, source-finder +169), not by a figure chosen to fit the cap; the increment above stays the feature's own.
+        # 20,520 -> 20,902: `research` takes defaults when no human can answer its opening questions
+        # (+382, not search guidance).
+        # 12,261 -> 12,409: web-research's Do-Not-Use line for market sizing (+148, not search guidance).
+        # Each baseline -316: every body's reply-voice paragraph becomes one line (not search guidance).
+        # Each baseline +276: the one reply line takes back the turn-ending rule (not search guidance).
+        # 2026-11-20: source-finder's literature-retrieval pointer line adds 282 bytes (not search guidance).
+        # Universal progressive disclosure for non-bespoke `omh-*` skills moves Examples, sibling
+        # Do-Not-Use lines, and verbose I/O lists to references/full-contract.md (web-research
+        # 12,369 -> 10,885 pre-search baseline; source-finder 9,651 -> 7,869 pre-search baseline;
+        # research stays non-PD engine). The search-guidance increment stays <= 320 bytes on all three.
+        baseline = {'research': 20_862, 'web-research': 10_885, 'source-finder': 7_869}
         for name, before in baseline.items():
             record = skill_record(name)
             body = record.body().content

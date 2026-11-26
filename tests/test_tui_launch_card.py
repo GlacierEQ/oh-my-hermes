@@ -28,6 +28,7 @@ from test_tui_app import FakePoller, ScriptedTerminal
 from test_tui_modes import SID, RecordingClient
 from test_tui_theme import contrast
 from omh.skin_pack import (
+    SKIN_THEMES,
     THEME_STORE_SCHEMA,
     default_theme,
     read_launch_choice,
@@ -39,7 +40,7 @@ from omh.skin_pack import (
 )
 from omh.tui.app import CARD_KEPT, CARD_LIVE, CARD_NONE, CLEAR_SCREEN_AND_SCROLLBACK, LAUNCH_UNKNOWN_NOTICE, App
 from omh.tui.gateway import Event, Response
-from omh.tui.keys import BUTTON_LEFT, CHAR, DOWN, ENTER, ESCAPE, Key, Mouse
+from omh.tui.keys import BUTTON_LEFT, CHAR, DOWN, ENTER, ESCAPE, UP, Key, Mouse
 from omh.tui.launch_card import (
     SNAPSHOT_SCHEMA,
     Facts,
@@ -61,6 +62,7 @@ from omh.tui.theme import (
     build_theme,
     launch_palette,
     launch_styles,
+    with_launch_look,
 )
 from omh.tui.width import line_width
 
@@ -104,7 +106,9 @@ class Launched:
         self.client = StartClient()
         self.client.profile = profile
         self.client.skills = skills
-        self.app = App(ScriptedTerminal(rows, cols), self.client, {"OMH_HOME": str(self.home), **(env or {})},
+        # OMH_TUI_MOUSE=0: reports only while the /theme picker takes clicks (`tests/test_tui_main_mouse.py` has the rest).
+        self.app = App(ScriptedTerminal(rows, cols), self.client,
+                       {"OMH_HOME": str(self.home), "OMH_TUI_MOUSE": "0", **(env or {})},
                        poller=FakePoller())  # type: ignore[arg-type]
         self.app.startup()  # as `_run` starts it: the session, then the background, then the cleared screen
         self.app.adopt_background("#0E151E", {})
@@ -164,10 +168,26 @@ class PaletteTests(unittest.TestCase):
                     self.assertGreaterEqual(contrast(styles.label.fg, background), 4.5)
                     self.assertGreaterEqual(contrast(styles.edge.fg, background), 3.0)
 
+    def test_spectrum_draws_the_composer_rules_in_a_muted_violet(self) -> None:
+        # Owner, 2026-11-02: the rules above and below the composer in violet, not grey.
+        skin = default_theme()
+        theme = with_launch_look(build_theme(skin, "#0A0E14"), skin, "#0A0E14", "spectrum")
+        self.assertEqual(theme.rule.fg, "#6E5A9E")
+        light = with_launch_look(build_theme(skin, "#FFFFFF"), skin, "#FFFFFF", "spectrum")
+        red, green, blue = (int(light.rule.fg[at:at + 2], 16) for at in (1, 3, 5))
+        self.assertGreater(blue, green)  # still a violet once lifted for a light ground
+        self.assertGreater(red, green)
+
     def test_spectrum_is_the_default_and_the_first_look(self) -> None:
         self.assertEqual(DEFAULT_LAUNCH, "spectrum")
-        self.assertEqual(LAUNCH_PRESETS, ("spectrum", "violet", "gold", "graphite"))
+        self.assertEqual(LAUNCH_PRESETS,
+                         ("spectrum", "violet", "gold", "graphite", "sakura", "moonlit", "aurora", "ember", "kanagawa-wave"))
         self.assertEqual(set(LAUNCH_PALETTES), set(LAUNCH_PRESETS))
+
+    def test_no_theme_shares_a_name_with_a_look(self) -> None:
+        # `/theme <name>` tries the looks first: a theme named as a look could never be applied to the session.
+        names = {name for theme in SKIN_THEMES for name in (theme.short_name, theme.skin_name)}
+        self.assertEqual(names & set(LAUNCH_PRESETS), set())
 
 
 class SkillRowTests(unittest.TestCase):
@@ -178,6 +198,20 @@ class SkillRowTests(unittest.TestCase):
                                        ("other", ("ulw-work", "omh-lone"))))
         self.assertEqual((rows.omh, rows.hermes, rows.hermes_categories), (7, 2, ("creative", "devops")))
 
+    def test_an_installed_generation_s_role_directories_still_regroup_as_omh(self) -> None:
+        # An installed generation files its skills under role directories (`guide/omh-plan/SKILL.md`), so Hermes
+        # names them by those categories, not `general`. The card regroups them by name and keeps those categories
+        # off the hermes row.
+        installed = {"guide": ["omh-plan", "omh-lone"], "planner": ["dag-ulw", "ulw-plan"],
+                     "reviewer": ["omh-code-review"], "devops": ["docker"], "creative": ["poem"]}
+        rows = skill_rows(installed, members=lambda: MEMBERS)
+        self.assertEqual(rows.groups, (("ulw", ("dag-ulw", "ulw-plan")), ("plan", ("omh-plan",)),
+                                       ("ship", ("omh-code-review",)), ("other", ("omh-lone",))))
+        self.assertEqual((rows.omh, rows.hermes, rows.hermes_categories), (5, 2, ("creative", "devops")))
+        card = texts(launch_card(DEFAULT_LAUNCH, CardTests.FACTS, paint(), 150, 40, rows))
+        self.assertTrue([row for row in card if "ulw      dag-ulw" in row], card)
+        self.assertTrue([row for row in card if "hermes   creative" in row], card)
+
     def test_names_show_whole_in_columns_and_a_full_group_ends_with_how_many_more(self) -> None:
         names = ("omh-a-name-wider-than-one-column-x",) + tuple(f"omh-skill-number-{index}" for index in range(30))
         rows = texts(grid([("plan", names)], 120, 2, paint()))
@@ -186,6 +220,27 @@ class SkillRowTests(unittest.TestCase):
         self.assertTrue(rows[1].rstrip().endswith("more"))
         self.assertNotIn("…", "".join(rows))
         self.assertEqual({line_width(line) for line in grid([("plan", names)], 120, 2, paint())}, {120})
+
+    def test_every_family_is_named_as_the_catalog_names_it_and_every_look_draws_the_same_card(self) -> None:
+        # The card names skills through `omh.catalogs.skill_display_names`, not the skill catalog's package: the
+        # catalog's own path, over the families' producer rather than the sidecar, must give the same names and card.
+        from omh.capabilities.families import capability_family_projection
+        from omh.skills.catalog import omh_skill_display_name
+        from omh.tui.launch_card import FAMILIES
+
+        families = {family["id"]: family for family in capability_family_projection()["families"]}
+        catalog = tuple((label, tuple(omh_skill_display_name(name) for name in families[family]["primary_workflows"]))
+                        for family, label in FAMILIES)
+        self.assertEqual(family_members(), catalog)
+        self.assertTrue(all(names for _label, names in catalog))
+        installed = {"general": [name for _label, names in catalog for name in names], "devops": ["docker"]}
+        ours, theirs = skill_rows(installed), skill_rows(installed, members=lambda: catalog)
+        self.assertEqual(ours, theirs)
+        for look in LAUNCH_PRESETS:
+            for width, room in ((150, 40), (120, 30), (100, 12)):
+                with self.subTest(look=look, width=width, room=room):
+                    self.assertEqual(launch_card(look, CardTests.FACTS, paint(look), width, room, ours),
+                                     launch_card(look, CardTests.FACTS, paint(look), width, room, theirs))
 
 
 class CardTests(unittest.TestCase):
@@ -498,6 +553,28 @@ class SnapshotTests(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(done.stdout.split(), ["False", "False"])
 
+    def test_the_first_frame_with_the_create_answer_s_skills_imports_no_skill_package(self) -> None:
+        # A shared gateway's session.create names every skill, so the card regroups them before the first frame:
+        # naming them must not import `omh.skills`, whose package `__init__` imports the whole catalog.
+        code = (
+            "import sys; sys.path[:0] = [sys.argv[1]]\n"
+            "from test_tui_launch_card import Launched, SKILLS\n"
+            "from omh.tui.launch_card import family_members\n"
+            "def skill_modules(): return [m for m in sys.modules if m == 'omh.skills' or m.startswith('omh.skills.')]\n"
+            "before = skill_modules()\n"
+            "run = Launched(env={'HERMES_HOME': '/home/one/.hermes'}, profile='default', skills=SKILLS)\n"
+            "screen = '\\n'.join(run.screen())\n"
+            "assert 'ulw-plan' in screen and 'loading…' not in screen, screen\n"
+            "assert len(family_members()) == 6 and all(names for _label, names in family_members())\n"
+            "print(before, skill_modules())\n"
+        )
+        tests = Path(__file__).resolve().parent
+        path = os.pathsep.join((str(tests), str(tests.parent)))  # the checkout's `omh` shim: this tree, not an install
+        done = subprocess.run([sys.executable, "-P", "-c", code, str(tests)], capture_output=True,
+                              text=True, timeout=120, env={**os.environ, "PYTHONPATH": path})
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.split(), ["[]", "[]"])
+
 
 class SwitchTests(unittest.TestCase):
     def test_theme_alone_opens_the_picker_and_each_move_previews_the_look(self) -> None:
@@ -536,6 +613,62 @@ class SwitchTests(unittest.TestCase):
         self.assertEqual(run.app.launch_look, "graphite")
         self.assertEqual(read_launch_choice(run.home), "graphite")
         self.assertIn("── gpt-6.1-sol", "\n".join(run.screen()))
+
+    def test_every_look_is_kept_by_name_saved_and_read_back_with_its_chrome(self) -> None:
+        # Every look (eight by the owner, 2026-10-29, then kanagawa-wave): `/theme <look>` keeps each, the saved `launch` key reads back as the same
+        # look on the next launch, and the theme the app paints carries that look's rule and rail colours.
+        for look in LAUNCH_PRESETS:
+            with self.subTest(look=look):
+                run = Launched()
+                run.app._theme(look)
+                self.assertEqual((run.app.launch_look, read_launch_choice(run.home)), (look, look))
+                again = Launched(env={"OMH_HOME": str(run.home)})
+                self.assertEqual((again.app.launch_look, again.app.theme.look), (look, look))
+                self.assertEqual(again.app.transcript.blocks, [])  # no unknown-look notice
+                skin = again.app._skin()
+                looked = with_launch_look(build_theme(skin, "#0E151E"), skin, "#0E151E", look)
+                self.assertEqual((again.app.theme.rule, again.app.theme.accent), (looked.rule, looked.accent))
+
+    def test_the_picker_lists_every_look_and_the_arrows_reach_the_last(self) -> None:
+        run = Launched()
+        run.info()
+        run.screen()
+        run.app._theme("")
+        screen = run.screen()
+        listed = [name for name in LAUNCH_PRESETS
+                  if any(line.lstrip("❯● ").startswith(f"{name} ") for line in screen)]
+        self.assertEqual(listed, list(LAUNCH_PRESETS), screen)
+        run.press(*[Key(DOWN)] * len(LAUNCH_PRESETS))  # one past the last: the highlight stays on it
+        self.assertEqual(run.app._shown_look(), LAUNCH_PRESETS[-1])
+        run.press(Key(ENTER))
+        self.assertEqual(read_launch_choice(run.home), LAUNCH_PRESETS[-1])
+
+    def test_on_a_short_terminal_the_list_scrolls_so_the_highlighted_look_shows_and_clicks_land(self) -> None:
+        # A slot shorter than the list (14 rows shows six looks): a look past it was reachable but never drawn.
+        def shown(screen: list[str]) -> list[str]:
+            return [name for name in LAUNCH_PRESETS if any(line.lstrip("❯● ").startswith(f"{name} ") for line in screen)]
+
+        run = Launched(rows=14)
+        run.info()
+        run.screen()
+        run.app._theme("")
+        room = len(shown(run.screen()))
+        self.assertLess(room, len(LAUNCH_PRESETS))
+        for name in LAUNCH_PRESETS:
+            with self.subTest(highlighted=name):
+                self.assertEqual(run.app._shown_look(), name)
+                self.assertIn(name, shown(run.screen()))
+                self.assertEqual(len(shown(run.screen())), room)
+            run.press(Key(DOWN))
+        screen = run.screen()
+        self.assertEqual(shown(screen), list(LAUNCH_PRESETS[-room:]))  # scrolled to the end, never past it
+        target = LAUNCH_PRESETS[-room]
+        row = next(index for index, line in enumerate(screen) if line.lstrip("❯● ").startswith(f"{target} "))
+        run.press(Mouse(BUTTON_LEFT, 4, row + 1))
+        self.assertEqual(run.app._shown_look(), target)  # a click on a scrolled row picks the look drawn there
+        self.assertEqual(shown(run.screen()), list(LAUNCH_PRESETS[-room:]))  # inside the list: it does not move
+        run.press(*[Key(UP)] * len(LAUNCH_PRESETS))
+        self.assertEqual(shown(run.screen()), list(LAUNCH_PRESETS[:room]))
 
     def test_a_click_on_a_look_moves_the_highlight_and_reports_are_on_only_while_it_is_open(self) -> None:
         run = Launched()
@@ -599,13 +732,18 @@ class SwitchTests(unittest.TestCase):
         run.press(Mouse(BUTTON_LEFT, 4, row + 1))  # under the preview, a click still lands on its row
         self.assertEqual(run.app._shown_look(), "violet")
 
-    def test_under_no_color_the_highlight_is_reverse_video(self) -> None:
+    def test_under_no_color_the_highlight_is_the_pointer_and_bold(self) -> None:
+        # No menu has a fill since 2026-10-27, so NO_COLOR draws no reverse band either: the pointer and the bold
+        # name say which row is highlighted.
         run = Launched(env={"NO_COLOR": "1"})
         run.app._theme("")
         rows = run.app.launch_picker.lines(150, run.app.theme, 10, run.app._launch_swatches())
-        highlighted = [span for span in rows[run.app.launch_picker.first_row] if span.text.strip()]
-        self.assertTrue(highlighted[0].style.reverse)
-        self.assertFalse(rows[run.app.launch_picker.first_row + 1][0].style.reverse)
+        highlighted, other = rows[run.app.launch_picker.first_row], rows[run.app.launch_picker.first_row + 1]
+        self.assertTrue(line_text(highlighted).startswith("❯ ● spectrum"), line_text(highlighted))
+        self.assertTrue(line_text(other).startswith("    violet"), line_text(other))
+        self.assertTrue(next(span for span in highlighted if "spectrum" in span.text).style.bold)
+        self.assertFalse(next(span for span in other if "violet" in span.text).style.bold)
+        self.assertFalse([span for row in rows for span in row if span.style.reverse])
 
     def test_tab_completes_a_look_after_theme(self) -> None:
         run = Launched()
@@ -618,9 +756,46 @@ class SwitchTests(unittest.TestCase):
                          [f"theme {name}" for name in LAUNCH_PRESETS])
         run.app._set_composer("/theme graphite")
         self.assertEqual(run.app._menu_entries(), [])  # typed whole: Enter sends it
+        for typed, offered in (("/theme sa", ["theme sakura"]), ("/theme moo", ["theme moonlit"]),
+                               ("/theme au", ["theme aurora"]), ("/theme em", ["theme ember"])):
+            with self.subTest(typed=typed):
+                run.app._set_composer(typed)
+                self.assertEqual([entry.name for entry in run.app._menu_entries()], offered)
 
     def test_the_shortcuts_name_the_picker(self) -> None:
         self.assertTrue(any("/theme picker" in does for _keys, does in SHORTCUTS))
+
+
+
+class KeptPathTests(unittest.TestCase):
+    """The look's file is named home-relative, so the notice fits a row instead of wrapping to three (audit B, 11)."""
+
+    def kept(self, home: Path, omh_home: Path) -> str:
+        from test_tui_modes import make_app, notices
+
+        app, _client = make_app(environ={"HOME": str(home), "OMH_HOME": str(omh_home)})
+        app._keep_launch_look("violet")
+        return notices(app)[-1]
+
+    def test_a_file_under_home_is_named_with_a_tilde_and_one_elsewhere_whole(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "home"
+            self.assertEqual(self.kept(home, home / ".omh"), "Launch look violet, kept in ~/.omh/tui/theme.json.")
+            elsewhere = Path(root) / "elsewhere"
+            self.assertEqual(self.kept(home, elsewhere),
+                             f"Launch look violet, kept in {elsewhere / 'tui' / 'theme.json'}.")
+
+    def test_a_home_spelled_another_way_still_reads_as_a_tilde(self) -> None:
+        # Windows CI names the same temp home `RUNNER~1` on one side and `runneradmin` on the other; a link stands in.
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "home"
+            home.mkdir()
+            alias = Path(root) / "alias"
+            try:
+                alias.symlink_to(home, target_is_directory=True)
+            except OSError:
+                self.skipTest("this platform cannot make a directory link here")
+            self.assertEqual(self.kept(home, alias / ".omh"), "Launch look violet, kept in ~/.omh/tui/theme.json.")
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from collections.abc import Mapping
 import json
 import math
@@ -10,6 +11,9 @@ import sys
 import traceback
 from pathlib import Path
 
+from ..coding.executors import canonical_executor_profile
+from ..coding import user_executors
+from ..coding.user_executors import ExecutorRegistry
 from ..plugin_bundle.omh.run_records import FANOUT_CONTRACT_FILE, RUN_FILE
 from ..coding_delegation import CODING_EXECUTOR_TARGETS, build_coding_delegation_payload, coding_delegation_record_payload
 from ..coding.media_handoff_capabilities import input_representations_from_attachments, merged_input_representation
@@ -28,6 +32,7 @@ from ..coding.executor_capability_snapshots import (
     ExecutorCapabilitySnapshotError,
     build_executor_capability_snapshot,
     read_executor_capability_snapshot,
+    snapshot_file_exists,
     validate_executor_capability_snapshot,
     write_executor_capability_snapshot,
 )
@@ -36,7 +41,8 @@ from ..coding.executor_skill_discovery import (
     skill_selection_card,
     suggested_skill_sequence,
 )
-from ..coding.executors import EXECUTOR_PROFILES
+from ..coding.executors import EXECUTOR_PROFILES, legacy_executor_profile_ids
+from ..coding.pi_family_interop import canonical_runtime_record
 from ..executor_readiness import EXECUTOR_READINESS_PROFILES, probe_executor_readiness
 from ..hermes_planning import (
     build_plan_handoff_context_pack,
@@ -58,6 +64,7 @@ from ..routing.localization import normalized_phrase, routing_tokens
 from ..runtime.artifacts import append_journal_observation, create_prepared_coding_delegation_run, write_coding_delegation
 from ..runtime.records import OBSERVED_RESULTS, WRAPPER_COMPLETION_STATUSES
 from ..system.paths import OmhPaths, continuity_write_target
+from ..system.stdin_probe import stdin_is_tty
 from ..workflows.blocked_work_records import mint_blocked_work_record
 from ..workflows.goal_ledger import (
     create_goal_ledger,
@@ -66,6 +73,8 @@ from ..workflows.goal_ledger import (
     record_goal_checkpoint,
 )
 from ..workflows.role_context_packs import validate_accepted_role_context, write_role_context_pack
+from ..routing.coding_route_actions import named_executor_owners
+from ..wrapper.contract import executor_target_named_in_message, profile_owner_conflict
 from ..wrapper.lifecycle import (
     CodingLifecycleError,
     record_codex_dispatch,
@@ -214,7 +223,7 @@ def cmd_coding_delegate(args: argparse.Namespace) -> int:
         source_metadata: dict[str, str] = {}
         plan_artifact: dict[str, object] | None = None
         context_pack = _context_pack(args)
-        executor_target = _resolved_executor_for_delegate(args)
+        executor_target = _resolved_executor(args, default="generic")
         attached_representations: list[str] = []
         # `--explicit-owner-choice` is a SEPARATE, deliberate flag from
         # `--executor`: bare `--executor` alone stays exactly as conservative
@@ -258,6 +267,18 @@ def cmd_coding_delegate(args: argparse.Namespace) -> int:
             message = sys.stdin.read().strip()
         else:
             message = " ".join(args.message).strip()
+        if not args.from_plan and not getattr(args, "executor", None):
+            # An owner the person named in the message beats the setup-profile default, as it does in chat
+            # (`message_mention`). It is still not `--explicit-owner-choice`: that flag stays the caller's own.
+            named = executor_target_named_in_message(message)
+            if named:
+                executor_target = named
+            elif len(named_executor_owners(normalized_phrase(message))) > 1 or profile_owner_conflict(
+                message, executor_target
+            ):
+                # Two owners named as the doer, or another CLI mentioned but not as the doer while the profile
+                # default would run a different one ("fix the login bug in codex"): the owner is asked for.
+                executor_target = "choose"
         source_metadata.update(_explicit_source_metadata(args))
         input_representation = merged_input_representation(
             list(getattr(args, "input_representation", None) or []),
@@ -297,6 +318,8 @@ def cmd_coding_delegate(args: argparse.Namespace) -> int:
             # prepared here scopes its evidence to a real provider and wire
             # model rather than to an empty route no snapshot could match.
             model_recommendation=resolved_hermes_model_recommendation(executor_target, paths),
+            requested_identity=getattr(args, "identity", None) or "",
+            identity_config=_declared_identity_config(paths, getattr(args, "identity", None)),
             input_representation=input_representation,
             transformation=transformation,
             handoff_contract=_handoff_contract_declaration(args),
@@ -443,7 +466,7 @@ def _record_delegation_continuity(paths: OmhPaths, payload: dict[str, object]) -
     `_record_coding_decision`: it never fails the command over a store error, and
     it re-derives the ledger's location from `continuity_write_target(paths)` so
     it can only ever write under the OMH goals directory -- never into a product
-    repo's `.omo`/`.omx`/`.document-harness` runtime-evidence dirs.
+    repo's `CONTINUITY_FORBIDDEN_TARGETS` runtime-evidence dirs.
 
     The goal is created active with a REQUIRED merge/deploy criterion carrying no
     evidence, so it stays open until the merge/deploy is observed. An existing
@@ -538,14 +561,6 @@ def _coding_delegate_runtime_skip_reason(payload: dict[str, object]) -> str:
     return ""
 
 
-def _resolved_executor_for_delegate(args: argparse.Namespace) -> str:
-    if getattr(args, "executor", None):
-        return str(args.executor)
-    if getattr(args, "from_plan", None):
-        return "codex"
-    return _resolved_executor(args, default="generic")
-
-
 def _plan_source_metadata(artifact: dict[str, object]) -> dict[str, str]:
     return {
         "plan_artifact_path": str(artifact.get("path", "")),
@@ -565,6 +580,7 @@ def _coding_plan_artifact(artifact: dict[str, object]) -> dict[str, object]:
         "sha256": str(artifact.get("sha256", "")),
         "task_statement_sha256": str(artifact.get("task_statement_sha256", "")),
         "task_statement_length": int(artifact.get("task_statement_length", 0) or 0),
+        "plan_body": str(artifact.get("plan_body", "unknown")),
     }
 
 
@@ -911,6 +927,7 @@ def cmd_coding_executor_readiness(args: argparse.Namespace) -> int:
             probe_executor_readiness(
                 _paths(args),
                 args.executor,
+                executor_registry_home=(_executor_registry_home(args) if args.executor not in EXECUTOR_PROFILES else None),
                 force=bool(args.force),
                 dry_run=bool(args.dry_run),
             )
@@ -918,6 +935,188 @@ def cmd_coding_executor_readiness(args: argparse.Namespace) -> int:
     except ValueError as exc:
         raise OmhError(str(exc)) from exc
     return 0
+
+
+def _executor_registry_home(args: argparse.Namespace) -> Path:
+    """The operator's registry home, whatever the artifact scope says.
+
+    `--scope project` puts artifacts in the checkout; the harness registry stays
+    in the operator's home, because a repo-owned `executors.toml` would let a
+    clone choose the argv OMH spawns.
+    """
+    from ..coding.user_executors import operator_executor_home
+
+    return operator_executor_home(
+        getattr(args, "omh_home", None),
+        getattr(args, "hermes_home", None),
+        scope=getattr(args, "scope", None),
+    )
+
+
+def _loaded_executor_registry(args: argparse.Namespace) -> ExecutorRegistry:
+    """This invocation's registry for the operator home. Never probes."""
+    from ..coding.user_executors import load_user_executors
+
+    return load_user_executors(_executor_registry_home(args))
+
+
+def _admitted_owner_ids(registry: ExecutorRegistry) -> tuple[str, ...]:
+    from ..coding.fanout import admitted_unit_owner_ids
+
+    return admitted_unit_owner_ids(registry)
+
+
+def _refuse_remote_pr(args: argparse.Namespace) -> None:
+    # Plumbing only: the flag defaults false and the remote lane is not built yet.
+    if bool(getattr(args, "allow_remote_pr", False)):
+        raise OmhError("remote_pr lane not available")
+
+
+def _executor_config_error(exc: Exception) -> OmhError:
+    reason = getattr(exc, "reason", str(exc))
+    return OmhError(f"executor config refused: {reason}")
+
+
+def cmd_coding_executors_list(args: argparse.Namespace) -> int:
+    from ..coding.executor_presets import get_preset, preset_ids
+    from ..coding.executors import EXECUTOR_PROFILES
+    from ..coding.user_executors import load_user_executors
+
+    registry_home = _executor_registry_home(args)
+    registry = load_user_executors(registry_home)
+    enabled = []
+    for executor_id in sorted(registry.entries):
+        spec = registry.entries[executor_id]
+        enabled.append(
+            {
+                "id": spec.id,
+                "label": spec.label,
+                "source": "preset" if spec.preset_id else "custom",
+                "preset": spec.preset_id,
+                "validated": bool(spec.validated),
+                "remote_pr": bool(spec.remote_pr),
+                "definition_sha256": spec.definition_sha256,
+            }
+        )
+    configured = set(registry.entries)
+    available = []
+    for preset in preset_ids():
+        if preset in configured:
+            continue
+        info = get_preset(preset)
+        if info is None:
+            continue
+        available.append({"id": preset, "label": info.label, "source_url": info.source_url, "validated": False})
+    rejected = [
+        {"id": issue.executor_id, "field": issue.field, "reason": issue.reason}
+        for issue in registry.issues
+    ]
+    payload = {
+        "schema_version": "coding_executors/v1",
+        "path": str(Path(registry_home) / "routing" / "executors.toml"),
+        "builtin": list(EXECUTOR_PROFILES),
+        "enabled": enabled,
+        "available_presets": available,
+        "rejected": rejected,
+        "probed": False,
+    }
+    if bool(getattr(args, "json", False)):
+        _print_json(payload)
+        return 0
+    print(f"Built-in executors: {', '.join(payload['builtin'])}")
+    print("Enabled user executors:" if enabled else "Enabled user executors: none")
+    for entry in enabled:
+        source = f"preset {entry['preset']}" if entry["preset"] else "custom"
+        state = "validated" if entry["validated"] else "unvalidated"
+        print(f"  {entry['id']}  {entry['label']}  [{source}, {state}]")
+    print("Available presets (not enabled):" if available else "Available presets (not enabled): none")
+    for entry in available:
+        print(f"  {entry['id']}  {entry['label']}  [unvalidated]  {entry['source_url']}")
+    if rejected:
+        print("Rejected entries:")
+        for entry in rejected:
+            print(f"  {entry['id'] or '(file)'}  {entry['field']}: {entry['reason']}")
+    print("No executor was probed; run `omh coding executors check` to probe enabled entries.")
+    return 0
+
+
+def cmd_coding_executors_add(args: argparse.Namespace) -> int:
+    from ..coding.user_executors import ExecutorConfigError, add_executor_preset
+
+    try:
+        spec = add_executor_preset(_executor_registry_home(args), args.preset, force=bool(args.force))
+    except ExecutorConfigError as exc:
+        raise _executor_config_error(exc) from exc
+    _print_json(
+        {
+            "schema_version": "coding_executors_add/v1",
+            "id": spec.id,
+            "preset": spec.preset_id,
+            "validated": bool(spec.validated),
+            "claim_boundary": "Writes an opt-in reference only; nothing was installed, probed or dispatched.",
+        }
+    )
+    return 0
+
+
+def cmd_coding_executors_remove(args: argparse.Namespace) -> int:
+    from ..coding.user_executors import ExecutorConfigError, remove_user_executor
+
+    try:
+        remove_user_executor(_executor_registry_home(args), args.executor_id)
+    except ExecutorConfigError as exc:
+        raise _executor_config_error(exc) from exc
+    _print_json({"schema_version": "coding_executors_remove/v1", "id": args.executor_id, "removed": True})
+    return 0
+
+
+def cmd_coding_executors_check(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    registry = _loaded_executor_registry(args)
+    requested = getattr(args, "executor_id", None)
+    if requested:
+        if requested not in registry.entries:
+            rejected = [issue.reason for issue in registry.issues if issue.executor_id == requested]
+            if rejected:
+                raise OmhError(f"executor {requested!r} is configured but rejected: {rejected[0]}")
+            raise OmhError(f"executor {requested!r} is not configured; run `omh coding executors list`")
+        ids = [requested]
+    else:
+        ids = sorted(registry.entries)
+    results = []
+    for executor_id in ids:
+        # Hand the already-loaded spec in: readiness otherwise re-reads
+        # `paths.omh_home`, which under `--scope project` is the checkout, not
+        # the operator home this registry came from.
+        readiness = probe_executor_readiness(
+            paths,
+            executor_id,
+            force=True,
+            executor_spec=registry.entries.get(executor_id),
+        )
+        results.append(
+            {
+                "id": executor_id,
+                "status": readiness.get("status", ""),
+                "reason": readiness.get("reason", ""),
+                "available": bool(readiness.get("available", False)),
+                "validated": False,
+            }
+        )
+    rejected_ids = sorted({issue.executor_id for issue in registry.issues if issue.executor_id})
+    # Nonzero when any checked entry is not ready, or when a broad check
+    # finds a rejected entry the operator should repair.
+    ok = all(item["status"] == "ready" for item in results) and not (requested is None and registry.issues)
+    _print_json(
+        {
+            "schema_version": "coding_executors_check/v1",
+            "ok": ok,
+            "checked": results,
+            "rejected_ids": rejected_ids,
+            "claim_boundary": "A version probe is not authentication, a provider check, or dispatch evidence.",
+        }
+    )
+    return 0 if ok else 1
 
 
 def cmd_coding_executor_skills(args: argparse.Namespace) -> int:
@@ -963,7 +1162,7 @@ def cmd_coding_capability_snapshot_record(args: argparse.Namespace) -> int:
 
 def cmd_coding_capability_snapshot_inspect(args: argparse.Namespace) -> int:
     try:
-        path = _capability_snapshot_path(args)
+        path = _capability_snapshot_read_path(args)
         snapshot = read_executor_capability_snapshot(path)
         if snapshot is None:
             raise ValueError(f"executor capability snapshot not found: {path}")
@@ -983,8 +1182,10 @@ def cmd_coding_capability_snapshot_inspect(args: argparse.Namespace) -> int:
 
 def cmd_coding_capability_snapshot_validate(args: argparse.Namespace) -> int:
     try:
-        path = _capability_snapshot_path(args)
-        snapshot = read_json_object(path)
+        path = _capability_snapshot_read_path(args)
+        raw = read_json_object(path)
+        # Validated as the current release reads it: an old profile id is current.
+        snapshot = None if raw is None else canonical_runtime_record(raw)
         if snapshot is None:
             raise ValueError(f"executor capability snapshot not found: {path}")
         errors = validate_executor_capability_snapshot(snapshot)
@@ -1023,6 +1224,18 @@ def _read_capability_snapshot_json(path_text: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError("--capabilities-json must contain a JSON object")
     return value
+
+
+def _capability_snapshot_read_path(args: argparse.Namespace) -> Path:
+    """The snapshot to read: an older release's file name when only that one exists."""
+    path = _capability_snapshot_path(args)
+    if getattr(args, "snapshot_path", "") or snapshot_file_exists(path):
+        return path
+    for legacy_id in legacy_executor_profile_ids(args.executor):
+        legacy = path.with_name(f"{legacy_id}.json")
+        if snapshot_file_exists(legacy):
+            return legacy
+    return path
 
 
 def _capability_snapshot_path(args: argparse.Namespace) -> Path:
@@ -1084,10 +1297,7 @@ def _parsed_chain_entry(raw: str) -> dict[str, str]:
 
 
 def _stdin_is_tty() -> bool:
-    try:
-        return sys.stdin.isatty()
-    except (AttributeError, ValueError):
-        return False
+    return stdin_is_tty()
 
 
 def _chain_display_text(chain) -> str:
@@ -1255,12 +1465,12 @@ def cmd_coding_category_maestro(args: argparse.Namespace) -> int:
         report_profiles[profile] = categories
     rejected = list(config.get("rejected", [])) if isinstance(config, dict) else []
     # Catalogless profiles are deliberately absent from this table (#1180's
-    # one-basis rule); naming where THEIR categories come from keeps a pi/omo
+    # one-basis rule); naming where THEIR categories come from keeps a pi-family
     # operator from reading this as "pi has no category routing".
     catalogless_note = (
-        "omo-runtime (host CLI: pi/senpi) and other catalogless profiles are not configured here: "
-        "their categories resolve from the locally-derived model catalog (omo config) — see "
-        "`omh coding model-route --executor omo-runtime --from-inventory`."
+        "pi-family-runtime (host CLI: pi or its distribution host) and other catalogless profiles are not configured here: "
+        "their categories resolve from the locally-derived model catalog (pi-family runtime config) — see "
+        "`omh coding model-route --executor pi-family-runtime --from-inventory`."
     )
     payload = {
         "schema_version": "omh_category_maestro_report/v1",
@@ -1386,7 +1596,9 @@ def cmd_coding_model_route(args: argparse.Namespace) -> int:
         requested_domain=getattr(args, "domain", None) or "",
         requested_depth=getattr(args, "depth", None) or "",
         requested_category=getattr(args, "category", None) or "",
+        requested_identity=getattr(args, "identity", None) or "",
         category_config=category_config,
+        identity_config=_declared_identity_config(_paths(args), getattr(args, "identity", None)),
         local_catalog=local_catalog,
         active_models=active_models,
         recommendation_overrides=recommendation_overrides,
@@ -1435,6 +1647,16 @@ def cmd_coding_model_route(args: argparse.Namespace) -> int:
     return 0
 
 
+def _model_id_summary(entries: list[dict[str, object]]) -> str:
+    """Each model id once, in first-seen order, with how many observations named it.
+
+    Session history yields one observation per session, so a plain join repeated
+    one id hundreds of times. `--json` keeps every observation.
+    """
+    counts = Counter(str(entry["model_id"]) for entry in entries)
+    return ", ".join(name if count == 1 else f"{name} (x{count})" for name, count in counts.items()) or "none"
+
+
 def cmd_coding_model_routing_status(args: argparse.Namespace) -> int:
     from ..maintenance.advisory import build_model_routing_status
 
@@ -1449,15 +1671,17 @@ def cmd_coding_model_routing_status(args: argparse.Namespace) -> int:
     hermes = payload["hermes"]
     maestro = payload["maestro"]
     owner = payload["owner_learning"]
-    confirmed = ", ".join(str(entry["model_id"]) for entry in models["confirmed"]) or "none"
-    discovered = ", ".join(str(entry["model_id"]) for entry in models["discovered_only"]) or "none"
+    confirmed = _model_id_summary(models["confirmed"])
+    discovered = _model_id_summary(models["discovered_only"])
     aliases = ", ".join(f"{name}={target}" for name, target in hermes["aliases"].items()) or "none"
     print("Model routing status (local metadata only):")
     print(f"Confirmed active: {confirmed}")
     print(f"Discovered only (not execution proof): {discovered}")
     print(f"Hermes aliases ({hermes['status']}): {aliases}")
     print(f"Maestro missing recommendation heads: {', '.join(maestro['missing_heads']) or 'none'}")
-    print(f"Owner learning: {owner['status']}")
+    recorded = sum(1 for route in owner.get("routes", {}).values() if route.get("status") == "recorded")
+    print(f"Stored owner choices: {recorded or 'none'} (history only; they select no owner)"
+          if owner["status"] not in ("missing", "corrupt") else f"Stored owner choices: {owner['status']}")
     print(f"Next action: {payload['next_action']}")
     print(str(payload["claim_boundary"]))
     return 0
@@ -1556,7 +1780,7 @@ def cmd_coding_model_inventory(args: argparse.Namespace) -> int:
         lines.append(f"note: {note.get('domain')} work favors {affine} (locally present: {present or 'none'})")
     if inventory.get("domain_affinity_notes"):
         lines.append(str(inventory.get("domain_affinity_claim_boundary", "")))
-    for name in ("omo_agent_config", "opencode_config_providers", "opencode_auth_providers"):
+    for name in ("runtime_agent_config", "opencode_config_providers", "opencode_auth_providers"):
         source = sources.get(name, {}) if isinstance(sources, dict) else {}
         if not isinstance(source, dict):
             continue
@@ -1583,6 +1807,41 @@ def _operator_category_config(paths) -> dict[str, object] | None:
     if isinstance(config, dict):
         for note in config.get("rejected", []):
             print(f"omh: category-maestro: ignored {note}", file=sys.stderr)
+    return config
+
+
+def _operator_identity_config(paths) -> dict[str, object] | None:
+    """Read the identity profiles document; the file's presence is the opt-in.
+
+    Same I/O boundary as `_operator_category_config`: the loader's `rejected`
+    notes are named on stderr so a dropped profile is visible during the
+    prepare/route/run that could not use it, while stdout keeps the JSON
+    contracts clean. Absent or validates-to-nothing returns None.
+    """
+    from ..coding.identity_profiles import read_identity_profiles_config
+
+    rejected: list[str] = []
+    config = read_identity_profiles_config(paths.omh_home, rejected_out=rejected)
+    for note in rejected:
+        print(f"omh: identities: ignored {note}", file=sys.stderr)
+    return config
+
+
+def _declared_identity_config(paths, identity: str | None) -> dict[str, object] | None:
+    """The identity document, refusing an `--identity` it does not hold.
+
+    Without this an unknown name (a typo, or a profile the loader dropped)
+    resolves to the executor's default model with exit 0, and the handoff
+    runs on a model nobody chose.
+    """
+    from ..coding.fanout import require_known_identity
+    from ..coding.fanout_contracts import FanoutContractError
+
+    config = _operator_identity_config(paths)
+    try:
+        require_known_identity(str(identity or ""), config, where="--identity")
+    except FanoutContractError as exc:
+        raise OmhError(str(exc)) from exc
     return config
 
 
@@ -1750,9 +2009,13 @@ def cmd_coding_model_contract(args: argparse.Namespace) -> int:
         if contract.get("unsupported_parameters_note"):
             print(f"  {contract['unsupported_parameters_note']}")
     cutoff = str(contract.get("knowledge_cutoff", "") or "")
+    # A generative model cannot have a zero output limit, so 0 there means the
+    # vendor publishes none (Grok 4.7); a non-generative 0 is documented.
+    output = contract["max_output_tokens"]
+    unstated = output == 0 and str(contract.get("model_class", "")) != NON_GENERATIVE_MODEL_CLASS
     print(
         f"- context {contract['context_window_tokens']:,} tokens; input {contract['max_input_tokens']:,}; "
-        f"output {contract['max_output_tokens']:,}"
+        + ("output not stated" if unstated else f"output {output:,}")
         + (f"; knowledge cutoff {cutoff}" if cutoff else "; knowledge cutoff not stated")
     )
     if str(contract.get("model_class", "")) == NON_GENERATIVE_MODEL_CLASS:
@@ -1906,8 +2169,10 @@ def cmd_coding_fanout_prepare(args: argparse.Namespace) -> int:
             source_metadata=_explicit_source_metadata(args),
             local_catalogs=_local_model_catalogs() if needs_inventory else {},
             category_config=_operator_category_config(paths),
+            identity_config=_operator_identity_config(paths),
             capability_snapshots=capability_snapshots,
             spawn_plan=spawn_plan,
+            registry=_loaded_executor_registry(args),
         )
     except (FanoutContractError, ExecutorCapabilitySnapshotError) as exc:
         raise OmhError(str(exc)) from exc
@@ -1939,7 +2204,7 @@ def cmd_coding_fanout_validate(args: argparse.Namespace) -> int:
         # an empty stdout, and a wrapper following this command's documented
         # contract parsed that empty string as JSON.
         units = [_normalized_unit(unit, index) for index, unit in enumerate(raw_units)]
-        validate_fanout_units(units)
+        validate_fanout_units(units, registry=_loaded_executor_registry(args))
         # Same checks `prepare` runs, in the same order, so `validate` cannot
         # report a split that `prepare` will then refuse to freeze — including
         # the spawn-plan gate running last, after the structural ones.
@@ -2148,6 +2413,26 @@ def _brief_recovery(dispatched: dict) -> dict[str, object]:
     return brief
 
 
+def _brief_owner(owner_value: object, handoff: dict, admitted: tuple[str, ...]) -> str:
+    """The unit's owner, kept as recorded even after the definition is removed.
+
+    A contract freezes `handoff.user_executor` when the definition exists, and
+    dispatch refuses a binding that no longer matches. Reading only the live
+    registry here would rewrite history -- an uninstalled executor would make
+    every briefed unit claim `choose`, the one answer that says nobody was
+    ever assigned. The frozen id wins when it is a well-formed id that also
+    matches the unit's own `owner`; otherwise the live admission rule applies.
+    """
+    from ..coding.user_executors import valid_executor_id
+
+    owner = owner_value if isinstance(owner_value, str) else ""
+    binding = handoff.get("user_executor") if isinstance(handoff, dict) else None
+    bound_id = binding.get("id") if isinstance(binding, dict) else None
+    if isinstance(bound_id, str) and bound_id == owner and valid_executor_id(bound_id):
+        return bound_id
+    return owner if owner and owner in admitted else "choose"
+
+
 def _bounded_fanout_brief_scalar(value: object) -> str:
     from ..system.metadata_safety import redact_metadata_text
 
@@ -2187,7 +2472,7 @@ def _fanout_summary_diagnostic(
 def cmd_coding_fanout_brief(args: argparse.Namespace) -> int:
     from ..coding.fanout_artifacts import fanout_dispatch_summary_path, read_fanout_contract
     from ..coding.fanout_capacity import read_capacity_fields
-    from ..coding.fanout_contracts import FANOUT_UNIT_OWNERS, PREPARED_NOT_OBSERVED
+    from ..coding.fanout_contracts import PREPARED_NOT_OBSERVED
     from ..coding.status_board import model_label_for
     from ..workflows.observation_journal import failure_diagnostic_text
     from ..system.local_store import read_json_object_result
@@ -2222,6 +2507,7 @@ def cmd_coding_fanout_brief(args: argparse.Namespace) -> int:
     # units missing from the plan (defensive only) keep their contract order.
     order_index = {unit_id: index for index, unit_id in enumerate(merge_order)}
     contract_units.sort(key=lambda unit: order_index.get(str(unit.get("unit_id", "")), len(order_index)))
+    admitted = _admitted_owner_ids(_loaded_executor_registry(args))
     for unit in contract_units:
         unit_id = str(unit.get("unit_id", ""))
         handoff = unit.get("handoff", {}) if isinstance(unit.get("handoff"), dict) else {}
@@ -2257,7 +2543,7 @@ def cmd_coding_fanout_brief(args: argparse.Namespace) -> int:
         selected_effort = model_route.get("selected_reasoning_effort", "")
         model_id = _bounded_fanout_brief_scalar(selected_model)
         effort = _bounded_fanout_brief_scalar(selected_effort)
-        # One human-readable label per subagent, e.g. "gpt-5.6-sol xhigh" —
+        # One human-readable label per subagent, e.g. "gpt-6.1-sol xhigh" —
         # what a briefing renders next to the unit without joining two fields.
         # The format is a stable part of fanout_briefing/v1 and is built by
         # the same `model_label_for` helper the status board uses, so the two
@@ -2270,11 +2556,7 @@ def cmd_coding_fanout_brief(args: argparse.Namespace) -> int:
         route_schema_version = model_route.get("schema_version", "")
         route_version = _bounded_fanout_brief_scalar(route_schema_version)
         owner_value = unit.get("owner")
-        owner = (
-            owner_value
-            if isinstance(owner_value, str) and owner_value in FANOUT_UNIT_OWNERS
-            else "choose"
-        )
+        owner = _brief_owner(owner_value, handoff, admitted)
         units.append(
             {
                 "unit_id": unit_id,
@@ -2666,7 +2948,7 @@ def _record_fanout_board_emission(paths, watched_runs: list[str], payload: dict,
         )
 
 
-def _failure_recovery_kwargs(args: argparse.Namespace) -> dict:
+def _failure_recovery_kwargs(args: argparse.Namespace, registry: ExecutorRegistry) -> dict:
     """Resolve the failure-recovery inputs the dispatch engine takes.
 
     The interview runs only when `--on-failure` is left at `report` AND stdin is
@@ -2679,18 +2961,17 @@ def _failure_recovery_kwargs(args: argparse.Namespace) -> dict:
         OnFailureModeError,
         parse_on_failure,
     )
-    from ..executors import EXECUTOR_PROFILES
 
     try:
         mode, target_owner = parse_on_failure(
-            getattr(args, "on_failure", "") or "", known_owners=EXECUTOR_PROFILES
+            getattr(args, "on_failure", "") or "", known_owners=_admitted_owner_ids(registry)
         )
     except OnFailureModeError as exc:
         raise OmhError(str(exc)) from exc
     interactive = (
         mode == ON_FAILURE_REPORT
         and not getattr(args, "no_interactive", False)
-        and sys.stdin.isatty()
+        and stdin_is_tty()
     )
     routing = {
         "model": getattr(args, "hermes_model", "") or "",
@@ -2791,6 +3072,8 @@ def cmd_coding_fanout_dispatch(
 ) -> int:
     import subprocess as _subprocess
 
+    _refuse_remote_pr(args)
+
     from ..coding.fanout_artifacts import (
         read_fanout_contract,
         read_fanout_contract_provenance,
@@ -2800,7 +3083,8 @@ def cmd_coding_fanout_dispatch(
     from ..coding.parallelism_policy import read_parallelism_policy, resolve_fanout_concurrency
 
     paths = _paths(args)
-    recovery_kwargs = _failure_recovery_kwargs(args)
+    registry = _loaded_executor_registry(args)
+    recovery_kwargs = _failure_recovery_kwargs(args, registry)
     environment_policy = child_environment_policy_from_args(args)
     selected_diagnostic_engine = (
         (diagnostic_engine or build_local_diagnostic_engine(allow_unconfined=bool(args.allow_unconfined)))
@@ -2870,6 +3154,7 @@ def cmd_coding_fanout_dispatch(
             contract,
             only_units=args.unit,
             goal_text=goal_text,
+            executor_entries=registry.entries,
         )
     except ValueError as exc:
         raise OmhError(str(exc)) from exc
@@ -2877,6 +3162,7 @@ def cmd_coding_fanout_dispatch(
         summary = dispatch_fanout(
             paths,
             contract,
+            executor_entries=registry.entries,
             goal_text=goal_text,
             repo_root=repo_root,
             base_sha="",
@@ -2919,6 +3205,7 @@ def cmd_coding_fanout_dispatch(
         summary = dispatch_fanout(
             paths,
             contract,
+            executor_entries=registry.entries,
             goal_text=goal_text,
             repo_root=repo_root,
             base_sha=resolved.stdout.strip(),
@@ -2979,6 +3266,8 @@ def cmd_coding_run(args: argparse.Namespace) -> int:
     separate propose/freeze step to expose to a caller that already knows
     what it wants run.
     """
+    _refuse_remote_pr(args)
+
     import subprocess as _subprocess
 
     from ..coding.executor_capability_snapshots import (
@@ -3026,7 +3315,20 @@ def cmd_coding_run(args: argparse.Namespace) -> int:
         # table exactly like a fanout unit's `category` field; `--model` still
         # wins (requested > category chain head).
         "category": getattr(args, "category", None) or "",
+        # A declared `--identity` routes this unit through the same
+        # `omh_identity_profiles/v1` chain a fanout unit's `identity` field
+        # uses; `--model` still wins over the chain head.
+        "identity": getattr(args, "identity", None) or "",
     }
+    # The shorthand's only way to declare acceptance (#2461). Frozen through
+    # the same `verification_commands` field a fanout unit uses, so the
+    # freeze-time checks (count, length, no shell operators) apply unchanged.
+    verification_commands = list(getattr(args, "verification_command", None) or [])
+    if verification_commands:
+        unit["verification_commands"] = verification_commands
+    registry = _loaded_executor_registry(args)
+    if args.owner in registry.entries and not user_executors.USER_EXECUTOR_LAUNCH_SUPPORTED:
+        raise OmhError(user_executors.USER_EXECUTOR_PLATFORM_UNSUPPORTED)
     needs_inventory = args.owner not in EXECUTOR_MODEL_OPTIONS
     try:
         capability_snapshots = {
@@ -3042,7 +3344,9 @@ def cmd_coding_run(args: argparse.Namespace) -> int:
             source_metadata=_explicit_source_metadata(args),
             local_catalogs=_local_model_catalogs() if needs_inventory else {},
             category_config=_operator_category_config(paths),
+            identity_config=_operator_identity_config(paths),
             capability_snapshots=capability_snapshots,
+            registry=registry,
         )
     except (FanoutContractError, ExecutorCapabilitySnapshotError) as exc:
         raise OmhError(str(exc)) from exc
@@ -3071,6 +3375,7 @@ def cmd_coding_run(args: argparse.Namespace) -> int:
         summary = dispatch_fanout(
             paths,
             contract,
+            executor_entries=registry.entries,
             goal_text=goal_text,
             repo_root=repo_root,
             base_sha=resolved.stdout.strip(),
@@ -3083,10 +3388,12 @@ def cmd_coding_run(args: argparse.Namespace) -> int:
             max_retries=parallelism["max_retries"],
             timeout=args.timeout,
             dry_run=bool(args.dry_run),
-            run_verification=bool(args.run_verification),
+            # A check declared on this command line is a request to run it: a
+            # declared check left unrun would only end the unit `unverified`.
+            run_verification=bool(args.run_verification or verification_commands),
             allow_unconfined=bool(args.allow_unconfined),
             environment_policy=environment_policy,
-            **_failure_recovery_kwargs(args),
+            **_failure_recovery_kwargs(args, registry),
         )
     except ValueError as exc:
         raise OmhError(str(exc)) from exc
@@ -3392,6 +3699,40 @@ def _add_failure_recovery_arguments(parser) -> None:
     parser.add_argument("--hermes-reasoning", default="", help="Hermes reasoning alias for recovery or final-review lanes.")
 
 
+def _add_executors_commands(coding_sub) -> None:
+    executors = coding_sub.add_parser(
+        "executors",
+        help="List, opt in to, remove, and check user-declared or preset coding harness executors.",
+    )
+    executors_sub = executors.add_subparsers(dest="executors_command", required=True)
+
+    listing = executors_sub.add_parser(
+        "list",
+        help="Built-ins, enabled entries, available presets and rejected entries with reasons. Never probes.",
+    )
+    listing.add_argument("--json", action="store_true", help="Print the coding_executors/v1 payload.")
+    listing.set_defaults(func=cmd_coding_executors_list)
+
+    add = executors_sub.add_parser(
+        "add",
+        help="Opt in to one shipped preset by writing a reference into the OMH home. Installs nothing.",
+    )
+    add.add_argument("preset", help="Preset id (see `omh coding executors list`).")
+    add.add_argument("--force", action="store_true", help="Re-write an existing reference to the same preset.")
+    add.set_defaults(func=cmd_coding_executors_add)
+
+    remove = executors_sub.add_parser("remove", help="Remove one configured executor entry from the OMH home.")
+    remove.add_argument("executor_id", help="Configured executor id to remove.")
+    remove.set_defaults(func=cmd_coding_executors_remove)
+
+    check = executors_sub.add_parser(
+        "check",
+        help="Validate and version-probe one configured executor (or all enabled ones). Probes local binaries only.",
+    )
+    check.add_argument("executor_id", nargs="?", default=None, help="Configured executor id; omit to check all.")
+    check.set_defaults(func=cmd_coding_executors_check)
+
+
 def _add_coding_commands(sub) -> None:
     from .paired_run import add_coding_paired_run_command
     from .work_campaign import add_work_campaign_command
@@ -3400,6 +3741,7 @@ def _add_coding_commands(sub) -> None:
     coding_sub = coding.add_subparsers(dest="coding_command", required=True)
     add_coding_paired_run_command(coding_sub)
     add_work_campaign_command(coding_sub)
+    _add_executors_commands(coding_sub)
 
     fanout = coding_sub.add_parser(
         "fanout",
@@ -3437,7 +3779,7 @@ def _add_coding_commands(sub) -> None:
         "--report-dir",
         help="Directory for the per-range report files that bound each derived unit (default reports/document-plan-<plan_id>).",
     )
-    fanout_prepare.add_argument("--owner", help="Coding owner for every derived unit (default unassigned).")
+    fanout_prepare.add_argument("--owner", type=canonical_executor_profile, help="Coding owner for every derived unit (default unassigned).")
     fanout_prepare.add_argument("--source", choices=CHAT_SOURCES, default="generic")
     fanout_prepare.add_argument("--record", action="store_true", help="Persist the contract under ~/.omh/coding/fanout/.")
     fanout_prepare.set_defaults(func=cmd_coding_fanout_prepare)
@@ -3492,6 +3834,12 @@ def _add_coding_commands(sub) -> None:
         ),
     )
     fanout_dispatch.add_argument("--timeout", type=int, default=1800, help="Per-unit subprocess timeout in seconds.")
+    fanout_dispatch.add_argument(
+        "--allow-remote-pr",
+        action="store_true",
+        default=False,
+        help="Reserved for the remote PR lane; refused until that lane is available.",
+    )
     fanout_dispatch.add_argument("--unit", action="append", default=None, help="Dispatch only these unit ids (repeatable).")
     fanout_dispatch.add_argument("--dry-run", action="store_true", help="Resolve readiness, argv, and worktree paths; spawn nothing.")
     fanout_dispatch.add_argument(
@@ -3680,9 +4028,9 @@ def _add_coding_commands(sub) -> None:
     )
     run_cmd.add_argument(
         "--owner",
-        choices=EXECUTOR_PROFILES,
+        type=canonical_executor_profile,
         required=True,
-        help="The coding owner explicitly chosen for this run.",
+        help="The coding owner explicitly chosen for this run: a built-in or a configured executor id.",
     )
     run_goal = run_cmd.add_mutually_exclusive_group(required=True)
     run_goal.add_argument("--goal", nargs="+", help="Task/prompt text for this run.")
@@ -3698,11 +4046,28 @@ def _add_coding_commands(sub) -> None:
     run_cmd.add_argument("--repo-root", default=".", help="Repository the unit worktree branches from.")
     run_cmd.add_argument("--base-ref", default="HEAD", help="Ref resolved once to a SHA the unit branch starts from.")
     run_cmd.add_argument("--timeout", type=int, default=1800, help="Subprocess timeout in seconds.")
+    run_cmd.add_argument(
+        "--allow-remote-pr",
+        action="store_true",
+        default=False,
+        help="Reserved for the remote PR lane; refused until that lane is available.",
+    )
     run_cmd.add_argument("--dry-run", action="store_true", help="Resolve readiness, argv, and worktree paths; spawn nothing.")
     run_cmd.add_argument(
         "--run-verification",
         action="store_true",
         help="Run the unit's contract verification_commands in its worktree after the process exits 0.",
+    )
+    run_cmd.add_argument(
+        "--verification-command",
+        action="append",
+        default=None,
+        metavar="COMMAND",
+        help=(
+            "A check the dispatcher runs in the unit's worktree after the process exits 0 and its result "
+            "validates (repeatable, one command each, run without a shell; at most 8). Declaring one "
+            "implies --run-verification. Without any, the unit can end `unverified`, never `verified`."
+        ),
     )
     run_cmd.add_argument(
         "--allow-unconfined",
@@ -3729,10 +4094,19 @@ def _add_coding_commands(sub) -> None:
         "--category",
         default=None,
         help=(
-            "OMO/ULW model category for this run (ultrabrain, deep, deep-work, architect, capable, "
+            "ULW model category for this run (ultrabrain, deep, deep-work, architect, capable, "
             "quick, simple-work, writing, visual-engineering, artistry, unspecified-high, "
-            "unspecified-low); resolved through the "
+            "unspecified-low, google-search, x-search, review, swarm, forensics, synthesize); "
+            "resolved through the "
             "category-maestro table when one is configured. --model still wins."
+        ),
+    )
+    run_cmd.add_argument(
+        "--identity",
+        default=None,
+        help=(
+            "Identity profile name from routing/identities.json; resolves the run's model "
+            "through that profile's declared chain. --model still wins over the chain head."
         ),
     )
     _add_failure_recovery_arguments(run_cmd)
@@ -3744,6 +4118,7 @@ def _add_coding_commands(sub) -> None:
     )
     model_route.add_argument(
         "--executor",
+        type=canonical_executor_profile,
         default=None,
         help="Executor profile, for example codex or claude-code. Required unless --explain is given.",
     )
@@ -3753,14 +4128,23 @@ def _add_coding_commands(sub) -> None:
         help="Explicit model id; passes through unvalidated, except a `non_generative` model, which is refused.",
     )
     model_route.add_argument("--effort", default=None, help="Reasoning effort for profiles that support one.")
+    model_route.add_argument(
+        "--identity",
+        default=None,
+        help=(
+            "Identity profile name from routing/identities.json; resolves the route "
+            "through that profile's declared chain. --model still wins over the chain head."
+        ),
+    )
     model_route.add_argument("--role", default=None, help="Subagent role: brain, implementation, design_visual, review, docs, research.")
     model_route.add_argument(
         "--category",
         default=None,
         help=(
-            "OMO/ULW model category, orthogonal to role: visual-engineering, ultrabrain, deep, "
+            "ULW model category, orthogonal to role: visual-engineering, ultrabrain, deep, "
             "deep-work, architect, capable, artistry, quick, simple-work, unspecified-low, "
-            "unspecified-high, or writing; ulw-* aliases accepted."
+            "unspecified-high, writing, google-search, x-search, review, swarm, forensics, "
+            "or synthesize; ulw-* aliases accepted."
         ),
     )
     model_route.add_argument(
@@ -3822,14 +4206,14 @@ def _add_coding_commands(sub) -> None:
         help=(
             "Model category (ultrabrain, deep, deep-work, architect, capable, quick, "
             "simple-work, writing, visual-engineering, artistry, unspecified-high, "
-            "unspecified-low)."
+            "unspecified-low, google-search, x-search, review, swarm, forensics, synthesize)."
         ),
     )
     category_maestro_set.add_argument(
         "chain",
         nargs="+",
         help=(
-            "Chain entries in order, each `model[:effort]`, e.g. gpt-5.6-sol:xhigh. The tail after the "
+            "Chain entries in order, each `model[:effort]`, e.g. gpt-6.2-sol:xhigh. The tail after the "
             "last colon is taken as the effort only when it is a known level (off, minimal, low, medium, "
             "high, xhigh, max, auto); other colon tags stay part of the model id."
         ),
@@ -3852,12 +4236,12 @@ def _add_coding_commands(sub) -> None:
 
     model_routing = coding_sub.add_parser(
         "model-routing",
-        help="Inspect local model routing readiness or reset owner-learning metadata.",
+        help="Inspect local model routing readiness or reset stored owner-choice metadata.",
     )
     model_routing_sub = model_routing.add_subparsers(dest="model_routing_command", required=True)
     model_routing_status = model_routing_sub.add_parser(
         "status",
-        help="Explain discovered/confirmed models, Hermes aliases, Maestro recommendations, and owner learning.",
+        help="Explain discovered/confirmed models, Hermes aliases, Maestro recommendations, and stored owner choices.",
     )
     model_routing_status.add_argument(
         "--discovery-home",
@@ -3868,7 +4252,7 @@ def _add_coding_commands(sub) -> None:
     model_routing_status.set_defaults(func=cmd_coding_model_routing_status)
     model_routing_reset = model_routing_sub.add_parser(
         "reset",
-        help="Reset one learned coding-owner preference; no model/provider configuration is changed.",
+        help="Clear one route's stored coding-owner choices (they select no owner); no model/provider configuration is changed.",
     )
     model_routing_reset.add_argument("--route-family", required=True, help="Opaque route-family id to reset.")
     model_routing_reset.add_argument("--reason", default="operator_reset", help="Opaque metadata reason for the reset.")
@@ -3965,10 +4349,11 @@ def _add_coding_commands(sub) -> None:
     composition_guide.add_argument(
         "--model",
         default=None,
-        help="The main agent's own model id (for example claude-fable-5-1, gpt-5.6-sol, kimi-k3); omit to list all families.",
+        help="The main agent's own model id (for example claude-fable-5-2, gpt-5.6-sol, kimi-k3); omit to list all families.",
     )
     composition_guide.add_argument(
         "--executor",
+        type=canonical_executor_profile,
         default=None,
         help="Executor profile the composer prepares for; selects the per-turn or mid-conversation effort policy for models with a documented contract.",
     )
@@ -3982,10 +4367,11 @@ def _add_coding_commands(sub) -> None:
     model_contract.add_argument(
         "--model",
         required=True,
-        help="Exact or explicitly declared model id, provider prefix welcome (for example gpt-6-astra, openai/gpt-6-astra-pro-fast).",
+        help="Exact or explicitly declared model id, provider prefix welcome (for example gpt-6.2-astra, openai/gpt-6-astra-pro-fast).",
     )
     model_contract.add_argument(
         "--executor",
+        type=canonical_executor_profile,
         default=None,
         help="Executor profile to resolve the effort policy against; omit for the per-turn policy.",
     )
@@ -4006,6 +4392,7 @@ def _add_coding_commands(sub) -> None:
     delegate.add_argument("--limit", type=int, default=3, help="Maximum catalog recommendations to include.")
     delegate.add_argument(
         "--executor",
+        type=canonical_executor_profile,
         choices=CODING_EXECUTOR_TARGETS,
         default=None,
         help="Optional coding executor target for wrapper handoff payloads.",
@@ -4093,6 +4480,15 @@ def _add_coding_commands(sub) -> None:
         help="Reasoning effort already chosen for this request; supersedes the recommended effort.",
     )
     delegate.add_argument(
+        "--identity",
+        default=None,
+        help=(
+            "Identity profile name from routing/identities.json; resolves a bounded "
+            "model_route for this handoff through that profile's declared chain. "
+            "--model still wins over the chain head."
+        ),
+    )
+    delegate.add_argument(
         "--input-representation",
         action="append",
         default=None,
@@ -4156,7 +4552,7 @@ def _add_coding_commands(sub) -> None:
         help="Source surface that received the coding request.",
     )
     lifecycle_start.add_argument("--limit", type=int, default=3, help="Maximum catalog recommendations to include.")
-    lifecycle_start.add_argument("--executor", choices=CODING_EXECUTOR_TARGETS, default="codex", help="Coding executor target.")
+    lifecycle_start.add_argument("--executor", type=canonical_executor_profile, choices=CODING_EXECUTOR_TARGETS, default="codex", help="Coding executor target.")
     lifecycle_start.add_argument("--record", action="store_true", help="Record a metadata-only prepared lifecycle run.")
     lifecycle_start.add_argument("--stdin", action="store_true", help="Read the raw coding task from stdin.")
     lifecycle_start.add_argument(
@@ -4217,7 +4613,7 @@ def _add_coding_commands(sub) -> None:
         "executor-readiness",
         help="Probe or preview first-use coding agent readiness for wrapper fallback decisions.",
     )
-    readiness.add_argument("--executor", choices=EXECUTOR_READINESS_PROFILES, required=True)
+    readiness.add_argument("--executor", type=canonical_executor_profile, required=True, help="A built-in profile or a configured executor id.")
     readiness.add_argument("--force", action="store_true", help="Run the probe even if a first-use result is already cached.")
     readiness.add_argument("--dry-run", action="store_true", help="Return the probe contract without running or caching it.")
     readiness.set_defaults(func=cmd_coding_executor_readiness)
@@ -4231,6 +4627,7 @@ def _add_coding_commands(sub) -> None:
     )
     executor_skills.add_argument(
         "--profile",
+        type=canonical_executor_profile,
         choices=EXECUTOR_PROFILES,
         required=True,
         help="Coding-agent profile to probe. Hermes-native selection is rejected; maestro never routes it here.",
@@ -4275,6 +4672,7 @@ def _add_capability_snapshot_commands(coding_sub) -> None:
 def _add_capability_snapshot_build_arguments(parser) -> None:
     parser.add_argument(
         "--executor",
+        type=canonical_executor_profile,
         choices=_CAPABILITY_SNAPSHOT_EXECUTOR_TARGETS,
         required=True,
         help="Selected coding executor profile.",
@@ -4290,6 +4688,7 @@ def _add_capability_snapshot_build_arguments(parser) -> None:
 def _add_capability_snapshot_read_arguments(parser) -> None:
     parser.add_argument(
         "--executor",
+        type=canonical_executor_profile,
         choices=_CAPABILITY_SNAPSHOT_EXECUTOR_TARGETS,
         required=True,
         help="Selected coding executor profile.",

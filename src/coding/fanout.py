@@ -7,6 +7,7 @@ from typing import Mapping, Sequence
 
 from ..ingress import compact_source_metadata
 from ..plugin_bundle.omh import dag_core
+from .executors import canonical_executor_profile
 from .fanout_contracts import (
     FANOUT_CLAIM_BOUNDARY,
     FANOUT_CONTRACT_SCHEMA_VERSION,
@@ -24,13 +25,15 @@ from .fanout_contracts import (
     MAX_SPAWN_PLAN_FIELD_CHARS,
     MAX_UNIT_VERIFICATION_CHECK_ID_CHARS,
     MAX_UNIT_VERIFICATION_CHECK_TIMEOUT,
-    MAX_UNIT_VERIFICATION_COMMAND_CHARS,
+    MAX_UNIT_VERIFICATION_COMMAND_BYTES,
     MAX_UNIT_INPUT_BUDGET_CHARS,
     MAX_UNIT_SOURCE_RANGE_DIGEST_CHARS,
     MAX_UNIT_SOURCE_RANGE_SOURCE_CHARS,
     MAX_UNIT_SOURCE_RANGE_SPAN_CHARS,
     MAX_UNIT_SOURCE_RANGES,
     MAX_UNIT_VERIFICATION_COMMANDS,
+    contract_text_utf8_bytes,
+    MAX_UNIT_REVIEW_FOCUS_BYTES,
     PREPARED_NOT_OBSERVED,
     REPRODUCTION_UNIT_KIND,
     UNIT_SOURCE_RANGE_KEYS,
@@ -40,6 +43,7 @@ from .fanout_contracts import (
     is_verification_check_resource_class,
     VERIFICATION_CHECK_SAFETIES,
     VERIFICATION_CHECK_TIERS,
+    require_shell_free_command,
     verification_command_argv,
 )
 from .executor_capability_snapshots import (
@@ -55,6 +59,9 @@ from .media_handoff_capabilities import build_executor_modality_decision, normal
 
 _UNIT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _VERIFICATION_CHECK_ID_RE = re.compile(VERIFICATION_CHECK_ID_PATTERN)
+# Same token shape `omh_identity_profiles/v1` uses for identity names; units
+# declaring a name outside it can never resolve, so the freeze refuses them.
+_IDENTITY_NAME_RE = re.compile(r"^[a-z0-9_-]{1,64}$")
 _FROZEN_CAPABILITY_SNAPSHOT_POLICY = "frozen_required"
 
 
@@ -66,14 +73,18 @@ def build_fanout_contract(
     source_metadata: Mapping[str, object] | None = None,
     local_catalogs: Mapping[str, Mapping[str, object]] | None = None,
     category_config: Mapping[str, object] | None = None,
+    identity_config: Mapping[str, object] | None = None,
     capability_snapshots: Mapping[str, Mapping[str, object]] | None = None,
     spawn_plan: Mapping[str, object] | None = None,
+    registry: object | None = None,
 ) -> dict[str, object]:
     normalized_goal = " ".join(goal.split())
     if not normalized_goal:
         raise FanoutContractError("fanout goal is required")
     normalized_units = [_normalized_unit(unit, index) for index, unit in enumerate(units)]
-    validate_fanout_units(normalized_units)
+    validate_fanout_units(normalized_units, registry=registry)
+    for unit in normalized_units:
+        require_known_identity(str(unit.get("identity", "") or ""), identity_config, where=f"unit {unit['unit_id']}")
     validated_capability_snapshots = _validated_capability_snapshots(
         capability_snapshots,
         normalized_units,
@@ -97,7 +108,9 @@ def build_fanout_contract(
             fanout_id=fanout_id,
             local_catalogs=local_catalogs,
             category_config=category_config,
+            identity_config=identity_config,
             capability_snapshots=validated_capability_snapshots,
+            registry=registry,
         )
         for unit in normalized_units
     ]
@@ -207,11 +220,61 @@ def _frozen_safety_profile_revision() -> str:
     return safety_profile_revision()
 
 
-def validate_fanout_units(units: Sequence[Mapping[str, object]]) -> None:
+def require_known_identity(
+    identity: str, identity_config: Mapping[str, object] | None, *, where: str = ""
+) -> None:
+    """Refuse a declared identity the validated document does not hold.
+
+    The resolver alone falls through to the executor default on an unknown
+    name, so a typo in `--identity` would freeze a contract that runs on a
+    model nobody chose. `omh_delegate_route` already answers
+    `choice_required` for the same input; the CLI and fanout freeze refuse it
+    the way an unknown `category` is refused.
+    """
+    name = str(identity or "").strip()
+    if not name:
+        return
+    raw = identity_config.get("identities") if isinstance(identity_config, Mapping) else None
+    profile = raw.get(name) if isinstance(raw, Mapping) else None
+    if isinstance(profile, Mapping) and profile.get("enabled", True) is not False:
+        return
+    prefix = f"{where} " if where else ""
+    state = "disabled in" if isinstance(profile, Mapping) else "not in"
+    available = sorted(
+        name
+        for name, profile in raw.items()
+        if isinstance(profile, Mapping) and profile.get("enabled", True) is not False
+    ) if isinstance(raw, Mapping) else []
+    raise FanoutContractError(
+        f"{prefix}identity {name!r} is {state} the validated identities.json; "
+        f"available: {', '.join(available) or '(none)'}"
+    )
+
+
+def admitted_unit_owner_ids(registry: object | None = None) -> tuple[str, ...]:
+    """The owner ids this freeze admits: built-ins, plus configured ids if given.
+
+    `registry` is the caller's already-loaded `ExecutorRegistry` for the
+    resolved home. Absent means built-ins only -- never "guess the home",
+    because a freeze must not read ambient operator config to admit a name.
+    """
+    if registry is None:
+        return tuple(FANOUT_UNIT_OWNERS)
+    from .user_executors import fanout_owner_ids
+
+    return fanout_owner_ids(registry)
+
+
+def validate_fanout_units(
+    units: Sequence[Mapping[str, object]],
+    *,
+    registry: object | None = None,
+) -> None:
     if len(units) < 1:
         raise FanoutContractError("fanout requires at least one unit")
     seen: set[str] = set()
     known = {str(unit.get("unit_id", "")) for unit in units}
+    admitted = admitted_unit_owner_ids(registry)
     for unit in units:
         unit_id = str(unit.get("unit_id", ""))
         if not _UNIT_ID_RE.match(unit_id):
@@ -220,9 +283,13 @@ def validate_fanout_units(units: Sequence[Mapping[str, object]]) -> None:
             raise FanoutContractError(f"duplicate unit_id: {unit_id}")
         seen.add(unit_id)
         owner = unit.get("owner")
-        if owner is not None and str(owner) not in FANOUT_UNIT_OWNERS:
+        if owner is not None and not isinstance(owner, str):
             raise FanoutContractError(
-                f"unit {unit_id} owner {owner!r} is not one of {', '.join(FANOUT_UNIT_OWNERS)} (or null for unassigned)"
+                f"unit {unit_id} owner must be a string id or null, not {type(owner).__name__}"
+            )
+        if owner is not None and str(owner) not in admitted:
+            raise FanoutContractError(
+                f"unit {unit_id} owner {owner!r} is not one of {', '.join(admitted)} (or null for unassigned)"
             )
         file_scope = unit.get("file_scope", [])
         if not isinstance(file_scope, (list, tuple)) or not [str(path) for path in file_scope if str(path).strip()]:
@@ -231,6 +298,15 @@ def validate_fanout_units(units: Sequence[Mapping[str, object]]) -> None:
         if category and not canonical_model_category(category):
             raise FanoutContractError(
                 f"unit {unit_id} category {category!r} is not one of {', '.join(MODEL_CATEGORIES)}"
+            )
+        identity = str(unit.get("identity", "") or "").strip()
+        if identity and not _IDENTITY_NAME_RE.match(identity):
+            # Same freeze-time discipline as `category`: a name that cannot
+            # match the `omh_identity_profiles/v1` token shape would freeze as
+            # an `unknown` route, hiding the typo inside a prepared contract.
+            raise FanoutContractError(
+                f"unit {unit_id} identity {identity!r} is not a valid identity name "
+                "([a-z0-9_-]{1,64})"
             )
         dependencies = list(unit.get("depends_on", []) or [])
         names = [str(dependency) for dependency in dependencies]
@@ -429,6 +505,11 @@ def _normalized_unit(unit: Mapping[str, object], index: int) -> dict[str, object
     file_scope = [str(path).strip() for path in unit.get("file_scope", []) or [] if str(path).strip()]
     depends_on = [str(dependency).strip() for dependency in unit.get("depends_on", []) or [] if str(dependency).strip()]
     owner = unit.get("owner")
+    if owner is not None and not isinstance(owner, str):
+        # A frozen owner is an exact plain id. Stringifying a mapping or a list
+        # would freeze a name no dispatcher admits, hiding the mistake inside a
+        # prepared contract.
+        raise FanoutContractError(f"unit at index {index} owner must be a string id or null")
     raw_role = str(unit.get("role", "") or "").strip()
     review_role = normalized_review_role(raw_role)
     checks = _normalized_verification_checks(unit.get("verification_checks"), index)
@@ -447,17 +528,22 @@ def _normalized_unit(unit: Mapping[str, object], index: int) -> dict[str, object
         # '' when undeclared; `reproduction` is the only declared kind.
         "kind": kind,
         "reproduction_command": reproduction_command,
-        "owner": str(owner) if owner is not None and str(owner).strip() else None,
+        "owner": canonical_executor_profile(str(owner)) if owner is not None and str(owner).strip() else None,
         "file_scope": sorted(set(file_scope)),
         "depends_on": sorted(set(depends_on)),
         "model": str(unit.get("model", "") or "").strip(),
         "reasoning_effort": str(unit.get("reasoning_effort", "") or "").strip(),
         "role": "review" if review_role is not None else raw_role,
         "review_role": review_role or "",
-        # `category` accepts the OMO/ULW ulw-* aliases the resolver already
+        # `category` accepts the ULW ulw-* aliases the resolver already
         # normalizes; validate_fanout_units rejects unknown vocabulary so a
         # typo fails the freeze instead of silently routing by role only.
         "category": str(unit.get("category", unit.get("model_category", "")) or "").strip(),
+        # The unit's declared `omh_identity_profiles/v1` name: the explicit
+        # structured-handoff field for identity routing, resolved at freeze
+        # against the caller-read config so each unit's identity stays bound
+        # to its own task and never to ambient profile state.
+        "identity": str(unit.get("identity", "") or "").strip(),
         "scale": str(unit.get("scale", "") or "").strip(),
         "domain": str(unit.get("domain", "") or "").strip(),
         "depth": str(unit.get("depth", "") or "").strip(),
@@ -483,7 +569,22 @@ def _normalized_unit(unit: Mapping[str, object], index: int) -> dict[str, object
         # How many times the dispatcher may re-dispatch this unit in its own
         # worktree after observing a declared check fail; 0 when undeclared.
         "max_repair_attempts": normalized_max_repair_attempts(unit, index),
+        # What the reviewer will check in the unit's result; '' when undeclared.
+        "review_focus": _normalized_review_focus(unit.get("review_focus"), index),
     }
+
+
+def _normalized_review_focus(value: object, index: int) -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise FanoutContractError(f"unit at index {index} review_focus must be a string")
+    text = " ".join(value.split())
+    if contract_text_utf8_bytes(text, what=f"unit at index {index} review_focus") > MAX_UNIT_REVIEW_FOCUS_BYTES:
+        raise FanoutContractError(
+            f"unit at index {index} review_focus must be at most {MAX_UNIT_REVIEW_FOCUS_BYTES} UTF-8 bytes"
+        )
+    return text
 
 
 def _budget_int(mapping: Mapping[str, object], key: str, *, index: int, where: str, minimum: int, maximum: int) -> int | None:
@@ -642,13 +743,18 @@ def _normalized_verification_commands(value: object, index: int) -> list[str]:
                 f"got {entry!r}"
             )
         command = " ".join(entry.split())
-        if len(command) > MAX_UNIT_VERIFICATION_COMMAND_CHARS:
+        size = contract_text_utf8_bytes(command, what=f"unit at index {index} verification_commands entries")
+        if size > MAX_UNIT_VERIFICATION_COMMAND_BYTES:
             raise FanoutContractError(
                 f"unit at index {index} verification_commands entries must be at most "
-                f"{MAX_UNIT_VERIFICATION_COMMAND_CHARS} chars"
+                f"{MAX_UNIT_VERIFICATION_COMMAND_BYTES} UTF-8 bytes"
             )
         # Parsed at freeze time so a command no dispatcher could run fails here,
         # where the operator is still holding it, rather than mid-dispatch.
+        try:
+            require_shell_free_command(command)
+        except FanoutContractError as exc:
+            raise FanoutContractError(f"unit at index {index} {exc}") from exc
         verification_command_argv(command)
         commands.append(command)
     return commands
@@ -680,13 +786,17 @@ def _normalized_unit_kind(unit: Mapping[str, object], index: int) -> tuple[str, 
             f"unit at index {index} is a reproduction unit and requires a non-empty reproduction_command"
         )
     command = " ".join(raw_command.split())
-    if len(command) > MAX_UNIT_VERIFICATION_COMMAND_CHARS:
+    if contract_text_utf8_bytes(command, what=f"unit at index {index} reproduction_command") > MAX_UNIT_VERIFICATION_COMMAND_BYTES:
         raise FanoutContractError(
             f"unit at index {index} reproduction_command must be at most "
-            f"{MAX_UNIT_VERIFICATION_COMMAND_CHARS} chars"
+            f"{MAX_UNIT_VERIFICATION_COMMAND_BYTES} UTF-8 bytes"
         )
     # Parsed at freeze for the reason verification commands are: the
     # dispatcher runs it through the same argv split with `shell=False`.
+    try:
+        require_shell_free_command(command, field="reproduction_command")
+    except FanoutContractError as exc:
+        raise FanoutContractError(f"unit at index {index} {exc}") from exc
     verification_command_argv(command)
     return kind, command
 
@@ -834,13 +944,17 @@ def _contract_unit(
     fanout_id: str,
     local_catalogs: Mapping[str, Mapping[str, object]] | None = None,
     category_config: Mapping[str, object] | None = None,
+    identity_config: Mapping[str, object] | None = None,
     capability_snapshots: Mapping[str, Mapping[str, object]] | None = None,
+    registry: object | None = None,
 ) -> dict[str, object]:
     unit_id = str(unit["unit_id"])
     own_scope = set(str(path) for path in unit.get("file_scope", []))
     executor_target = str(unit.get("owner")) if unit.get("owner") else "choose"
     local_catalog = (local_catalogs or {}).get(executor_target)
-    model_route = model_route_for_unit(unit, executor_target, local_catalog, category_config)
+    model_route = model_route_for_unit(
+        unit, executor_target, local_catalog, category_config, identity_config
+    )
     handoff: dict[str, object] = {
         "schema_version": "fanout_unit_handoff/v1",
         "executor_target": executor_target,
@@ -861,6 +975,21 @@ def _contract_unit(
         handoff["executor_capability_snapshot_policy"] = _FROZEN_CAPABILITY_SNAPSHOT_POLICY
     if isinstance(capability_snapshot, Mapping):
         handoff["executor_capability_snapshot"] = deepcopy(dict(capability_snapshot))
+    # A user-declared owner alone carries its frozen binding. The digest names
+    # the exact definition this freeze was prepared against, so a later
+    # dispatch compares it with the one registry read it loaded and refuses
+    # before any probe or child when the entry changed or was removed. Built-in
+    # owners keep their existing snapshot marker and gain nothing here.
+    external_spec = (
+        (getattr(registry, "entries", None) or {}).get(executor_target)
+        if registry is not None and executor_target != "choose"
+        else None
+    )
+    if external_spec is not None:
+        handoff["user_executor"] = {
+            "id": str(getattr(external_spec, "id", "")),
+            "definition_sha256": str(getattr(external_spec, "definition_sha256", "")),
+        }
     representations = unit.get("input_representation", [])
     handoff["input_representation"] = deepcopy(representations)
     handoff["executor_modality_decision"] = build_executor_modality_decision(
@@ -927,4 +1056,7 @@ def _contract_unit(
     # none freezes byte-identically to one frozen before the field existed.
     if unit.get("max_repair_attempts"):
         contract_unit["max_repair_attempts"] = int(unit["max_repair_attempts"])  # type: ignore[call-overload]
+    # A review focus rides only when declared, for the same byte-identity reason.
+    if unit.get("review_focus"):
+        contract_unit["review_focus"] = str(unit["review_focus"])
     return contract_unit

@@ -32,6 +32,7 @@ from omh.coding.model_routing import (  # noqa: E402
     resolve_model_route,
     route_provenance,
 )
+from omh.coding.pi_family_interop import PI_DISTRIBUTION_HOST, PI_FORK_HOST
 
 
 class ResearchRoleTests(unittest.TestCase):
@@ -39,12 +40,12 @@ class ResearchRoleTests(unittest.TestCase):
         """Autorouting survey consensus: standard is the default; shallow is
         the declared saving, deep the declared escalation — never inferred."""
         codex = resolve_model_route("codex", role="research")
-        self.assertEqual(codex["selected_model"], "gpt-6.1-sol")
+        self.assertEqual(codex["selected_model"], "gpt-6.2-sol")
         # Standard research takes the effort its category declares: `research`
         # reads unspecified-low/quick, and since 2026-10-01 the codex
         # unspecified-low row names `medium` rather than leaving it to the CLI,
         # because GPT-6.1 Sol's Codex default is `low` where GPT-6 Sol's was
-        # `medium`. Depth is the dial that escalates.
+        # `medium` (GPT-6.2 Sol's is `low` too). Depth is the dial that escalates.
         self.assertEqual(codex["selected_reasoning_effort"], "medium")
         self.assertEqual(codex["provenance"], "role_chain_head")
         self.assertNotIn("depth", codex)
@@ -62,24 +63,24 @@ class ResearchRoleTests(unittest.TestCase):
         self.assertEqual(deep["selected_model"], "claude-opus-5-5")
         self.assertEqual(
             [entry["model_id"] for entry in deep["chain"]][:3],
-            ["claude-opus-5-5", "claude-fable-5-1", "opus"],
+            ["claude-opus-5-5", "claude-fable-5-2", "opus"],
         )
         # `deep` reads the `ultrabrain` category, which is the deepest rung and
         # is reachable only by DECLARING it -- so the escalation to xhigh costs
         # nothing until someone asks for it.
         self.assertEqual(deep["selected_reasoning_effort"], "xhigh")
         deep_codex = resolve_model_route("codex", role="research", requested_depth="deep")
-        self.assertEqual(deep_codex["selected_model"], "gpt-6-astra")
+        self.assertEqual(deep_codex["selected_model"], "gpt-6.2-astra")
         self.assertEqual(deep_codex["selected_reasoning_effort"], "xhigh")
         outcomes = {entry["stage"]: entry["outcome"] for entry in deep["attempted"]}
         self.assertEqual(outcomes["research_depth"], "applied")
 
     def test_standard_and_unknown_depths_keep_the_role_chain(self) -> None:
         standard = resolve_model_route("codex", role="research", requested_depth="standard")
-        self.assertEqual(standard["selected_model"], "gpt-6.1-sol")
+        self.assertEqual(standard["selected_model"], "gpt-6.2-sol")
         self.assertEqual(standard["depth"], "standard")
         unknown = resolve_model_route("codex", role="research", requested_depth="bottomless")
-        self.assertEqual(unknown["selected_model"], "gpt-6.1-sol")
+        self.assertEqual(unknown["selected_model"], "gpt-6.2-sol")
         outcomes = {entry["stage"]: entry["outcome"] for entry in unknown["attempted"]}
         self.assertEqual(outcomes["research_depth"], "unknown_depth")
 
@@ -154,6 +155,40 @@ class FamilyPrefixParityTests(unittest.TestCase):
     def test_grok_family_is_recognized(self) -> None:
         self.assertEqual(model_family("grok-code-fast-1"), "grok")
 
+    def test_catalog_sync_ids_are_recognized(self) -> None:
+        # The ids priced in the 2026-10-28 catalog sync, as each vendor serves
+        # them and as a gateway spells them: every one reaches its family
+        # block instead of falling to `unknown`. This pins prefix recognition
+        # that predates the sync (the price and provider rows do not feed
+        # `model_family()`), so a later prefix change cannot silently drop one.
+        expected = {
+            "grok-4.7": "grok",
+            "grok-4.6": "grok",
+            "grok-4.5": "grok",
+            "x-ai/grok-4.3": "grok",
+            "deepseek-v4-pro": "deepseek",
+            "gemini-3.8-flash": "gemini",
+            "gemini-3.6-flash": "gemini",
+            "google/gemini-3.5-flash-lite": "gemini",
+            "gemini-4-carbon": "gemini",
+            "google/gemini-4-carbon": "gemini",
+            "gemini-4-hydrogen": "gemini",
+            "google/gemini-4-hydrogen": "gemini",
+            "gemini-4-neon": "gemini",
+            "google/gemini-4-neon": "gemini",
+            "glm-5.3-flashx": "glm",
+            "z-ai/glm-5.3-flashx": "glm",
+            "qwen3.8-max": "qwen",
+            "qwen3.8-flash": "qwen",
+            "solar-pro4": "solar",
+            "MiniMax-M3": "minimax",
+            "MiniMax-M3.1-Flash": "minimax",
+            "minimax/minimax-m3.1-flash": "minimax",
+        }
+        for model_id, family in expected.items():
+            with self.subTest(model_id=model_id):
+                self.assertEqual(model_family(model_id), family)
+
     def test_solar_family_is_recognized(self) -> None:
         # Upstage Solar ids previously fell to "unknown" (#1052); the family
         # label is what routes them to their calibration instead of generic.
@@ -187,6 +222,18 @@ class FamilyPrefixParityTests(unittest.TestCase):
             )
         for model in ("qwen3", "qwen3x-max", "qwen/abab-style"):
             self.assertEqual(model_family(model), "unknown")
+
+    def test_qwen4_generation_is_a_bounded_family_alias(self) -> None:
+        # Qwen4-Max (2026-11-16) as the vendor serves it, as OpenRouter spells
+        # it, and the Token Plan preview id: each reaches the qwen family
+        # instead of `unknown`. The prefix is bounded like Qwen3's, so a bare
+        # generation token or a near-miss concatenation stays unknown.
+        for model in ("qwen4-max", "qwen/qwen4-max", "qwen4-max-preview", "QWEN4-MAX", "qwen4-max-2026-11-16"):
+            with self.subTest(model=model):
+                self.assertEqual(model_family(model), "qwen")
+        for model in ("qwen4", "qwen4x-max", "qwen/qwen4"):
+            with self.subTest(model=model):
+                self.assertEqual(model_family(model), "unknown")
 
     def test_vendor_prefixed_model_ids_alias_to_design_families(self) -> None:
         self.assertEqual(model_family("digitalocean/openai-gpt-5.6-sol"), "gpt")
@@ -518,7 +565,7 @@ class NonGenerativeModelTests(unittest.TestCase):
 
 _LOCAL_CATALOG = {
     "schema_version": "local_model_catalog/v1",
-    "executor_profile": "omo-runtime",
+    "executor_profile": "pi-family-runtime",
     "catalog_kind": "local_inventory",
     "options": (
         {
@@ -543,14 +590,14 @@ _LOCAL_CATALOG = {
             {"model_id": "opencode/grok-code-fast", "reasoning_effort": ""},
         ),
     },
-    "fingerprint": {"digest": "cafe1234beef5678", "sources": {"omo_agent_config": "present"}, "observed_at": "t"},
+    "fingerprint": {"digest": "cafe1234beef5678", "sources": {"runtime_agent_config": "present"}, "observed_at": "t"},
     "domain_affinities": {"x_platform_data": ("grok",), "multimodal_vision": ("gemini", "gpt", "claude")},
 }
 
 
 class LocalCatalogRouteTests(unittest.TestCase):
     def test_catalogless_profile_routes_from_local_catalog_with_fingerprint(self) -> None:
-        route = resolve_model_route("omo-runtime", role="brain", local_catalog=_LOCAL_CATALOG)
+        route = resolve_model_route("pi-family-runtime", role="brain", local_catalog=_LOCAL_CATALOG)
         self.assertEqual(route["status"], "routed")
         self.assertEqual(route["provenance"], "role_chain_head")
         self.assertEqual(route["selected_model"], "opencode/kimi-k3")
@@ -579,14 +626,14 @@ class LocalCatalogRouteTests(unittest.TestCase):
         """Observed config variants are evidence of use, not vocabulary: a
         requested ladder effort passes through untouched, never downgraded."""
         route = resolve_model_route(
-            "omo-runtime", role="brain", requested_effort="max", local_catalog=_LOCAL_CATALOG
+            "pi-family-runtime", role="brain", requested_effort="max", local_catalog=_LOCAL_CATALOG
         )
         self.assertEqual(route["selected_reasoning_effort"], "max")
         self.assertEqual(route["effort_change"]["kind"], "catalog_no_authority_passthrough")
 
     def test_requested_model_still_wins_over_local_chain(self) -> None:
         route = resolve_model_route(
-            "omo-runtime",
+            "pi-family-runtime",
             role="brain",
             requested_model="opencode/glm-5",
             local_catalog=_LOCAL_CATALOG,
@@ -597,7 +644,7 @@ class LocalCatalogRouteTests(unittest.TestCase):
         self.assertEqual(route["catalog_kind"], "local_inventory")
 
     def test_unchained_role_on_local_catalog_is_explicit_choice(self) -> None:
-        route = resolve_model_route("omo-runtime", role="docs", local_catalog=_LOCAL_CATALOG)
+        route = resolve_model_route("pi-family-runtime", role="docs", local_catalog=_LOCAL_CATALOG)
         self.assertEqual(route["status"], "choice_required")
         self.assertEqual(route["provenance"], "role_unchained")
         self.assertEqual(route["catalog_kind"], "local_inventory")
@@ -607,7 +654,7 @@ class LocalCatalogRouteTests(unittest.TestCase):
         the unit moves the grok-family entry to the chain head — a stable
         reorder recorded in attempted[], with every entry kept."""
         route = resolve_model_route(
-            "omo-runtime", role="brain", requested_domain="x_platform_data", local_catalog=_LOCAL_CATALOG
+            "pi-family-runtime", role="brain", requested_domain="x_platform_data", local_catalog=_LOCAL_CATALOG
         )
         self.assertEqual(route["selected_model"], "opencode/grok-code-fast")
         self.assertEqual(route["domain"], "x_platform_data")
@@ -620,7 +667,7 @@ class LocalCatalogRouteTests(unittest.TestCase):
 
     def test_unknown_domain_is_recorded_and_ignored(self) -> None:
         route = resolve_model_route(
-            "omo-runtime", role="brain", requested_domain="nonsense", local_catalog=_LOCAL_CATALOG
+            "pi-family-runtime", role="brain", requested_domain="nonsense", local_catalog=_LOCAL_CATALOG
         )
         self.assertEqual(route["selected_model"], "opencode/kimi-k3")
         self.assertEqual(route["domain"], "nonsense")
@@ -628,7 +675,7 @@ class LocalCatalogRouteTests(unittest.TestCase):
         self.assertEqual(outcomes["domain_affinity"], "unknown_domain")
 
     def test_no_domain_means_no_domain_key(self) -> None:
-        route = resolve_model_route("omo-runtime", role="brain", local_catalog=_LOCAL_CATALOG)
+        route = resolve_model_route("pi-family-runtime", role="brain", local_catalog=_LOCAL_CATALOG)
         self.assertNotIn("domain", route)
         self.assertNotIn("domain_affinity", [entry["stage"] for entry in route["attempted"]])
 
@@ -645,7 +692,7 @@ class LocalCatalogRouteTests(unittest.TestCase):
 
     def test_requested_model_wins_over_domain(self) -> None:
         route = resolve_model_route(
-            "omo-runtime",
+            "pi-family-runtime",
             role="brain",
             requested_model="opencode/glm-5",
             requested_domain="x_platform_data",
@@ -661,7 +708,7 @@ class LocalCatalogRouteTests(unittest.TestCase):
         for hostile_options in ([], ["not-a-mapping", 42]):
             hostile = dict(_LOCAL_CATALOG)
             hostile["options"] = hostile_options
-            route = resolve_model_route("omo-runtime", role="brain", local_catalog=hostile)
+            route = resolve_model_route("pi-family-runtime", role="brain", local_catalog=hostile)
             self.assertEqual(route["status"], "no_model_catalog")
             self.assertEqual(route["catalog_kind"], "built_in_defaults")
             self.assertNotIn("catalog_fingerprint", route)
@@ -691,7 +738,10 @@ class ModelRouteResolverTests(unittest.TestCase):
         self.assertEqual(model_family("claude-opus-5"), "claude")
         # The bare Fable-tier names users type in chat ("use fable") and the
         # concrete 5.1 ids both land on the claude calibration, never generic.
-        for model_id in ("fable", "mythos", "claude-fable-5-1", "claude-mythos-5-1", "anthropic/claude-fable-5-1"):
+        for model_id in (
+            "fable", "mythos", "claude-fable-5-1", "claude-mythos-5-1", "anthropic/claude-fable-5-1",
+            "claude-fable-5-2", "claude-mythos-5-2", "anthropic/claude-fable-5.2",
+        ):
             self.assertEqual(model_family(model_id), "claude", model_id)
 
     def test_every_role_routes_to_its_chain_head_on_both_profiles(self) -> None:
@@ -711,18 +761,19 @@ class ModelRouteResolverTests(unittest.TestCase):
         route = resolve_model_route("codex", role="review")
         self.assertEqual(route["status"], "routed")
         self.assertEqual(route["provenance"], "role_chain_head")
-        self.assertEqual(route["selected_model"], "gpt-6.1-sol")
+        self.assertEqual(route["selected_model"], "gpt-6.2-sol")
         chain_models = [entry["model_id"] for entry in route["chain"]]
-        self.assertEqual(chain_models, ["gpt-6.1-sol"])
+        self.assertEqual(chain_models, ["gpt-6.2-sol"])
         selected_flags = [entry["selected"] for entry in route["chain"]]
         self.assertEqual(selected_flags, [True])
 
-    def test_brain_role_gets_high_effort_from_chain_entry(self) -> None:
-        # brain's high default moved from _HIGH_EFFORT_ROLES into chain data;
-        # behaviour is preserved and effort_change stays absent because the
+    def test_brain_role_gets_xhigh_effort_from_chain_entry(self) -> None:
+        # brain's effort is chain data: its chain heads on ultrabrain, whose
+        # Codex entry is Astra at xhigh. effort_change stays absent because the
         # user requested nothing (chain efforts never appear in effort_change).
         route = resolve_model_route("codex", role="brain")
-        self.assertEqual(route["selected_reasoning_effort"], "high")
+        self.assertEqual(route["selected_model"], "gpt-6.2-astra")
+        self.assertEqual(route["selected_reasoning_effort"], "xhigh")
         self.assertNotIn("effort_change", route)
 
     def test_requested_effort_outranks_chain_entry_effort(self) -> None:
@@ -822,7 +873,7 @@ class RouteVocabularyPolicyTests(unittest.TestCase):
         # empty effort would run below what the category asks for.
         from omh.coding.model_routing import BUILTIN_CATEGORY_MODELS, CLAUDE_FRONTIER_CHAIN_MODELS
 
-        self.assertEqual(CLAUDE_FRONTIER_CHAIN_MODELS, ("claude-opus-5-5", "claude-fable-5-1", "opus"))
+        self.assertEqual(CLAUDE_FRONTIER_CHAIN_MODELS, ("claude-opus-5-5", "claude-fable-5-2", "opus"))
         claude = BUILTIN_CATEGORY_MODELS["claude-code"]
         expected_efforts = {
             "ultrabrain": "xhigh",
@@ -832,6 +883,10 @@ class RouteVocabularyPolicyTests(unittest.TestCase):
             "visual-engineering": "high",
             "capable": "medium",
             "deep-work": "high",
+            # The frontier-shaped routing-recipe categories (2026-10-28).
+            "review": "xhigh",
+            "forensics": "xhigh",
+            "synthesize": "xhigh",
         }
         frontier = {
             category: chain
@@ -1114,15 +1169,15 @@ class DispatchArgvTests(unittest.TestCase):
         claude = build_dispatch_argv("claude-code", "do the work")
         self.assertEqual(claude[0:3], ["claude", "-p", "do the work"])
         self.assertNotIn("--model", claude)
-        with mock.patch("omh.coding.fanout_dispatch.shutil.which", lambda name: "/x/senpi" if name == "senpi" else None):
-            senpi = build_dispatch_argv("omo-runtime", "do the work")
+        with mock.patch("omh.coding.fanout_dispatch.shutil.which", lambda name: f"/x/{PI_DISTRIBUTION_HOST}" if name == PI_DISTRIBUTION_HOST else None):
+            distribution_argv = build_dispatch_argv("pi-family-runtime", "do the work")
         self.assertEqual(
-            senpi,
-            ["senpi", "--print", "--no-session", "--permission-preset", "workspace", "do the work"],
+            distribution_argv,
+            [PI_DISTRIBUTION_HOST, "--print", "--no-session", "--permission-preset", "workspace", "do the work"],
         )
 
-    def test_omo_runtime_model_and_thinking_insert_before_prompt(self) -> None:
-        """The senpi host treats trailing tokens as message positionals, so
+    def test_pi_family_runtime_model_and_thinking_insert_before_prompt(self) -> None:
+        """A pi-family host treats trailing tokens as message positionals, so
         routed options must land before the prompt — validated live: --print
         completes non-interactively and the workspace preset allowed file
         edits plus git add/commit."""
@@ -1131,12 +1186,12 @@ class DispatchArgvTests(unittest.TestCase):
             "selected_model": "kimi-coding/k3",
             "selected_reasoning_effort": "high",
         }
-        with mock.patch("omh.coding.fanout_dispatch.shutil.which", lambda name: "/x/senpi" if name == "senpi" else None):
-            argv = build_dispatch_argv("omo-runtime", "do the work", route)
+        with mock.patch("omh.coding.fanout_dispatch.shutil.which", lambda name: f"/x/{PI_DISTRIBUTION_HOST}" if name == PI_DISTRIBUTION_HOST else None):
+            argv = build_dispatch_argv("pi-family-runtime", "do the work", route)
         self.assertEqual(
             argv,
             [
-                "senpi",
+                PI_DISTRIBUTION_HOST,
                 "--print",
                 "--no-session",
                 "--permission-preset",
@@ -1186,14 +1241,14 @@ class DispatchArgvTests(unittest.TestCase):
     def test_behavior_change_review_on_codex_now_emits_model(self) -> None:
         # 5b(i) before/after: the old resolver returned choice_required with
         # no selected_model for review-on-codex, so dispatch emitted the bare
-        # template argv; the chain head now emits --model gpt-6.1-sol, and
+        # template argv; the chain head now emits --model gpt-6.2-sol, and
         # since 2026-10-01 the named `medium` its category row carries.
         old_shape_route = {"selected_model": "", "selected_reasoning_effort": ""}
         self.assertEqual(build_dispatch_argv("codex", "p", old_shape_route), ["codex", "exec", "p"])
         new_route = resolve_model_route("codex", role="review")
         self.assertEqual(
             build_dispatch_argv("codex", "p", new_route),
-            ["codex", "exec", "--model", "gpt-6.1-sol", "--config", "model_reasoning_effort=medium", "p"],
+            ["codex", "exec", "--model", "gpt-6.2-sol", "--config", "model_reasoning_effort=medium", "p"],
         )
 
     def test_behavior_change_effort_max_on_codex_catalog_model(self) -> None:
@@ -1205,18 +1260,18 @@ class DispatchArgvTests(unittest.TestCase):
         self.assertIn("model_reasoning_effort=xhigh", build_dispatch_argv("codex", "p", new_route))
 
 
-class OmoHostDetectionTests(unittest.TestCase):
-    def test_detection_order_prefers_pi_then_senpi_then_opencode(self) -> None:
-        """The usual host is `pi`; senpi is its distribution; opencode hosts
-        omo as a plugin. First on PATH wins, deterministically."""
-        from omh.coding.fanout_dispatch import OMO_RUNTIME_HOST_CANDIDATES, omo_runtime_host
+class PiFamilyHostDetectionTests(unittest.TestCase):
+    def test_detection_order_prefers_pi_then_pi_distribution_then_opencode(self) -> None:
+        """The usual host is `pi`, then its distribution host; opencode hosts
+        the runtime as a plugin. First on PATH wins, deterministically."""
+        from omh.coding.fanout_dispatch import PI_FAMILY_HOST_CANDIDATES, pi_family_host
 
-        self.assertEqual(OMO_RUNTIME_HOST_CANDIDATES, ("pi", "senpi", "opencode"))
-        both = lambda name: f"/x/{name}" if name in ("pi", "senpi") else None
-        self.assertEqual(omo_runtime_host(both), "pi")
-        self.assertEqual(omo_runtime_host(lambda name: "/x/senpi" if name == "senpi" else None), "senpi")
-        self.assertEqual(omo_runtime_host(lambda name: "/x/opencode" if name == "opencode" else None), "opencode")
-        self.assertIsNone(omo_runtime_host(lambda name: None))
+        self.assertEqual(PI_FAMILY_HOST_CANDIDATES, ("pi", PI_DISTRIBUTION_HOST, PI_FORK_HOST, "opencode"))
+        both = lambda name: f"/x/{name}" if name in ("pi", PI_DISTRIBUTION_HOST) else None
+        self.assertEqual(pi_family_host(both), "pi")
+        self.assertEqual(pi_family_host(lambda name: f"/x/{PI_DISTRIBUTION_HOST}" if name == PI_DISTRIBUTION_HOST else None), PI_DISTRIBUTION_HOST)
+        self.assertEqual(pi_family_host(lambda name: "/x/opencode" if name == "opencode" else None), "opencode")
+        self.assertIsNone(pi_family_host(lambda name: None))
 
     def test_pi_and_opencode_hosts_shape_the_argv(self) -> None:
         route = {
@@ -1225,16 +1280,250 @@ class OmoHostDetectionTests(unittest.TestCase):
             "selected_reasoning_effort": "high",
         }
         with mock.patch("omh.coding.fanout_dispatch.shutil.which", lambda name: "/x/pi" if name == "pi" else None):
-            pi_argv = build_dispatch_argv("omo-runtime", "work", route)
+            pi_argv = build_dispatch_argv("pi-family-runtime", "work", route)
         self.assertEqual(pi_argv[0], "pi")
         self.assertEqual(pi_argv[5:9], ["--model", "zai/glm-5.2", "--thinking", "high"])
         with mock.patch("omh.coding.fanout_dispatch.shutil.which", lambda name: "/x/opencode" if name == "opencode" else None):
-            oc_argv = build_dispatch_argv("omo-runtime", "work", route)
+            oc_argv = build_dispatch_argv("pi-family-runtime", "work", route)
         self.assertEqual(oc_argv, ["opencode", "run", "--model", "zai/glm-5.2", "--variant", "high", "work"])
+
+    def test_fork_host_alone_on_path_is_picked_after_pi(self) -> None:
+        from omh.coding.fanout_dispatch import pi_family_host
+
+        self.assertEqual(pi_family_host(lambda name: f"/x/{name}" if name == PI_FORK_HOST else None), PI_FORK_HOST)
+        self.assertEqual(pi_family_host(lambda name: f"/x/{name}" if name in ("pi", PI_FORK_HOST) else None), "pi")
+        self.assertEqual(
+            pi_family_host(lambda name: f"/x/{name}" if name in (PI_FORK_HOST, "opencode") else None), PI_FORK_HOST
+        )
+
+    def test_fork_host_argv_prints_without_a_session_or_an_approval_flag(self) -> None:
+        on_path = lambda name: f"/x/{name}" if name == PI_FORK_HOST else None  # noqa: E731
+        with mock.patch("omh.coding.fanout_dispatch.shutil.which", on_path):
+            bare = build_dispatch_argv("pi-family-runtime", "-work", None)
+            routed = build_dispatch_argv(
+                "pi-family-runtime",
+                "-work",
+                {"selected_model": "zai/glm-5.2", "selected_reasoning_effort": "high"},
+            )
+        self.assertEqual(bare, [PI_FORK_HOST, "--print", "--no-session", "--", "-work"])
+        self.assertNotIn("--permission-preset", bare)
+        self.assertFalse(any(part.startswith("--approval") for part in bare))
+        self.assertEqual(
+            routed,
+            [PI_FORK_HOST, "--print", "--no-session", "--model", "zai/glm-5.2", "--thinking", "high", "--", "-work"],
+        )
 
     def test_no_host_on_path_means_no_argv(self) -> None:
         with mock.patch("omh.coding.fanout_dispatch.shutil.which", lambda name: None):
-            self.assertIsNone(build_dispatch_argv("omo-runtime", "work"))
+            self.assertIsNone(build_dispatch_argv("pi-family-runtime", "work"))
+
+
+class IdentityRoutingTests(unittest.TestCase):
+    """Contracts for the validated identity overlay on `resolve_model_route`.
+
+    A resolved `omh_identity_profiles/v1` identity supplies its own ordered
+    chain below `requested_model`/`requested_effort` and above every
+    role/category/depth/scale source. The resolver consumes the loader's
+    validated output as-is; the fingerprint names the exact document basis.
+    """
+
+    _IDENTITY_CONFIG = {
+        "schema_version": "omh_identity_profiles/v1",
+        "identities": {
+            "script-coding": {
+                "prompt": "Implement small scripts directly.",
+                "model_chain": (
+                    {"model_id": "deepseek-flash", "reasoning_effort": "low"},
+                    {"model_id": "glm-5.3-flash", "reasoning_effort": "low"},
+                ),
+            },
+            "review": {
+                "prompt": "Find concrete defects first.",
+                "model_chain": (
+                    {"model_id": "gpt-6-astra", "reasoning_effort": "xhigh"},
+                ),
+            },
+        },
+        "fingerprint": {"source": "identities.json", "digest": "deadbeef12345678"},
+        "rejected": [],
+    }
+
+    def test_identity_chain_head_routes_with_bounded_metadata(self) -> None:
+        route = resolve_model_route(
+            "codex", requested_identity="script-coding", identity_config=self._IDENTITY_CONFIG
+        )
+        self.assertEqual(route["status"], "routed")
+        self.assertEqual(route["provenance"], "identity_chain_head")
+        self.assertEqual(route["selected_model"], "deepseek-flash")
+        self.assertEqual(route["selected_reasoning_effort"], "low")
+        self.assertEqual(route["model_family"], "deepseek")
+        self.assertEqual(route["catalog_kind"], "user_identity_config")
+        self.assertEqual(route["identity_id"], "script-coding")
+        self.assertEqual(route["identity_fingerprint"]["digest"], "deadbeef12345678")
+        self.assertEqual(route["catalog_fingerprint"]["digest"], "deadbeef12345678")
+        self.assertEqual(
+            [entry["model_id"] for entry in route["chain"]],
+            ["deepseek-flash", "glm-5.3-flash"],
+        )
+        self.assertEqual(route["chain"][0]["selected"], True)
+        self.assertEqual(route["chain"][1]["selected"], False)
+        identity_attempts = [
+            entry["outcome"] for entry in route["attempted"] if entry["stage"] == "requested_identity"
+        ]
+        self.assertEqual(identity_attempts, ["applied", "selected"])
+
+    def test_identity_chain_supplies_fallback_candidates(self) -> None:
+        route = resolve_model_route(
+            "claude-code", requested_identity="script-coding", identity_config=self._IDENTITY_CONFIG
+        )
+        self.assertEqual(route["status"], "routed")
+        self.assertEqual(
+            [(entry["model_id"], entry["reasoning_effort"]) for entry in route["chain"]],
+            [("deepseek-flash", "low"), ("glm-5.3-flash", "low")],
+        )
+        # The fallback candidates are the identity chain's later entries —
+        # prepared next-candidate advice, never retried by OMH.
+        self.assertEqual(route["selected_model"], "deepseek-flash")
+
+    def test_explicit_model_wins_over_identity(self) -> None:
+        route = resolve_model_route(
+            "codex",
+            requested_model="gpt-6-terra",
+            requested_identity="script-coding",
+            identity_config=self._IDENTITY_CONFIG,
+        )
+        self.assertEqual(route["status"], "routed")
+        self.assertEqual(route["provenance"], "request_named_model")
+        self.assertEqual(route["selected_model"], "gpt-6-terra")
+        # The identity was still the consulted basis, so its metadata stays
+        # on the record.
+        self.assertEqual(route["catalog_kind"], "user_identity_config")
+        self.assertEqual(route["identity_id"], "script-coding")
+        self.assertEqual(route["identity_fingerprint"]["digest"], "deadbeef12345678")
+
+    def test_explicit_effort_wins_over_identity_chain_effort(self) -> None:
+        route = resolve_model_route(
+            "codex",
+            requested_effort="high",
+            requested_identity="script-coding",
+            identity_config=self._IDENTITY_CONFIG,
+        )
+        self.assertEqual(route["status"], "routed")
+        self.assertEqual(route["provenance"], "identity_chain_head")
+        self.assertEqual(route["selected_model"], "deepseek-flash")
+        self.assertEqual(route["selected_reasoning_effort"], "high")
+        self.assertEqual(route["effort_change"]["requested"], "high")
+
+    def test_identity_wins_over_role_category_depth_and_scale(self) -> None:
+        route = resolve_model_route(
+            "codex",
+            role="brain",
+            requested_category="quick",
+            requested_depth="deep",
+            requested_scale="large",
+            requested_identity="review",
+            identity_config=self._IDENTITY_CONFIG,
+        )
+        self.assertEqual(route["status"], "routed")
+        self.assertEqual(route["provenance"], "identity_chain_head")
+        self.assertEqual(route["selected_model"], "gpt-6-astra")
+        self.assertEqual(route["selected_reasoning_effort"], "xhigh")
+        # Declared dials stay on the record as metadata even though the
+        # identity chain won.
+        self.assertEqual(route["role"], "brain")
+        self.assertEqual(route["category"], "quick")
+        self.assertEqual(route["depth"], "deep")
+
+    def test_identity_and_category_collision(self) -> None:
+        # An identity named `review` does not become the `review` category:
+        # the identity chain wins and the category is recorded metadata.
+        route = resolve_model_route(
+            "claude-code",
+            requested_category="review",
+            requested_identity="review",
+            identity_config=self._IDENTITY_CONFIG,
+        )
+        self.assertEqual(route["status"], "routed")
+        self.assertEqual(route["provenance"], "identity_chain_head")
+        self.assertEqual(route["selected_model"], "gpt-6-astra")
+        self.assertEqual(route["category"], "review")
+        self.assertEqual(route["catalog_kind"], "user_identity_config")
+
+    def test_unknown_identity_falls_through_to_existing_chain(self) -> None:
+        route = resolve_model_route(
+            "codex",
+            role="brain",
+            requested_identity="ghost",
+            identity_config=self._IDENTITY_CONFIG,
+        )
+        self.assertEqual(route["status"], "routed")
+        self.assertEqual(route["provenance"], "role_chain_head")
+        self.assertEqual(route["selected_model"], "gpt-6.2-astra")
+        self.assertNotIn("identity_id", route)
+        self.assertNotIn("identity_fingerprint", route)
+        outcomes = {entry["stage"]: entry["outcome"] for entry in route["attempted"]}
+        self.assertEqual(outcomes["requested_identity"], "unknown")
+
+    def test_identity_config_absent_falls_through(self) -> None:
+        route = resolve_model_route("codex", role="brain", requested_identity="script-coding")
+        self.assertEqual(route["status"], "routed")
+        self.assertEqual(route["provenance"], "role_chain_head")
+        self.assertEqual(route["selected_model"], "gpt-6.2-astra")
+        outcomes = {entry["stage"]: entry["outcome"] for entry in route["attempted"]}
+        self.assertEqual(outcomes["requested_identity"], "unknown")
+
+    def test_no_identity_compatibility_unchanged(self) -> None:
+        baseline = resolve_model_route("codex", role="brain")
+        route = resolve_model_route("codex", role="brain", identity_config=self._IDENTITY_CONFIG)
+        self.assertEqual(route, baseline)
+
+    def test_identity_routes_on_catalogless_profile(self) -> None:
+        route = resolve_model_route(
+            "generic", requested_identity="script-coding", identity_config=self._IDENTITY_CONFIG
+        )
+        self.assertEqual(route["status"], "routed")
+        self.assertEqual(route["provenance"], "identity_chain_head")
+        self.assertEqual(route["selected_model"], "deepseek-flash")
+        self.assertEqual(route["catalog_kind"], "user_identity_config")
+
+    def test_identity_on_hermes_lane_wins_over_recommendation(self) -> None:
+        route = resolve_model_route(
+            "hermes",
+            requested_identity="script-coding",
+            identity_config=self._IDENTITY_CONFIG,
+            active_models=("deepseek-flash", "glm-5.3-flash"),
+        )
+        self.assertEqual(route["status"], "routed")
+        self.assertEqual(route["provenance"], "identity_chain_head")
+        self.assertEqual(route["selected_model"], "deepseek-flash")
+        self.assertEqual(route["catalog_kind"], "user_identity_config")
+
+    def test_identity_route_provenance_is_v2_vocabulary(self) -> None:
+        route = resolve_model_route(
+            "codex", requested_identity="script-coding", identity_config=self._IDENTITY_CONFIG
+        )
+        provenance, vocabulary = route_provenance(route)
+        self.assertEqual(provenance, "identity_chain_head")
+        self.assertEqual(vocabulary, "v2")
+
+    def test_model_route_for_unit_passes_identity(self) -> None:
+        route = model_route_for_unit(
+            {"unit_id": "u", "identity": "script-coding"},
+            "codex",
+            identity_config=self._IDENTITY_CONFIG,
+        )
+        self.assertIsNotNone(route)
+        assert route is not None
+        self.assertEqual(route["provenance"], "identity_chain_head")
+        self.assertEqual(route["identity_id"], "script-coding")
+
+    def test_unit_without_identity_stays_compatible(self) -> None:
+        self.assertIsNone(model_route_for_unit({"unit_id": "u"}, "codex"))
+        route = model_route_for_unit({"unit_id": "u", "role": "brain"}, "codex")
+        self.assertIsNotNone(route)
+        assert route is not None
+        self.assertEqual(route["provenance"], "role_chain_head")
+        self.assertNotIn("identity_id", route)
 
 
 class UnitModelRouteTests(unittest.TestCase):
@@ -1253,7 +1542,7 @@ class UnitModelRouteTests(unittest.TestCase):
         units = {unit["unit_id"]: unit for unit in contract["units"]}
         brain_route = units["brain"]["handoff"]["model_route"]
         self.assertEqual(brain_route["schema_version"], CODING_MODEL_ROUTE_SCHEMA_VERSION)
-        self.assertEqual(brain_route["selected_reasoning_effort"], "high")
+        self.assertEqual(brain_route["selected_reasoning_effort"], "xhigh")
         self.assertEqual(brain_route["provenance"], "role_chain_head")
         ui_route = units["ui"]["handoff"]["model_route"]
         self.assertEqual(ui_route["selected_model"], "opus")
@@ -1273,7 +1562,7 @@ class ModelRouteCliTests(unittest.TestCase):
             self.assertEqual(status, 0, stderr)
             route = json.loads(stdout)
             self.assertEqual(route["schema_version"], CODING_MODEL_ROUTE_SCHEMA_VERSION)
-            self.assertEqual(route["selected_reasoning_effort"], "high")
+            self.assertEqual(route["selected_reasoning_effort"], "xhigh")
             self.assertEqual(route["provenance"], "role_chain_head")
 
     def test_cli_plain_text_is_default_and_names_provenance(self) -> None:
@@ -1311,9 +1600,29 @@ class ModelRouteCliTests(unittest.TestCase):
             self.assertEqual(status, 0, stderr)
             lines = [line for line in stdout.splitlines() if line.startswith("- ")]
             self.assertEqual(len(lines), len(MODEL_ROLES))
-            self.assertIn("gpt-6.1-sol high*", stdout)
+            self.assertIn("gpt-6.2-astra xhigh* > gpt-6.2-sol high", stdout)
             self.assertNotIn("gpt-5.6", stdout)
             self.assertNotIn("claude-code", stdout)
+
+    def test_cli_refuses_an_identity_the_document_does_not_hold(self) -> None:
+        # A typo in --identity used to answer `model_unrouted` on the
+        # executor default with exit 0: the run went to a model nobody chose.
+        with TemporaryDirectory() as tmp:
+            routing = Path(tmp) / ".omh" / "routing"
+            routing.mkdir(parents=True)
+            (routing / "identities.json").write_text(json.dumps({
+                "schema_version": "omh_identity_profiles/v1",
+                "identities": {"script-coding": {
+                    "prompt": "p", "model_chain": [{"model_id": "gpt-6-sol", "reasoning_effort": "low"}]}},
+            }), encoding="utf-8")
+            base = self._base(tmp) + ["coding", "model-route", "--executor", "codex", "--identity"]
+            status, stdout, stderr = run_cli(base + ["script-coding"])
+            self.assertEqual(status, 0, stderr)
+            self.assertEqual(json.loads(stdout)["provenance"], "identity_chain_head")
+            status, stdout, stderr = run_cli(base + ["scirpt-coding"])
+            self.assertNotEqual(status, 0, stdout)
+            self.assertIn("scirpt-coding", stderr)
+            self.assertIn("available: script-coding", stderr)
 
     def test_model_route_without_executor_or_explain_errors(self) -> None:
         with TemporaryDirectory() as tmp:

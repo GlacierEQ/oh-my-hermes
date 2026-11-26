@@ -36,11 +36,18 @@ ROOT = Path(__file__).parents[1]
 class ExistingBenchmarkCharacterizationTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "darwin", "macOS system alias only")
     def test_adapter_io_accepts_trusted_macos_var_alias(self) -> None:
+        synthetic_var_target = Path("/var/synthetic-test-receipt-path/receipt.json")
+        normalized = adapter_io._normalize_platform_alias(synthetic_var_target)
+        self.assertEqual(
+            normalized,
+            Path("/private/var/synthetic-test-receipt-path/receipt.json"),
+        )
         with TemporaryDirectory() as temporary:
             target = Path(temporary) / "receipt.json"
-            self.assertEqual(target.parts[1], "var")
             adapter_io.write_json(target, {"status": "ok"})
             self.assertTrue(target.is_file())
+            content, _ = adapter_io.read_regular_file(target)
+            self.assertEqual(json.loads(content.decode("utf-8")), {"status": "ok"})
 
     @requires_secure_dir_io
     def test_adapter_io_imports_without_required_flags_and_fails_closed_on_use(self) -> None:
@@ -153,7 +160,7 @@ class AdapterBoundaryFailingFirstTests(unittest.TestCase):
             parse_adapter_result(result)
 
     def test_all_profile_effort_observation_and_process_variants_are_typed(self) -> None:
-        for profile in ("codex", "claude-code", "pi", "hermes", "omx", "omo", "omc"):
+        for profile in ("codex", "claude-code", "pi", "hermes", "omx", "pi-family", "omc"):
             with self.subTest(profile=profile):
                 request = _request()
                 request["profile"] = profile

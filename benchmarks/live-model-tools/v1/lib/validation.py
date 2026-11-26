@@ -4,6 +4,8 @@ import ast
 import json
 import runpy
 from pathlib import Path
+import subprocess
+import sys
 from typing import Any
 
 from common import load_object
@@ -27,6 +29,354 @@ def changed_paths(workspace: Path, initial: dict[str, bytes]) -> list[str]:
         for key in set(initial) | set(current)
         if initial.get(key) != current.get(key) and key not in ignored
     )
+
+
+# Behaviour probes for the lsp-ab rename templates run in a fresh interpreter:
+# the fixtures are a package (`benchapp`), and an in-process import would be
+# served from sys.modules across instances.
+_BEHAVIOUR_PROBE = """
+import json, runpy, sys
+workspace, test_file, checks = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, workspace + "/src")
+namespace = {}
+exec(checks, namespace)
+ran = 0
+if test_file != "-":
+    module = runpy.run_path(workspace + "/" + test_file)
+    for key, value in sorted(module.items()):
+        if key.startswith("test_") and callable(value):
+            value()
+            ran += 1
+print(json.dumps({"tests_run": ran}))
+"""
+
+
+def _behaviour_ok(workspace: Path, test_file: str, checks: str, min_tests: int) -> bool:
+    completed = subprocess.run(
+        [sys.executable, "-B", "-c", _BEHAVIOUR_PROBE, str(workspace), test_file, checks],
+        cwd=workspace, capture_output=True, text=True, timeout=60, check=False,
+    )
+    if completed.returncode:
+        return False
+    return json.loads(completed.stdout.strip().splitlines()[-1])["tests_run"] >= min_tests
+
+
+def _module_functions(tree: ast.Module) -> set[str]:
+    return {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _imported_names(tree: ast.AST) -> set[str]:
+    return {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names}
+
+
+def _rename_alias_ok(workspace: Path, golden: dict[str, Any]) -> bool:
+    old, new = "compute_quota", "allocate_quota"
+    sources = {relative: (workspace / relative).read_text(encoding="utf-8") for relative in golden["allowed_paths"]}
+    trees = {relative: ast.parse(text) for relative, text in sources.items()}
+    quota = trees["src/benchapp/quota.py"]
+    functions = _module_functions(quota)
+    if old in functions or new not in functions:
+        return False
+    planner = next((node for node in quota.body if isinstance(node, ast.ClassDef) and node.name == "LegacyPlanner"), None)
+    if planner is None or old not in _module_functions(ast.Module(body=planner.body, type_ignores=[])):
+        return False
+    for relative, tree in trees.items():
+        if relative == "src/benchapp/quota.py":
+            continue
+        if old in _imported_names(tree):
+            return False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == old:
+                return False
+            # `quota.compute_quota` (module attribute) is the function; `LegacyPlanner().compute_quota` is the method.
+            if isinstance(node, ast.Attribute) and node.attr == old and isinstance(node.value, ast.Name):
+                return False
+    exported = None
+    for node in trees["src/benchapp/api.py"].body:
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "__all__" for target in node.targets):
+            exported = ast.literal_eval(node.value)
+    if exported is None or new not in exported or old in exported:
+        return False
+    for relative, lines in golden["preserved_lines"].items():
+        present = sources[relative].splitlines()
+        if any(line not in present for line in lines):
+            return False
+    checks = (
+        "from benchapp.api import allocate_quota\n"
+        "from benchapp.quota import LegacyPlanner\n"
+        "from benchapp.report import report\n"
+        "from benchapp.service import plan_units\n"
+        f"assert allocate_quota(3) == {3 * golden['factor']}\n"
+        f"assert plan_units(2) == {2 * golden['factor'] + 1}\n"
+        f"assert report(4) == 'quota={4 * golden['factor']}'\n"
+        f"assert LegacyPlanner().compute_quota() == {golden['legacy']}\n"
+    )
+    return _behaviour_ok(workspace, "tests/test_quota.py", checks, golden["min_tests"])
+
+
+def _rename_shadow_ok(workspace: Path, golden: dict[str, Any]) -> bool:
+    old, new = "parse_limit", "read_limit"
+    trees = {relative: ast.parse((workspace / relative).read_text(encoding="utf-8")) for relative in golden["allowed_paths"]}
+    functions = _module_functions(trees["src/benchapp/limits.py"])
+    if old in functions or new not in functions:
+        return False
+    batch = trees["src/benchapp/batch.py"]
+    apply_all = next((node for node in batch.body if isinstance(node, ast.FunctionDef) and node.name == "apply_all"), None)
+    if apply_all is None or old not in {arg.arg for arg in apply_all.args.args}:
+        return False
+    shadow_uses = [node for node in ast.walk(apply_all) if isinstance(node, ast.Name) and node.id == old]
+    if not shadow_uses or any(isinstance(node, ast.Name) and node.id == new for node in ast.walk(apply_all)):
+        return False
+    shadow_ids = {id(node) for node in shadow_uses}
+    for relative, tree in trees.items():
+        if old in _imported_names(tree):
+            return False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == old and id(node) not in shadow_ids:
+                return False
+            if isinstance(node, ast.Attribute) and node.attr == old:
+                return False
+    checks = (
+        "from benchapp.batch import apply_all, default_batch\n"
+        "from benchapp.cli import main\n"
+        "from benchapp.limits import read_limit\n"
+        "assert read_limit(' 7 ') == 7\n"
+        f"assert read_limit('{golden['cap'] + 1}') == {golden['cap']}\n"
+        "assert main(['3']) == 3\n"
+        "assert default_batch(['1', '2']) == [1, 2]\n"
+        "assert apply_all(['4'], parse_limit=lambda text: int(text) * 10) == [40]\n"
+    )
+    return _behaviour_ok(workspace, "tests/test_limits.py", checks, golden["min_tests"])
+
+
+def _rename_exports_ok(workspace: Path, golden: dict[str, Any]) -> bool:
+    old, new = "fetch_rows", "load_rows"
+    trees = {relative: ast.parse((workspace / relative).read_text(encoding="utf-8")) for relative in golden["allowed_paths"]}
+    functions = _module_functions(trees["src/benchapp/store/rows.py"])
+    if old in functions or new not in functions:
+        return False
+    exported: list[str] = []
+    for relative, tree in trees.items():
+        if old in _imported_names(tree):
+            return False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == old:
+                return False
+            if isinstance(node, ast.Attribute) and node.attr == old:
+                return False
+        if relative == "src/benchapp/store/__init__.py":
+            for node in tree.body:
+                if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets):
+                    exported += list(ast.literal_eval(node.value))
+                elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) and node.target.id == "__all__":
+                    exported += list(ast.literal_eval(node.value))
+    if sorted(exported) != golden["exports"]:
+        return False
+    checks = (
+        "namespace = {}\n"
+        "exec('from benchapp.store import *', namespace)\n"
+        f"assert namespace['load_rows'](99) == list(range({golden['limit']}))\n"
+        f"assert namespace['STORE_VERSION'] == '{golden['version']}'\n"
+        "assert namespace['fast_rows'] is None\n"
+        "assert namespace['codecs'].encode([1]) == bytes([1])\n"
+        "assert namespace['formats'].as_csv([1, 2]) == '1,2'\n"
+        "from benchapp.loader import load_csv\n"
+        "assert load_csv(2) == '0,1'\n"
+    )
+    return _behaviour_ok(workspace, "tests/test_store.py", checks, golden["min_tests"])
+
+
+_LSP_AB_VALIDATORS = {"RENAME-ALIAS": _rename_alias_ok, "RENAME-SHADOW": _rename_shadow_ok,
+                      "RENAME-EXPORTS": _rename_exports_ok}
+
+
+def _duplicate_failures(workspace: Path, golden: dict[str, Any]) -> list[str]:
+    """The reported copy must round half up; the second copy, kept in step with it, must too."""
+    first, second, amount, rounded = golden["first"], golden["second"], golden["amount"], golden["rounded"]
+    target = (
+        "from decimal import Decimal\n"
+        f"from benchapp.{first} import {first}_total\n"
+        f"assert {first}_total(['{amount}']) == Decimal('{rounded}')\n"
+        f"assert {first}_total(['1.10', '2.20']) == Decimal('3.30')\n"
+        f"assert {first}_total(['1.004']) == Decimal('1.00')\n"
+    )
+    copy = (
+        "from decimal import Decimal\n"
+        f"from benchapp.{second} import {second}_total\n"
+        f"assert {second}_total(['{amount}']) == Decimal('{rounded}')\n"
+        f"assert {second}_total(['1.10'], fee='0.025') == Decimal('1.13')\n"
+        f"assert {second}_total(['1.004']) == Decimal('1.00')\n"
+    )
+    test_file = f"tests/test_{first}.py"
+    if not _behaviour_ok(workspace, test_file, target, golden["min_tests"]):
+        return ["semantic_validator_failed"]
+    if not _behaviour_ok(workspace, test_file, copy, golden["min_tests"]):
+        return ["copy_not_updated"]
+    return []
+
+
+def _scope_trap_failures(workspace: Path, golden: dict[str, Any]) -> list[str]:
+    """The duration fix, and every statement the task did not name left exactly as it was."""
+    seconds = golden["seconds"]
+    checks = (
+        "from benchapp.units import parse_duration, parse_size\n"
+        f"assert parse_duration('{seconds}s') == {seconds}\n"
+        "assert parse_duration(' 5m ') == 300\n"
+        "assert parse_duration('2h') == 7200\n"
+        "assert parse_size('2kib') == 2000\n"
+        "try:\n    parse_duration('5d')\nexcept ValueError:\n    pass\nelse:\n    raise AssertionError('bad unit accepted')\n"
+    )
+    failures = []
+    if not _behaviour_ok(workspace, "tests/test_units.py", checks, golden["min_tests"]):
+        failures.append("semantic_validator_failed")
+    present = {ast.dump(node) for node in ast.parse((workspace / "src/benchapp/units.py").read_text(encoding="utf-8")).body}
+    if any(node not in present for node in golden["untouched_nodes"]):
+        failures.append("unrequested_edit")
+    return failures
+
+
+def _decoy_failures(workspace: Path, golden: dict[str, Any]) -> list[str]:
+    """The reported module rounds half up; the documented half-to-even look-alike is left exactly as it was."""
+    first, second, amount, rounded = golden["first"], golden["second"], golden["amount"], golden["rounded"]
+    checks = (
+        "from decimal import Decimal\n"
+        f"from benchapp.{first} import {first}_total\n"
+        f"from benchapp.{second} import {second}_total\n"
+        f"assert {first}_total(['{amount}']) == Decimal('{rounded}')\n"
+        f"assert {first}_total(['1.10', '2.20']) == Decimal('3.30')\n"
+        f"assert {first}_total(['1.004']) == Decimal('1.00')\n"
+        f"assert {second}_total(['0.125']) == Decimal('0.12')\n"
+        f"assert {second}_total(['{amount}']) == Decimal('{amount}').quantize(Decimal('0.01'))\n"
+    )
+    failures = []
+    if not _behaviour_ok(workspace, f"tests/test_{first}.py", checks, golden["min_tests"]):
+        failures.append("semantic_validator_failed")
+    present = [ast.dump(node) for node in ast.parse((workspace / f"src/benchapp/{second}.py").read_text(encoding="utf-8")).body]
+    if present != golden["decoy_nodes"]:
+        failures.append("decoy_changed")
+    return failures
+
+
+def _test_update_failures(workspace: Path, golden: dict[str, Any]) -> list[str]:
+    """A kib is 1024 bytes, every other unit is unchanged, and the existing test now expects the new
+    value: its tests pass and the old expectation is gone from it."""
+    count = golden["count"]
+    checks = (
+        "from benchapp.sizes import parse_size\n"
+        f"assert parse_size('{count}kib') == {count * 1024}\n"
+        "assert parse_size('4kb') == 4000 and parse_size(' 7B ') == 7\n"
+        "assert parse_size('3mb') == 3 * 1000**2 and parse_size('1mib') == 1024**2\n"
+    )
+    if not _behaviour_ok(workspace, "tests/test_sizes.py", checks, golden["min_tests"]):
+        return ["semantic_validator_failed"]
+    tree = ast.parse((workspace / "tests/test_sizes.py").read_text(encoding="utf-8"))
+    if any(isinstance(node, ast.Constant) and node.value == count * 1000 for node in ast.walk(tree)):
+        return ["test_not_updated"]
+    return []
+
+
+_CONSISTENCY_AB_VALIDATORS = {"DUPLICATE": _duplicate_failures, "SCOPE-TRAP": _scope_trap_failures, "DECOY": _decoy_failures,
+                              "TEST-UPDATE": _test_update_failures}
+# impact-ab: the definition and every caller module are exercised in a fresh interpreter. The
+# workspace's own tests are the model's to change; they are not run here, because a bare runpy cannot
+# run what pytest can (fixtures, parametrize, `import pytest` in this interpreter): measured on a
+# first run, a correct gpt-6.1-sol edit whose new test imported pytest was scored as a fail.
+_NO_TESTS = "-"
+def _signature_ok(workspace: Path, golden: dict[str, Any]) -> bool:
+    rate = golden["rate"]
+    amount = 12345
+    checks = (
+        "import inspect\n"
+        "from benchapp.pricing import compute_fee\n"
+        "parameters = inspect.signature(compute_fee).parameters\n"
+        "assert 'minimum_cents' in parameters and parameters['minimum_cents'].default is inspect.Parameter.empty\n"
+        "assert compute_fee(10000, 250, minimum_cents=0) == 250\n"
+        "assert compute_fee(10000, 250, minimum_cents=400) == 400\n"
+        "from benchapp.billing import bill_total\nfrom benchapp.invoices import invoice_fee\n"
+        "from benchapp.report import fee_line\nfrom benchapp.cli import cli_fee\n"
+        f"assert bill_total({amount}) == {amount + amount * rate // 10000}\n"
+        f"assert invoice_fee({amount}) == {amount * rate * 2 // 10000}\n"
+        f"assert fee_line({amount}) == 'fee={amount * 100 // 10000}'\n"
+        f"assert cli_fee(['{amount}']) == {amount * 50 // 10000}\n"
+    )
+    return _behaviour_ok(workspace, _NO_TESTS, checks, 0)
+
+
+def _return_shape_ok(workspace: Path, golden: dict[str, Any]) -> bool:
+    price = golden["price"]
+    checks = (
+        "import dataclasses\n"
+        "from benchapp.quotes import Quote, build_quote\n"
+        "quote = build_quote(3)\n"
+        "assert isinstance(quote, Quote) and dataclasses.is_dataclass(quote)\n"
+        f"assert (quote.units, quote.total_cents) == (3, {3 * price})\n"
+        "try:\n    quote.units = 4\nexcept dataclasses.FrozenInstanceError:\n    pass\n"
+        "else:\n    raise AssertionError('Quote is not frozen')\n"
+        "from benchapp.checkout import checkout_total\nfrom benchapp.emailer import email_subject\n"
+        "from benchapp.ledger import ledger_entry\n"
+        f"assert checkout_total(3) == {3 * price}\n"
+        "assert email_subject(2) == 'Your quote for 2 units'\n"
+        f"assert ledger_entry(4) == (4, {4 * price})\n"
+    )
+    return _behaviour_ok(workspace, _NO_TESTS, checks, 0)
+
+
+def _kwarg_ok(workspace: Path, golden: dict[str, Any]) -> bool:
+    checks = (
+        "import inspect\n"
+        "from benchapp.http_client import fetch\n"
+        "parameters = inspect.signature(fetch).parameters\n"
+        "assert 'timeout_s' in parameters and 'timeout' not in parameters\n"
+        "assert not any(p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values())\n"
+        "assert fetch('u', timeout_s=7.0) == {'url': 'u', 'timeout': 7.0, 'retries': 1}\n"
+        "from benchapp.sync import sync_page\nfrom benchapp.crawler import crawl\nfrom benchapp.health import ping\n"
+        f"assert sync_page('a') == {{'url': 'a', 'timeout': {golden['sync_timeout']}, 'retries': 1}}\n"
+        f"assert crawl('b') == {{'url': 'b', 'timeout': {golden['crawl_timeout']}, 'retries': 3}}\n"
+        "assert ping('c') == {'url': 'c', 'timeout': 1.0, 'retries': 0}\n"
+    )
+    return _behaviour_ok(workspace, _NO_TESTS, checks, 0)
+
+
+def _control_ok(workspace: Path, golden: dict[str, Any]) -> bool:
+    checks = (
+        "from benchapp.units import to_cents\n"
+        "assert to_cents(1.25) == 125 and to_cents(0) == 0\n"
+        "try:\n    to_cents(-0.5)\nexcept ValueError as exc:\n    assert str(exc) == 'negative amount'\n"
+        "else:\n    raise AssertionError('no ValueError')\n"
+        "from benchapp.cart import cart_total\nfrom benchapp.refunds import refund_cents\n"
+        "from benchapp.summary import summary_line\n"
+        "assert cart_total([1.0, 2.5]) == 350 and refund_cents(0.99) == 99 and summary_line(3.0) == '300 cents'\n"
+    )
+    return _behaviour_ok(workspace, _NO_TESTS, checks, 0)
+
+
+def _defaulted_ok(workspace: Path, golden: dict[str, Any]) -> bool:
+    per_kg = golden["per_kg"]
+    weight = 1234
+    checks = (
+        "import inspect\n"
+        "from benchapp.shipping import ship_cost\n"
+        "parameter = inspect.signature(ship_cost).parameters['handling_cents']\n"
+        "assert parameter.kind is inspect.Parameter.KEYWORD_ONLY and parameter.default == 0\n"
+        f"assert ship_cost(1000, 2) == {2 * per_kg}\n"
+        f"assert ship_cost(1000, 2, handling_cents=30) == {2 * per_kg + 30}\n"
+        "from benchapp.orders import order_total\nfrom benchapp.labels import label_cost\n"
+        "from benchapp.express import express_cost\nfrom benchapp.cli import cli_cost\n"
+        f"assert order_total(500, {weight}) == {500 + weight * 2 * per_kg // 1000}\n"
+        f"assert label_cost({weight}) == {weight * 3 * per_kg // 1000}\n"
+        f"assert express_cost({weight}, 2) == {2 * (weight * 2 * per_kg // 1000)}\n"
+        f"assert cli_cost(['{weight}']) == {weight * per_kg // 1000}\n"
+    )
+    return _behaviour_ok(workspace, _NO_TESTS, checks, 0)
+
+
+_IMPACT_AB_VALIDATORS = {
+    "SIGNATURE": _signature_ok,
+    "RETURN-SHAPE": _return_shape_ok,
+    "KWARG": _kwarg_ok,
+    "CONTROL": _control_ok,
+    "DEFAULTED": _defaulted_ok,
+}
 
 
 def _ratio(found: set[tuple[Any, ...]], gold: set[tuple[Any, ...]]) -> tuple[float, float]:
@@ -69,7 +419,8 @@ def validate(template_id: str, task_class: str, workspace: Path, golden_path: Pa
     }
     if task_class == "edit":
         allowed = set(golden["allowed_paths"])
-        if not set(paths).issubset(allowed) or not paths:
+        prefixes = tuple(golden.get("allowed_prefixes", ()))
+        if not paths or any(path not in allowed and not (prefixes and path.startswith(prefixes)) for path in paths):
             failures.append("mutation_outside_scope")
         try:
             if name == "RENAME":
@@ -77,6 +428,14 @@ def validate(template_id: str, task_class: str, workspace: Path, golden_path: Pa
                 tests = (workspace / "tests/test_retries.py").read_text(encoding="utf-8")
                 ast.parse(production); ast.parse(tests)
                 semantic = "DEFAULT_RETRY_LIMIT" not in production + tests and production.count("MAX_RETRY_ATTEMPTS") == 2 and "MAX_RETRY_ATTEMPTS" in tests
+            elif name in _LSP_AB_VALIDATORS:
+                semantic = _LSP_AB_VALIDATORS[name](workspace, golden)
+            elif name in _CONSISTENCY_AB_VALIDATORS:
+                consistency_failures = _CONSISTENCY_AB_VALIDATORS[name](workspace, golden)
+                failures.extend(code for code in consistency_failures if code != "semantic_validator_failed")
+                semantic = not consistency_failures
+            elif name in _IMPACT_AB_VALIDATORS:
+                semantic = _IMPACT_AB_VALIDATORS[name](workspace, golden)
             else:
                 module = runpy.run_path(str(workspace / "src/benchapp/provider_select.py"))
                 select_provider = module["select_provider"]

@@ -12,6 +12,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from . import user_executors
+from .fanout_confinement import external_search_path, named_launch_identity_holds, observe_named_launch
 from .fanout_executor_sessions import (
     SESSION_HELP_PROBE_BYTES,
     BinaryIdentity,
@@ -19,9 +21,11 @@ from .fanout_executor_sessions import (
     bounded_session_probe,
 )
 
-from ..executors import EXECUTOR_PROFILES, executor_label
+from ..executors import EXECUTOR_PROFILES, canonical_executor_profile, executor_label
 from ..local_store import atomic_write_json, read_json_object_result, utc_now
 from ..paths import OmhPaths, find_project_root
+from .codex_windows_sandbox import CODEX_WINDOWS_SANDBOX_READ_ONLY_NOTE, codex_windows_sandbox_signal
+from .fanout_settings import stored_codex_windows_sandbox
 from .pre_handoff_readiness import (
     build_pre_handoff_repair_card,
     evaluate_pre_handoff_readiness,
@@ -59,6 +63,25 @@ def observe_session_binary(binary: str, *, env: Mapping[str, str] | None = None)
         return None
 
 
+def session_launch_path(binary: str, identity: BinaryIdentity, *, env: Mapping[str, str] | None = None) -> str:
+    """The path to run the observed binary by: the one PATH found, when it is still that file (#3014).
+
+    `identity.resolved_path` is the real file, which is what gets hashed. A
+    multi-call binary such as a mise shim picks its tool from argv[0], so
+    running the real file (`mise`) loses the tool. Running the link PATH found
+    keeps the name, and is the same file as long as it still resolves to it;
+    otherwise the real file is run, as before.
+    """
+    located = binary if os.path.isabs(binary) else shutil.which(binary, path=(env or os.environ).get('PATH'))
+    if located is None:
+        return identity.resolved_path
+    try:
+        same = str(Path(located).resolve(strict=True)) == identity.resolved_path
+    except OSError:
+        same = False
+    return str(Path(located).absolute()) if same else identity.resolved_path
+
+
 def negotiate_session_capability(owner: str, binary: str, *, env: Mapping[str, str]) -> SessionCapability | None:
     """Help/version negotiation only; never a provider request or release-floor guess."""
     identity = observe_session_binary(binary, env=env)
@@ -67,7 +90,8 @@ def negotiate_session_capability(owner: str, binary: str, *, env: Mapping[str, s
     capability = SessionCapability(owner, None, identity, None)
     if owner not in ('codex', 'claude-code'):
         return capability
-    version_bytes, version_reason = bounded_session_probe([identity.resolved_path, '--version'], env=env)
+    launch = session_launch_path(binary, identity, env=env)
+    version_bytes, version_reason = bounded_session_probe([launch, '--version'], env=env)
     help_args = ['exec', '--help'] if owner == 'codex' else ['--help']
     # The help probe reads a document, so it gets a document-sized budget and
     # keeps what it read when even that was not enough: finding every flag in
@@ -75,7 +99,7 @@ def negotiate_session_capability(owner: str, binary: str, *, env: Mapping[str, s
     # from a truncated read is ambiguous. Before this, a help page that
     # outgrew the shared 16 KiB cap silently switched the whole lane off.
     help_bytes, help_reason = bounded_session_probe(
-        [identity.resolved_path, *help_args],
+        [launch, *help_args],
         env=env,
         limit_bytes=SESSION_HELP_PROBE_BYTES,
         keep_partial=True,
@@ -161,16 +185,16 @@ _COMMANDS: dict[str, tuple[str, tuple[str, ...]]] = {
     "codex": ("codex", ("--version",)),
     "claude-code": ("claude", ("--version",)),
     "omx-runtime": ("omx", ("--version",)),
-    # omo ships as an extension of a host agent CLI, not as its own binary.
-    # This static entry is NEVER read for omo-runtime: `_resolved_command`
-    # always overrides it with the DETECTED host (`omo_runtime_host` in
-    # fanout_dispatch — pi first, then its senpi distribution, then the
-    # opencode plugin host). The entry mirrors OMO_RUNTIME_HOST_CANDIDATES[0]
+    # The pi-family runtime ships as an extension of a host agent CLI, not as its own binary.
+    # This static entry is NEVER read for pi-family-runtime: `_resolved_command`
+    # always overrides it with the DETECTED host (`pi_family_host` in
+    # fanout_dispatch — pi first, then its distribution host, then the pi
+    # fork host, then the opencode plugin host). The entry mirrors PI_FAMILY_HOST_CANDIDATES[0]
     # so a future second consumer of this table sees the same pi-first
     # default the detector promises — do not repin it to one distribution.
     # No host on PATH probes the first candidate and truthfully reads
     # `missing`; the runtime prompt-handoff path never needed a local CLI.
-    "omo-runtime": ("pi", ("--version",)),
+    "pi-family-runtime": ("pi", ("--version",)),
     "omc-runtime": ("omc", ("--version",)),
 }
 
@@ -294,6 +318,11 @@ def probe_executor_readiness(
     force: bool = False,
     dry_run: bool = False,
     now: str = "",
+    executor_spec: object | None = None,
+    executor_registry_home: Path | None = None,
+    probe_environment: Mapping[str, str] | None = None,
+    repo_root: Path | None = None,
+    write_roots: tuple[Path, ...] = (),
 ) -> dict[str, object]:
     """Readiness for one profile, rechecked against the machine it was observed on.
 
@@ -305,6 +334,13 @@ def probe_executor_readiness(
     behind a subprocess run nobody asked for, which is the same surprise #837
     exists to remove --- only later in the handoff.
     """
+    user_spec = executor_spec if executor_spec is not None else _user_executor_spec(paths, profile, executor_registry_home)
+    if user_spec is not None:
+        # A user-declared executor is never cached under a static profile id:
+        # its command line can change by editing one file, so the digest is
+        # part of any observation and this call observes it fresh.
+        return _user_executor_readiness(user_spec, dry_run=dry_run, environment=probe_environment,
+                                        repo_root=repo_root, write_roots=write_roots)
     normalized = _normalize_profile(profile)
     if normalized == "choose":
         return executor_readiness_contract("choose")
@@ -464,6 +500,26 @@ def _with_advisory_signals(paths: OmhPaths, profile: str, result: dict[str, obje
     result["auth_signal"] = auth_signal_for_profile(profile)
     result["last_limit_signal"] = last_limit_signal_for_profile(paths, profile)
     result["last_auth_failure_signal"] = last_auth_failure_signal(paths, profile)
+    if profile == "codex":
+        # Recomputed per call like the markers above: the user edits
+        # config.toml between probes, and a cached read would keep warning.
+        try:
+            override = stored_codex_windows_sandbox(paths.omh_home)
+        except ValueError:
+            # The dispatch itself refuses a broken settings file loudly; the
+            # readiness surface reports the Codex-side answer meanwhile.
+            override = ""
+        signal = codex_windows_sandbox_signal(
+            platform_name=_os_name(),
+            environ=os.environ,
+            home=Path.home(),
+            project_root=find_project_root(),
+            dispatch_override=override,
+        )
+        result["windows_sandbox"] = signal
+        if signal["write_capability"] == "read_only_expected" and result.get("available"):
+            result["summary"] = f"{result.get('summary', '')} {CODEX_WINDOWS_SANDBOX_READ_ONLY_NOTE}".strip()
+            result["next_action"] = "configure_codex_windows_sandbox"
     return result
 
 
@@ -479,18 +535,39 @@ def _path_resolutions(command: str) -> list[str]:
     for directory in os.environ.get("PATH", "").split(os.pathsep):
         if not directory:
             continue
-        candidate = Path(directory) / command
-        try:
-            if not candidate.is_file() or not os.access(candidate, os.X_OK):
+        for name in _executable_names(command):
+            candidate = Path(directory) / name
+            try:
+                if not candidate.is_file() or not os.access(candidate, os.X_OK):
+                    continue
+                real = str(candidate.resolve())
+            except OSError:
                 continue
-            real = str(candidate.resolve())
-        except OSError:
-            continue
-        if real in seen:
-            continue
-        seen.add(real)
-        resolutions.append(str(candidate))
+            if real in seen:
+                continue
+            seen.add(real)
+            resolutions.append(str(candidate))
     return resolutions
+
+
+def _os_name() -> str:
+    """`os.name`, behind a seam: patching `os.name` itself retypes every `Path()`."""
+    return os.name
+
+
+def _executable_names(command: str) -> tuple[str, ...]:
+    """The file names `command` can run as here.
+
+    On Windows a bare name runs only through a PATHEXT extension, which is
+    what `shutil.which` resolves too. npm installs an extensionless POSIX
+    shell shim next to `codex.CMD`; Windows sees `X_OK` on any file, so
+    without this the shim was spawned first and failed with
+    `[WinError 193] %1 is not a valid Win32 application` (#2471).
+    """
+    if _os_name() != "nt" or Path(command).suffix:
+        return (command,)
+    extensions = [ext for ext in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";") if ext]
+    return tuple(command + ext.lower() for ext in extensions)
 
 
 def _observed_version(binary: str, args: list[str]) -> str:
@@ -519,11 +596,11 @@ def _resolution_report(command: str, args: list[str]) -> list[dict[str, str]]:
 
 def _resolved_command(profile: str) -> tuple[str, tuple[str, ...]] | None:
     entry = _COMMANDS.get(profile)
-    if profile == "omo-runtime":
-        from .fanout_dispatch import OMO_RUNTIME_HOST_CANDIDATES, omo_runtime_host
+    if profile == "pi-family-runtime":
+        from .fanout_dispatch import PI_FAMILY_HOST_CANDIDATES, pi_family_host
 
-        host = omo_runtime_host()
-        return ((host, ("--version",)) if host else (OMO_RUNTIME_HOST_CANDIDATES[0], ("--version",)))
+        host = pi_family_host()
+        return ((host, ("--version",)) if host else (PI_FAMILY_HOST_CANDIDATES[0], ("--version",)))
     return entry
 
 
@@ -532,16 +609,164 @@ def _resolved_command(profile: str) -> tuple[str, tuple[str, ...]] | None:
 _VERSION_TOKEN = re.compile(r"(?<![0-9A-Za-z.])v?([0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]{1,32})?)(?![0-9A-Za-z])")
 
 
+def _user_executor_spec(paths: OmhPaths, profile: str, registry_home: Path | None) -> object | None:
+    """The operator's loaded definition for `profile`, or None for a built-in id.
+
+    Built-ins return before any read: this hook must not add a file read to a
+    codex or claude probe. A configured id resolves from the one registry file
+    under the resolved home; an absent or invalid one returns None, and the
+    caller falls through to the built-in profile table exactly as before.
+    """
+    from .executors import EXECUTOR_PROFILES
+    from .user_executors import load_user_executors, operator_executor_home, valid_executor_id
+
+    value = str(profile or "").strip()
+    if not value or value in EXECUTOR_PROFILES or value == "choose":
+        return None
+    if not valid_executor_id(value):
+        return None
+    registry = load_user_executors(registry_home if registry_home is not None else operator_executor_home(paths=paths))
+    return registry.entries.get(value)
+
+
+def _user_executor_readiness(spec: object, *, dry_run: bool, environment: Mapping[str, str] | None,
+                             repo_root: Path | None, write_roots: tuple[Path, ...]) -> dict[str, object]:
+    """One bounded version probe of a user-declared executor's version argv.
+
+    The argv is the operator's declaration (`[program, ...]`), the program is
+    resolved by its PATH name and launched by that name (#3014) so a multi-call
+    shim still picks its tool, and only a version token is kept. `--version` is
+    not authentication, authorization or provider validation, and nothing here
+    is dispatch evidence.
+    """
+    version = tuple(getattr(spec, "version", ()) or ())
+    contract: dict[str, object] = {
+        "schema_version": EXECUTOR_READINESS_SCHEMA_VERSION,
+        "profile": str(getattr(spec, "id", "")),
+        "label": str(getattr(spec, "label", "")),
+        "status": "not_observed",
+        "first_use_only": True,
+        "cache_key": f"executor_readiness:{getattr(spec, 'id', '')}",
+        "definition_sha256": str(getattr(spec, "definition_sha256", "")),
+        "user_executor": True,
+        "probe": {
+            "kind": "local_command",
+            "command": version[0] if version else "",
+            "args": list(version[1:]),
+            "timeout_seconds": _PROBE_TIMEOUT_SECONDS if version else 0,
+            "captures": ["available", "exit_code", "summary"],
+        },
+        "ready_action": "send_to_executor",
+        "fallback_policy": {
+            "when_missing": "ask_user_to_choose_executor_or_configure_one",
+            "retry_after_state_change": True,
+            "retry_limit": 1,
+            "suggested_actions": ["choose_executor", "continue_in_hermes"],
+        },
+        "not_evidence": [
+            "executor dispatch",
+            "executor result",
+            "execution",
+            "implementation",
+            "verification",
+            "review",
+            "CI",
+            "merge",
+        ],
+        "claim_boundary": READINESS_BINARY_ONLY_CLAIM_BOUNDARY,
+    }
+    if not user_executors.USER_EXECUTOR_LAUNCH_SUPPORTED:
+        contract.update({"status": "blocked", "available": False, "observed_once": False,
+                         "reason": user_executors.USER_EXECUTOR_PLATFORM_UNSUPPORTED,
+                         "summary": "External executors require macOS or Linux.", "next_action": "choose_executor"})
+        return contract
+    if dry_run:
+        contract.update({"status": "not_observed", "cache_status": "would_probe", "first_use_skipped": False})
+        return contract
+    if not version:
+        contract.update({
+            "status": "not_applicable",
+            "available": False,
+            "observed_once": True,
+            "reason": "no_version_probe",
+            "summary": "This executor declares no version probe.",
+            "next_action": "configure_version_probe",
+        })
+        return contract
+    binary, args = version[0], list(version[1:])
+    source = os.environ if environment is None else environment
+    repositories = tuple(root for root in (repo_root, find_project_root(Path.cwd())) if root is not None)
+    env = {"PATH": external_search_path(source, binary=binary, repositories=repositories, write_roots=write_roots)}
+    named = observe_named_launch(binary, env)
+    identity = observe_session_binary(named.link_path, env=env) if named else None
+    if (named is None or identity is None or not named_launch_identity_holds(named)
+            or external_search_path(env, binary=binary, repositories=repositories, write_roots=write_roots) != env["PATH"]):
+        contract.update({
+            "status": "missing",
+            "available": False,
+            "reason": "not_installed",
+            "observed": READINESS_OBSERVED_BINARY_VERSION_ONLY,
+            "observed_once": True,
+            "summary": f"`{binary}` was not found on PATH.",
+            "next_action": "choose_executor_or_configure_path",
+        })
+        return contract
+    launch = named.link_path
+    # The filesystem root is fixed and outside the checkout and lane (not a
+    # caller-controlled TMPDIR, HOME or project-scoped artifact directory).
+    output, probe_reason = bounded_session_probe([launch, *args], cwd=Path(launch).anchor, env=env)
+    if output is None:
+        contract.update({
+            "status": "blocked",
+            "available": False,
+            "observed": READINESS_OBSERVED_BINARY_VERSION_ONLY,
+            "observed_once": True,
+            "reason": probe_reason,
+            "summary": f"`{binary}` version probe did not complete ({probe_reason}).",
+            "next_action": "choose_executor_or_configure_path",
+        })
+        return contract
+    try:
+        text = output.decode("utf-8").strip()
+    except UnicodeError:
+        contract.update({
+            "status": "blocked",
+            "available": False,
+            "observed": READINESS_OBSERVED_BINARY_VERSION_ONLY,
+            "observed_once": True,
+            "reason": "probe_output_not_utf8",
+            "summary": f"`{binary}` version probe output was not UTF-8.",
+            "next_action": "choose_executor_or_configure_path",
+        })
+        return contract
+    first_line = text.splitlines()[0] if text else ""
+    match = _VERSION_TOKEN.search(first_line)
+    contract.update({
+        "status": "ready",
+        "available": True,
+        "observed": READINESS_OBSERVED_BINARY_VERSION_ONLY,
+        "observed_once": True,
+        "exit_code": 0,
+        "binary_identity": identity.resolved_path,
+        "command_path": launch,
+        "version": match.group(1) if match else "",
+        "version_policy": EXECUTOR_VERSION_POLICY,
+        "summary": f"Version query succeeded. {READINESS_WORKSPACE_PROBE_NOTE}",
+        "next_action": "send_to_executor",
+    })
+    return contract
+
+
 def version_probed_agent_clis() -> frozenset[str]:
     """The agent CLIs this module already runs `--version` on, and no others.
 
-    The readiness table's commands plus every omo host `_resolved_command` can
+    The readiness table's commands plus every pi-family host `_resolved_command` can
     pick. Another surface may reuse this probe for one of them; it may not
     widen the set by asking.
     """
-    from .fanout_dispatch import OMO_RUNTIME_HOST_CANDIDATES
+    from .fanout_dispatch import PI_FAMILY_HOST_CANDIDATES
 
-    return frozenset(command for command, _args in _COMMANDS.values()) | frozenset(OMO_RUNTIME_HOST_CANDIDATES)
+    return frozenset(command for command, _args in _COMMANDS.values()) | frozenset(PI_FAMILY_HOST_CANDIDATES)
 
 
 def agent_cli_version(command: str) -> tuple[str, str | None]:
@@ -669,10 +894,10 @@ def _run_probe(contract: dict[str, object]) -> dict[str, object]:
 
 
 # CLI-backed candidates for the choose-executor question: profiles with a
-# locally probeable agent CLI. omo-runtime joined when the senpi host CLI
+# locally probeable agent CLI. pi-family-runtime joined when pi's distribution host
 # gained a validated dispatch template — the choice card should offer every
 # surface the user can actually run.
-EXECUTOR_CHOICE_CONTEXT_PROFILES = ("codex", "claude-code", "omo-runtime")
+EXECUTOR_CHOICE_CONTEXT_PROFILES = ("codex", "claude-code", "pi-family-runtime")
 EXECUTOR_CHOICE_CONTEXT_CLAIM_BOUNDARY = (
     "Choice context ranks locally-installed executor candidates from cached readiness and local "
     "markers only. It is not provider quota, entitlement, or login truth, and it never removes a "
@@ -793,13 +1018,13 @@ def _ready_action(profile: str) -> str:
         return "send_to_executor"
     if profile == "claude-code":
         return "show_prompt_handoff"
-    if profile in {"omx-runtime", "omo-runtime", "omc-runtime", "hermes"}:
+    if profile in {"omx-runtime", "pi-family-runtime", "omc-runtime", "hermes"}:
         return "show_runtime_handoff"
     return "show_prompt_handoff"
 
 
 def _normalize_profile(profile: str | None) -> str:
-    value = str(profile or "choose").strip()
+    value = canonical_executor_profile(str(profile or "choose").strip())
     if value == "choose":
         return value
     if value not in EXECUTOR_READINESS_PROFILES:

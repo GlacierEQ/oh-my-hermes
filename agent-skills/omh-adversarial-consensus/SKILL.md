@@ -1,6 +1,6 @@
 ---
 name: "omh-adversarial-consensus"
-description: "[omh] Technical proposal facing adversarial scrutiny: independent perspectives attack a proposal, then distill into a bundle a separate planner consumes. Use when the user says: adversarial-consensus, adversarial planning, adversarial plan review, red team this plan, red-team this plan, red team the proposal, multi-perspective review, multiple perspectives."
+description: "[omh] Technical proposal facing adversarial scrutiny."
 license: MIT
 metadata:
   hermes:
@@ -32,13 +32,13 @@ This is an OMH `adversarial-consensus` workflow skill, projected for Agent Skill
 Good example:
 
 - Prompt: $adversarial-consensus we plan to move session state into Redis before the launch — attack it from every angle before I write the plan.
-- Expected behavior: Name the roster and their distinct angles, take blind findings from each, run one attack-only round, resolve each objection to defend/refine/concede, distill only into the four buckets, and hand the bundle to `ralplan` as planning input.
+- Expected behavior: Name the roster and their distinct angles, take blind findings from each, run one attack-only round, resolve each objection to defend/refine/concede, distill only into the four buckets, and hand the bundle to `ulw-plan` as planning input.
 - Why: The decision is contested and pre-plan, which is exactly where independent objections are worth more than one planner's confidence.
 
 Bad example:
 
 - Prompt: $adversarial-consensus give me the migration plan with the steps and the rollout order.
-- Expected behavior: Produce the distilled bundle and hand it to `ralplan`; the steps and rollout order are the planner's output, not this workflow's.
+- Expected behavior: Produce the distilled bundle and hand it to `ulw-plan`; the steps and rollout order are the planner's output, not this workflow's.
 - Why: The bundle is INPUT to planning. Emitting a plan here skips the reviewed-plan gate and turns the buckets into a task list.
 
 ## Completion Checklist
@@ -52,7 +52,7 @@ Bad example:
 
 ## Recovery Notes
 
-- If the proposal under review cannot be stated in one paragraph, route back to `deep-interview` before opening round one.
+- If the proposal under review cannot be stated in one paragraph, route back to `ulw-interview` before opening round one.
 - If independence was broken — a perspective saw another's findings, or the same seat produced two angles — say so, re-run that perspective on a restated problem, and mark the round's independence as caveated rather than silently continuing.
 - If a round produces no objections at all, treat that as a roster defect rather than consensus: state which angle is missing and add or replace a seat before distilling.
 - If distillation would need a fifth bucket, the extra content is a plan trying to escape; move it to the planner handoff instead of widening the bucket set.
@@ -63,7 +63,7 @@ Bad example:
 
 Use when a proposal, plan, or direction needs independent perspectives to attack it before a plan is written, and the distilled result is meant as input to planning rather than as the plan.
 
-    Strong routing signals: `adversarial-consensus`, `$adversarial-consensus`, `adversarial planning`, `adversarial plan review`, `red team this plan`, `red-team this plan`, `red team the proposal`, `multi-perspective review`, `multiple perspectives`, `independent perspectives`, `attack this proposal`, `poke holes in this`, `hyperplan`, `敵対的レビュー`, `多角的レビュー`, `レッドチームレビュー`, `この計画に反論`, `穴を探して`, `적대적 검토`, `다관점 검토`, `여러 관점에서 검토`, `레드팀 검토`, `이 계획 반박`, `허점 찾아`, `对抗式评审`, `多视角评审`, `红队评审`, `反驳这个方案`, `找出漏洞`, `kritisi proposal ini dari berbagai sudut pandang`, `cari kelemahan proposal teknis ini`, `uji rencana ini dengan pendekatan red team`, `minta pendapat independen untuk menguji proposal`, `bantu bantah asumsi dalam rancangan ini`, `tinjau proposal secara adversarial`, `phản biện đề xuất này từ nhiều góc độ`, `tìm điểm yếu của đề xuất kỹ thuật này`, `kiểm tra kiểu red team`, `yêu cầu đánh giá độc lập để kiểm chứng đề xuất`, `giúp bác bỏ các giả định trong thiết kế này`, `rà soát đề xuất theo hướng phản biện`
+    Strong routing signals: `adversarial-consensus`, `$adversarial-consensus`, `adversarial planning`, `adversarial plan review`, `red team this plan`, `red-team this plan`, `red team the proposal`, `multi-perspective review`, `multiple perspectives`, `independent perspectives`, `attack this proposal`, `poke holes in this`, `hyperplan`, `敵対的レビュー`, `多角的レビュー`, `レッドチームレビュー`, `この計画に反論`, `穴を探して`, `적대적 검토`, `다관점 검토`, `여러 관점에서 검토`, `레드팀 검토`, `이 계획 반박`, `허점 찾아`, `адверсариальное ревью`, `жёсткое ревью архитектуры`, `раскритикуй архитектуру`, `найди слабые места в архитектуре`, `对抗式评审`, `多视角评审`, `红队评审`, `反驳这个方案`, `找出漏洞`, `kritisi proposal ini dari berbagai sudut pandang`, `cari kelemahan proposal teknis ini`, `uji rencana ini dengan pendekatan red team`, `minta pendapat independen untuk menguji proposal`, `bantu bantah asumsi dalam rancangan ini`, `tinjau proposal secara adversarial`, `phản biện đề xuất này từ nhiều góc độ`, `tìm điểm yếu của đề xuất kỹ thuật này`, `kiểm tra kiểu red team`, `yêu cầu đánh giá độc lập để kiểm chứng đề xuất`, `giúp bác bỏ các giả định trong thiết kế này`, `rà soát đề xuất theo hướng phản biện`
 
 ## Catalog Metadata
 
@@ -80,7 +80,7 @@ Quality bar:
 - Round two attacks only: every perspective attacks other perspectives' findings and never defends or restates its own. A perspective with no objection to any other seat says so explicitly rather than filling the round with agreement.
 - Round three answers each objection with exactly one verdict — defend with evidence, refine the finding, or concede it — and a conceded finding is struck from the record instead of being softened.
 - The lead distills only. Nothing new enters at distillation: every line in the bundle traces to a surviving finding, and it goes into one of Hard Constraints, Decisions, Risks, Open Questions — never into a fifth bucket, a recommendation, a sequence of steps, or a task list.
-- End with the mandatory handoff: state that the bundle is INPUT to planning, name the follow-on planning workflow (`ralplan` for a reviewed plan, `plan` when the shape is already agreed), and stop. Treating the bundle as the plan is the anti-pattern this workflow exists to prevent.
+- End with the mandatory handoff: state that the bundle is INPUT to planning, name the follow-on planning workflow (the `ulw-plan` workflow for a reviewed plan, the `omh-plan` workflow when the shape is already agreed), and stop. Treating the bundle as the plan is the anti-pattern this workflow exists to prevent.
 - Keep round transitions and perspective outputs as declarations: a stated round change is not evidence that the round happened, and a distilled bundle is not plan acceptance, implementation, review, CI, or merge evidence.
 
 Required inputs:

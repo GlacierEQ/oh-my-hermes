@@ -1,6 +1,6 @@
 ---
 name: "omh-apple-design"
-description: "[omh] Designing or reviewing an iOS, macOS, or Apple-style UI: prepare native Apple UI or Apple marketing product-visual direction, review, and improvement briefs with evidence-backed remediation handoffs. Use when the user says: apple-design, apple design, apple ui design, apple hig, human interface guidelines, ios design guidelines, macos app design, apple-inspired web."
+description: "[omh] Designing or reviewing an iOS, macOS or Apple UI: prepare native Apple UI or Apple marketing product-visual direction, review, and improvement briefs with evidence-backed remediation handoffs. Use when the user says: apple-design, apple design, apple ui design, apple hig, human interface guidelines, ios design guidelines, macos app design, apple-inspired web."
 license: MIT
 author: "oh-my-hermes maintainers"
 metadata:
@@ -14,47 +14,18 @@ metadata:
 
 # Apple Design
 
-This is a Hermes-native `apple-design` workflow skill.
+Required: mode: design, review, or improve, visual target: Apple marketing/product visual, native Apple application, or Apple-inspired web UI, target, surface/state, supplied evidence, and available execution constraints. Output: apple_design_brief/v1, apple_visual_direction/v1, apple_design_finding/v1 with severity, location/evidence, impact, source/applicability, fix, owner, and missing checks, two to four design directions before visual work when direction is open, composed remediation route to `omh-frontend`, `omh-design-quality-gate`, `omh-accessibility-audit`, `omh-visual-qa`, or `omh-award-bar-score`.
 
 ## Why This Exists
 
 `apple-design` turns Apple UI design, review, and improvement requests into a platform-aware brief that respects native and web differences while preserving OMH's existing implementation and evidence owners.
 
-## Do Not Use When
-
-- The request is generic frontend design, accessibility, screenshot QA, image-card work, or material guidance without an Apple-specific phrase or explicit `omh-apple-design` invocation; use the existing specialist lane.
-- The message concerns Apple fruit, stock, support, a glass database, material science, or unrelated Swift/macOS discussion.
-- The user needs a conformance, accessibility PASS, or visual PASS claim without supplied and observed evidence.
-
-## Examples
-
-Good example:
-
-- Prompt: Review this iPad checkout against Apple HIG and hand the concrete fixes to the frontend and accessibility owners.
-- Expected behavior: Prepare apple_design_brief/v1 with applicable evidence, findings, platform-aware remediation, and the existing owner routes.
-- Why: The request specifies an Apple platform and asks for a review plus downstream remediation without treating the brief as implementation or a verdict.
-
-Bad example:
-
-- Prompt: Call our generic WCAG screenshot check Apple-certified.
-- Expected behavior: Keep the Apple-specific verdict unavailable and route generic accessibility or rendered evidence to the existing specialist.
-- Why: A generic check without applicable Apple evidence cannot establish platform compliance or certification.
-
-## Completion Checklist
-
-- Target, convention, state, and evidence are explicit.
-- Each direction or finding names evidence, source applicability, owner, and missing verification; product visuals name original art direction.
-- Implementation remains with the selected coding owner; accessibility and visual completion remain not_observed until their existing lanes record evidence.
-
-## Recovery Notes
-
-- If the platform/version, convention, or target state is missing, ask for it before treating a guideline as applicable.
-- If no supplied screen or code exists, prepare the brief and mark visual status not_observed rather than inferring a rendered result.
+Contract: `references/full-contract.md` (examples, sibling boundaries, full artifact details).
 
 ## Workflow Lane
 
-- Current lane: **Materials and visual summaries** (`show-reel`, `design-orchestration`, `apple-design`, `design-quality-gate`, `award-bar-score`, `frontend`, `accessibility-audit`, `visual-qa`, `+7 more`) - web, accessibility, visual QA, files, and packages.
-- If intent belongs to another lane, hand back to `oh-my-hermes` or name the adjacent workflow.
+- Current lane: **Materials and visual summaries** - web, accessibility, visual QA, files, and packages.
+- If intent belongs to another lane, hand back to `omh-routing` or name the adjacent workflow.
 - Shared product, routing, compatibility, and evidence rules: `skill_view(name='omh-routing', file_path='references/skill-common-rail.md')`.
 
 ## When to Use
@@ -76,32 +47,11 @@ Quality bar:
 - Start with mode, target, convention, and available evidence; choose directions before visuals when open.
 - Load `references/platform-foundations.md`, `references/materials-and-accessibility.md`, `references/product-visual-production.md`, `references/web-production-libraries.md`, and `references/review-playbook.md` for their named boundaries.
 - For product work, use reference -> actual production -> same-subject comparison -> revision. Motion needs frames, video, or browser evidence and a reduced-motion alternative; do not award an Apple score.
-- Findings name evidence, impact, source/applicability, fix, owner, and missing check; route implementation to the selected owner and proof to accessibility-audit or visual-qa.
+- Findings name evidence, impact, source/applicability, fix, owner, and missing check; route implementation to the selected owner and proof to `omh-accessibility-audit` or `omh-visual-qa`.
 
 Handoff policy:
 
 Hermes directs; selected owners implement and existing lanes observe.
-
-Required inputs:
-
-- mode: design, review, or improve
-- visual target: Apple marketing/product visual, native Apple application, or Apple-inspired web UI
-- target, surface/state, supplied evidence, and available execution constraints
-
-Expected outputs:
-
-- apple_design_brief/v1
-- apple_visual_direction/v1
-- apple_design_finding/v1 with severity, location/evidence, impact, source/applicability, fix, owner, and missing checks
-- two to four design directions before visual work when direction is open
-- composed remediation route to frontend, design-quality-gate, accessibility-audit, visual-qa, or award-bar-score
-
-Artifact expectations:
-
-- prepared Apple design brief with observations and hypotheses distinguished
-- prepared product-visual handoff when no authorized execution path exists
-- visual status not_observed when no supplied screen, capture, or rendered surface exists
-- no Apple certification, accessibility PASS, visual PASS, or implementation claim from a prepared brief
 
 Safety rules:
 
@@ -116,6 +66,17 @@ Safety rules:
 - Never treat web glass as native, never substitute a still for motion, and use only actual evidence after production; without it, the result is not PASS.
 - While evidence is missing, use only a prepared handoff; it is not execution and not a PASS.
 
+## Completion Checklist
+
+- Target, convention, state, and evidence are explicit.
+- Each direction or finding names evidence, source applicability, owner, and missing verification; product visuals name original art direction.
+- Implementation remains with the selected coding owner; accessibility and visual completion remain not_observed until their existing lanes record evidence.
+
+## Recovery Notes
+
+- If the platform/version, convention, or target state is missing, ask for it before treating a guideline as applicable.
+- If no supplied screen or code exists, prepare the brief and mark visual status not_observed rather than inferring a rendered result.
+
 ## Runtime Evidence
 
 Preferred harness for this skill: `apple-design`.
@@ -128,7 +89,7 @@ Record observed delegation results; otherwise return `not_available` or `not_obs
 Prepared OMH routing is not execution, review, CI, merge-readiness, or merge evidence.
 - Treat wrapper memory/context summaries as advisory local context, not proof of opaque Hermes memory reads or changes.
 Preserve workflow intent and stop conditions; verify before claiming completion.
-Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only; OMH's record terms (surface, lane, wrapper, handoff, evidence boundary, not_observed) stay in records and tool calls, never in the sentence the user reads unless they ask about one; and when a real unresolved user decision or a useful briefing discussion remains, offer one specific, content-linked question. Completed work needs no question; omit unrelated non-action footers and generic offers to continue.
+Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only. When the requested output is delivered, put any open points inside the result and end with no question or offer; only when the person asked to choose or decide and that choice is still theirs, end with one specific question about it, not a list, a generic offer, or a footer; the shared rail's Reply Language And Host Voice and Turn Ending sections hold the full rule.
 
 Use Hermes-native subagent/delegation features when available: native subagents -> Hermes delegation when available, otherwise sequential lanes.
 

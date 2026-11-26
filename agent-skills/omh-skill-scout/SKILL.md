@@ -1,6 +1,6 @@
 ---
 name: "omh-skill-scout"
-description: "[omh] Existing skills to reuse before authoring: prepare a metadata-only search-before-creation report for local, marketplace, GitHub, and web skill candidates with risk review and adoption options. Use when the user says: skill-scout, skill scout, skill candidate, skill candidate search, skill discovery, find a skill, find skills, top skills."
+description: "[omh] Existing skills to reuse before authoring."
 license: MIT
 metadata:
   hermes:
@@ -31,7 +31,7 @@ Good example:
 
 - Prompt: skill-scout find existing skill candidates before we create a release-note workflow skill.
 - Expected behavior: Produce `prepare_skill_scout` with required context, wrapper actions, and not-evidence boundaries.
-- Why: The prompt names a real workflow surface that Hermes can orchestrate without hiding execution.
+- Why: Reuse is judged by candidate and source trust; the scout installs nothing.
 
 Bad example:
 
@@ -49,7 +49,7 @@ Bad example:
 ## Recovery Notes
 
 - If the request is about setup or installed skill repair, it is outside this skill.
-- If the request is a portfolio health dashboard, route to skill-health.
+- If the request is a portfolio health dashboard, route to `omh-skill-health`.
 - If the request is an approved skill mutation or creation task, route to implementation after the scout decision.
 
 
@@ -58,7 +58,7 @@ Bad example:
 
 Use before creating or adapting a skill so OMH can compare existing local, marketplace, GitHub, or web candidates without installing, copying, or trusting them by default.
 
-    Strong routing signals: `skill-scout`, `skill scout`, `skill candidate`, `skill candidate search`, `skill discovery`, `find a skill`, `find skills`, `top skills`, `popular skills`, `famous hermes skills`, `useful hermes skills`, `hermes skills/plugin`, `skills/plugin`, `agentskills.io top skills`, `is there a skill`, `existing skill`, `fork a skill`, `extend a skill`, `create skill after search`, `new skill search`, `skill adoption`, `스킬 스카우트`, `스킬 후보`, `스킬 찾기`, `스킬 검색`, `스킬 만들기 전`, `유명한 hermes skills`, `유명한 hermes skill`, `유용한 hermes skills`, `스킬 플러그인 후보`, `플러그인 찾아`, `플러그인 비교`, `없는 것 설치할지 비교`, `기존 스킬`
+    Strong routing signals: `skill-scout`, `skill scout`, `skill candidate`, `skill candidate search`, `skill discovery`, `find a skill`, `find skills`, `top skills`, `popular skills`, `famous hermes skills`, `useful hermes skills`, `hermes skills/plugin`, `skills/plugin`, `agentskills.io top skills`, `is there a skill`, `existing skill`, `fork a skill`, `extend a skill`, `create skill after search`, `new skill search`, `skill adoption`, `스킬 스카우트`, `스킬 후보`, `스킬 찾기`, `스킬 검색`, `스킬 만들기 전`, `유명한 hermes skills`, `유명한 hermes skill`, `유용한 hermes skills`, `스킬 플러그인 후보`, `플러그인 찾아`, `플러그인 비교`, `없는 것 설치할지 비교`, `기존 스킬`, `найди скилл`, `какие есть скиллы`, `есть ли скилл`, `подбери скилл`, `поищи скиллы`, `есть скилл для`, `какие скиллы есть`, `найти скилл`
 
 ## Catalog Metadata
 

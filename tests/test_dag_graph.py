@@ -22,7 +22,7 @@ load_local_package()
 from _cli_harness import run_cli  # noqa: E402
 from _delegation_state import PARENT, homes, start, stop  # noqa: E402
 from omh.plugin_bundle.omh import dag_run  # noqa: E402
-from omh.plugin_bundle.omh.delegation_graph import build_delegation_graph, graph_fingerprint  # noqa: E402
+from omh.plugin_bundle.omh.delegation_graph import build_delegation_graph, dag_run_choices, graph_fingerprint  # noqa: E402
 from omh.plugin_bundle.omh.delegation_view import render_delegation_view  # noqa: E402
 from omh.plugin_bundle.omh.hooks import result_transforms  # noqa: E402
 from omh.plugin_bundle.omh.tools import dag_tool  # noqa: E402
@@ -33,7 +33,7 @@ NODES = [
     {"id": "api", "label": "Export API", "category": "quick", "prompt": PROMPT, "write_scope": ["src/api.py"]},
     {"id": "ui", "label": "Export button", "category": "unspecified-low", "prompt": PROMPT,
      "write_scope": ["src/ui.py"]},
-    {"id": "verify", "label": "Verify export", "category": "unspecified-high", "prompt": PROMPT,
+    {"id": "verify", "label": "Verify export", "category": "unspecified-high", "prompt": PROMPT, "role": "verify",
      "depends_on": ["api", "ui"]},
 ]
 
@@ -186,6 +186,35 @@ class GraphTests(unittest.TestCase):
         self.assertEqual({node["id"]: node["cycle"] for node in second["nodes"] if "cycle" in node},
                          {"d:export:fix2": 2})
 
+    def test_each_node_carries_its_role(self) -> None:
+        # The TUI names a finished child's briefing by it (`● verify @verify finished`): the declared role, `build`
+        # where none was declared, as `dag_run.node_role` reads it.
+        with homes() as home:
+            defined(home)
+            graph = build_delegation_graph(home.omh, home.hermes, PARENT)
+        roles = {node["id"]: node.get("role") for node in graph["nodes"] if node.get("dag_node")}
+        self.assertEqual(roles, {"d:export:api": "build", "d:export:ui": "build", "d:export:verify": "verify"})
+
+    def test_each_node_carries_its_place_in_the_runs_definition_order(self) -> None:
+        # The TUI picks a node's handle hue by it: a repair's node is added after, and the node it supersedes keeps its
+        # place, so no drawn node's index moves.
+        with homes() as home:
+            defined(home)
+            first = build_delegation_graph(home.omh, home.hermes, PARENT)
+            call(action="settle", run="export", node="ui", outcome="failed")
+            call(action="repair", run="export", node="ui", nodes=[
+                {"id": "fix-ui", "label": "Fix the button", "category": "quick", "prompt": PROMPT,
+                 "write_scope": ["src/ui.py"]}])
+            second = build_delegation_graph(home.omh, home.hermes, PARENT)
+
+        def places(graph: dict) -> dict:
+            return {node["id"]: node["node_index"] for node in graph["nodes"] if node.get("dag_node")}
+
+        self.assertEqual(places(first), {"d:export:api": 0, "d:export:ui": 1, "d:export:verify": 2})
+        self.assertEqual(places(second)["d:export:fix-ui"], 3)
+        self.assertEqual({key: value for key, value in places(second).items() if key in places(first)},
+                         {key: value for key, value in places(first).items() if key in places(second)})
+
     def test_added_nodes_hang_below_where_they_came_from(self) -> None:
         with homes() as home:
             defined(home)
@@ -202,7 +231,7 @@ class GraphTests(unittest.TestCase):
                 {"id": "csv", "label": "Add CSV export", "category": "quick", "prompt": PROMPT, "depends_on": ["api"],
                  "write_scope": ["src/api.py"]},
                 {"id": "verify2", "label": "Verify CSV", "category": "unspecified-high", "prompt": PROMPT,
-                 "depends_on": ["csv"]}])
+                 "role": "verify", "depends_on": ["csv"]}])
             graph = build_delegation_graph(home.omh, home.hermes, PARENT)
         by_id = {node["id"]: node for node in graph["nodes"]}
         self.assertEqual({key: by_id[f"d:export:{key}"]["dag_origin"] for key in ("api", "fix-ui", "csv", "verify2")},
@@ -265,6 +294,130 @@ class GraphTests(unittest.TestCase):
             home.rotate(PARENT, later)
             graph = build_delegation_graph(home.omh, home.hermes, later)
         self.assertEqual(graph["name"], "export feature")
+
+    def test_a_session_with_two_runs_draws_the_newest_and_any_named_one_alone(self) -> None:
+        with homes() as home:
+            defined(home)
+            now = time.time()
+            started(home, "api", now=now)
+            call(action="define", run="second", name="second feature", nodes=[NODES[0]])
+            start(home, "child-only", "sa-only", "only [dag:second/api]", now=now + 1)
+            home.session("child-only", "glm-5.3-flash", parent=PARENT, effort="low")
+
+            def drawn(**kwargs: str) -> tuple[str, set[str], set[str]]:
+                graph = build_delegation_graph(home.omh, home.hermes, PARENT, now=now + 2, **kwargs)
+                return (
+                    graph["name"],
+                    {node["id"] for node in graph["nodes"] if node["kind"] != "root"},
+                    {node["id"] for node in graph["nodes"] if node.get("outside_dag") is True},
+                )
+
+            name, ids, outside = drawn()
+            self.assertEqual(name, "second feature")
+            # The other run's bound child is no lane of this run either: an outside lane, beside it.
+            self.assertEqual(outside, {"s:sa-api"})
+            self.assertEqual(ids - outside, {"d:second:api"})
+            self.assertFalse({node_id for node_id in ids if node_id.startswith("d:export:")})
+            name, ids, outside = drawn(dag_run="export")
+            self.assertEqual(name, "export feature")
+            self.assertEqual(outside, set(), "a run the pane picks is drawn alone")
+            self.assertTrue(all(node.startswith("d:export:") for node in ids), ids)
+            self.assertEqual(drawn(dag_run="no-such-run"), drawn())
+            choices = dag_run_choices(home.omh, home.hermes, PARENT, now=now + 2)
+        self.assertEqual([(item["run"], item["name"], item["nodes"]) for item in choices],
+                         [("second", "second feature", 1), ("export", "export feature", 3)])
+
+    def test_an_unbound_child_is_an_outside_lane_not_a_layer_of_the_run(self) -> None:
+        """A ledger child no `[dag:export/...]` marker binds stays a node — flagged, layered nowhere, with no edge."""
+        with homes() as home:
+            defined(home)
+            now = time.time()
+            started(home, "api", now=now)
+            # A plain delegate_task spawn in the same conversation, and a child it spawned: both outside.
+            start(home, "child-free", "sa-free", "Fix the typo", now=now + 1)
+            home.session("child-free", "glm-5.3-flash", parent=PARENT, effort="low")
+            start(home, "grand-0", "sa-free-leaf", "Sweep under the free child", parent="child-free",
+                  parent_subagent="sa-free", now=now + 2)
+            graph = build_delegation_graph(home.omh, home.hermes, PARENT, now=now + 4)
+        self.assertEqual(graph["name"], "export feature")
+        by_id = {node["id"]: node for node in graph["nodes"]}
+        outside = {node_id for node_id, node in by_id.items() if node.get("outside_dag") is True}
+        self.assertEqual(outside, {"s:sa-free", "s:sa-free-leaf"})
+        self.assertEqual(set(by_id) - outside - {"root"},
+                         {f"d:export:{node_id}" for node_id in ("api", "ui", "verify")})
+        layered = {node_id for layer in graph["layers"] for node_id in layer}
+        self.assertFalse(outside & layered, "an outside lane lands in no layer")
+        self.assertFalse([edge for edge in graph["edges"]
+                          if edge["from"] in outside or edge["to"] in outside], graph["edges"])
+        # Every field a plain lane carries is still there: state, title, usage, group and session tail.
+        free = by_id["s:sa-free"]
+        self.assertEqual((free["title"], free["group"].split(" ")[0], free["model"], free["session_tail"]),
+                         ("Fix the typo", "wave", "glm-5.3-flash", "child-fr"))
+        # With no dag run in the conversation the same children are plain lanes, as before.
+        with homes() as home:
+            home.session(PARENT, "claude-opus-5-5")
+            start(home, "child-free", "sa-free", "Fix the typo", now=now + 1)
+            graph = build_delegation_graph(home.omh, home.hermes, PARENT, now=now + 4)
+        self.assertFalse([node for node in graph["nodes"] if node.get("outside_dag")])
+        self.assertEqual(graph["layers"], [["root"], ["s:sa-free"]])
+
+    def test_the_outside_group_draws_after_the_run_not_inside_it(self) -> None:
+        with homes() as home:
+            defined(home)
+            now = time.time()
+            started(home, "api", now=now)
+            start(home, "child-free", "sa-free", "Fix the typo", now=now + 1)
+            home.session("child-free", "glm-5.3-flash", parent=PARENT, effort="low")
+            graph = build_delegation_graph(home.omh, home.hermes, PARENT, now=now + 2)
+            tree = render_delegation_view(graph, width=100, layout="tree").text_lines()
+            boxes = render_delegation_view(graph, width=100, layout="box", max_lines=44).text_lines()
+        for lines, name in ((tree, "tree"), (boxes, "box")):
+            with self.subTest(layout=name):
+                text = "\n".join(lines)
+                self.assertIn("outside DAG", text)
+                row = next(line for line in lines if "Fix the typo" in line)
+                self.assertGreater(lines.index(row), lines.index(next(line for line in lines if "outside DAG" in line)))
+                start_rows = [line for line in lines if "Fix the typo" in line and "Start node" in line]
+                self.assertFalse(start_rows, "an outside lane is never drawn as the run's start node")
+
+    def test_a_named_run_does_not_lapse_after_it_is_over(self) -> None:
+        with homes() as home:
+            defined(home)
+            now = time.time()
+            call(action="cancel", run="export")
+            later = now + 24 * 3600
+            lapsed = build_delegation_graph(home.omh, home.hermes, PARENT, now=later)
+            named = build_delegation_graph(home.omh, home.hermes, PARENT, now=later, dag_run="export")
+        self.assertEqual(lapsed["status"], "inactive")
+        self.assertEqual((named["status"], named["name"]), ("active", "export feature"))
+
+    def test_a_finished_run_lapses_unless_the_pane_keeps_it(self) -> None:
+        """Mutation: let keep_dag lapse too, or keep every settled graph (the chat posts still need the linger)."""
+        with homes() as home:
+            defined(home)
+            now = time.time()
+            call(action="cancel", run="export")
+            later = now + 24 * 3600
+            lapsed = build_delegation_graph(home.omh, home.hermes, PARENT, now=later)
+            kept = build_delegation_graph(home.omh, home.hermes, PARENT, now=later, keep_dag=True)
+        self.assertEqual(lapsed["status"], "inactive")
+        self.assertEqual((kept["status"], kept["name"]), ("active", "export feature"))
+
+    def test_a_kept_finished_run_yields_to_a_current_fanout_unless_it_is_picked(self) -> None:
+        """Mutation: keep the finished run over a fanout still running, or drop a run the person picked."""
+        fanout = {"contract": {"fanout_id": "fanout-0123456789ab",
+                               "units": [{"unit_id": "core", "title": "Core", "owner": "codex", "depends_on": []}]},
+                  "roster": {"units": [{"unit_id": "core", "status": "running"}]}}
+        with homes() as home:
+            defined(home)
+            now = time.time()
+            call(action="cancel", run="export")
+            later = now + 24 * 3600
+            kept = build_delegation_graph(home.omh, home.hermes, PARENT, now=later, keep_dag=True, fanout=fanout)
+            picked = build_delegation_graph(home.omh, home.hermes, PARENT, now=later, keep_dag=True, fanout=fanout,
+                                            dag_run="export")
+        self.assertEqual((kept["status"], kept["source"]), ("active", "fanout"))
+        self.assertEqual((picked["source"], picked["name"]), ("native", "export feature"))
 
     def test_a_node_whose_stop_hermes_filed_under_the_rotated_parent_has_returned(self) -> None:
         with homes() as home:

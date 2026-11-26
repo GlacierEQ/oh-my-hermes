@@ -39,15 +39,15 @@ evidence exists.
 | `omh hermes compose` | Composes one ordered multi-step `workflow_composition/v1` workflow from a single compound outcome request, so a user who asks for several outcomes at once does not have to select capabilities individually. Compound intent is recognised by splitting the request on a declared English connector table and scoring each fragment through the existing recommendation and capability-family machinery; at least two distinct families are required, or the record says `not_compound` or `no_composable_path` instead of faking a workflow. Every step names capability, owner, inputs, output, and evidence boundary. Coding steps delegate to the selected coding owner and are never owned by Hermes. A needed-but-unavailable capability is reported, never installed. | `src/workflows/workflow_composition.py`, `src/routing/compound_intent.py`, `tests/test_workflow_composition.py` |
 | `omh hermes readiness` | Inspects local Hermes Agent home/config/skills/plugins/sessions/state/source-checkout markers and maps them to OMH memory, learning, loop, wiki/external-knowledge, runtime-observation, and subagent/handoff reinforcement. | `src/workflows/hermes_readiness.py`, `src/commands/hermes.py` |
 | `omh hermes retained-context` | Inspects metadata-only Hermes sessions/state/memory-provider markers alongside OMH memory, workflow-learning, runtime journal, loop, and external knowledge-store markers so wrappers can show what durable context can actually be reinforced without reading raw retained artifacts or claiming opaque Hermes memory contents. | `src/workflows/hermes_retained_context.py`, `src/workflows/hermes_retained_context_probes.py`, `tests/test_hermes_retained_context.py` |
-| `omh coding delegate` | Prepares metadata-only coding handoffs, executor/runtime-choice contracts, prompt-only payloads, runtime contracts, and accepted-plan `--from-plan` Codex handoffs without overclaiming execution. Hermes selection also exposes an optional coding team path with solo, durable-goal, team, and swarm start choices plus a read-only `hermes_coding_harness/v1` projection over builder, verifier, reviewer, docs, and PR lanes. Handoffs include an executor-neutral task prompt contract; Codex lifecycle handoffs also include a prepared-only session observation contract for future executor-session adapters. | `src/coding/coding_delegation.py`, `src/coding/hermes_harness.py`, `src/runtime/artifacts.py` |
+| `omh coding delegate` | Prepares metadata-only coding handoffs, executor/runtime-choice contracts, prompt-only payloads, runtime contracts, and accepted-plan `--from-plan` handoffs to the selected executor without overclaiming execution. Hermes selection also exposes an optional coding team path with solo, durable-goal, team, and swarm start choices plus a read-only `hermes_coding_harness/v1` projection over builder, verifier, reviewer, docs, and PR lanes. Handoffs include an executor-neutral task prompt contract; Codex lifecycle handoffs also include a prepared-only session observation contract for future executor-session adapters. | `src/coding/coding_delegation.py`, `src/coding/hermes_harness.py`, `src/runtime/artifacts.py` |
 | `executor_local_workflow/v1` | Optional, task-scoped metadata naming at most one locally appropriate workflow candidate for a selected executor. It is prepared mapping plus explicit operator-recorded availability evidence; it is never an installation, loading, invocation, dispatch, execution, verification, review, CI, merge-readiness, or merge claim. | `src/coding/executor_local_workflow.py`, `src/coding/executor_capability_snapshots.py`, `tests/test_executor_local_workflow.py` |
 | `worktree_session_isolation/v1` | Adds deterministic workspace-isolation guidance to coding handoffs and executor-session status: same workspace ok, worktree recommended, or worktree required. | `src/coding/isolation.py`, `src/wrapper/executor_sessions.py`, `tests/test_wrapper_sessions.py` |
 | `handoff_input_manifest/v1` | The bounded, reviewable list of local context a coding owner is prepared to receive: files, plan sections, diffs, and reviewed memory records in one uniform item shape, each carrying provenance, a reproducible selector, a `sha256:` hash, byte cost, inclusion reason, and a safety verdict from the classifiers `coding.action_gate` already declares. Refusals are enumerated with reasons and numbers, so an oversized or unsafe package is reported instead of silently truncated. It is a superset of `handoff_context_pack/v1` and references it through `derived_from` rather than competing with it. Each handoff pins the manifest's `revision` and `digest` as a detached copy, so a later manifest edit cannot be read as the one the handoff carried. It stores references and hashes, never source copies, and carries no timestamp. | `src/coding/handoff_input_manifest.py`, `src/coding/coding_delegation.py`, `tests/test_handoff_input_manifest.py` |
 | `omh coding lifecycle` | Tracks Codex-selected handoff dispatch, executor result, verification, and reportable status from existing runtime evidence. | `src/wrapper/lifecycle.py`, `tests/test_coding_lifecycle.py`, `tests/test_cli.py` |
-| `omh memory status/capture/review/approve/reject/recall` plus `inspect/pack/apply` | Captures typed OMH project-memory candidates, keeps reviewed records separate, recalls `memory_recall_pack/v1` into prepared coding handoffs, and reviews OMH-local or wrapper-supplied context before attaching conflict-free `handoff_context_pack/v1` summaries. | `src/workflows/memory.py`, `tests/test_memory.py` |
+| `omh memory status/capture/review/approve/reject/recall` plus `inspect/pack/apply` | Captures typed OMH project-memory candidates, keeps reviewed records separate, recalls `project_memory_recall_pack/v1` into prepared coding handoffs, and reviews OMH-local or wrapper-supplied context before attaching conflict-free `handoff_context_pack/v1` summaries. | `src/workflows/memory.py`, `tests/test_memory.py` |
 | `role_context_pack/v1` | Binds one immutable, content-addressed pack of reviewed guidance to every prepared coding handoff. The handoff pins `role_context_pack_hash`; a pin that does not recompute from the pack it names is a validation error. The pack lists each included record with its own hash, its origin surface, and the reason it was included, in an order that is part of the pack's identity. It carries no owner field, so Codex, Claude Code, Hermes, and generic executor profiles consume one neutral contract, and the store at `.omh/memory/role-context-packs/` is addressed by content, so adjusting guidance mints the next pack instead of editing an accepted one. | `src/workflows/role_context_packs.py`, `src/coding/coding_delegation.py`, `tests/test_role_context_packs.py` |
 | `omh runtime wrapper` | Lets wrappers record what they actually observed after dispatch. | `src/runtime/artifacts.py`, `README.md` |
-| `omh runtime observe` | Records metadata-only observation journal events for prepared-to-observed lifecycle status, and preserves `runtime_observation/v1` compatibility for Hermes/OMX/OMO/OMC runtime handoffs: runtime start, worktree creation, worker dispatch/result, verification, review, CI, merge-readiness, and merge. | `src/runtime/artifacts.py`, `src/runtime/records.py`, `tests/test_cli.py`, `tests/test_runtime_artifacts.py` |
+| `omh runtime observe` | Records metadata-only observation journal events for prepared-to-observed lifecycle status, and preserves `runtime_observation/v1` compatibility for Hermes, OMX, pi-family runtime, and OMC runtime handoffs: runtime start, worktree creation, worker dispatch/result, verification, review, CI, merge-readiness, and merge. | `src/runtime/artifacts.py`, `src/runtime/records.py`, `tests/test_cli.py`, `tests/test_runtime_artifacts.py` |
 | `omh runtime review`, `omh runtime ci`, `omh runtime merge` | Records observed review, CI, merge-readiness, and merge evidence under the run ledger. | `src/runtime/artifacts.py`, `src/runtime/records.py`, `tests/test_cli.py` |
 | `omh runtime validate/export` | Validates and exports local evidence without storing prompt bodies by default. | `src/runtime/artifacts.py`, `tests/test_runtime_artifacts.py` |
 | `omh conformance check --run <run-id>` | Projects existing runtime validation, delegated-status evidence, and runtime-owned claim vocabulary into one safe-claim verdict, such as prepared-only, execution observed, verification missing, or merge-ready. This is not a new ledger; it answers which claim is currently allowed. | `src/conformance/checker.py`, `src/runtime/artifacts.py`, `src/runtime/claims.py`, `tests/test_conformance.py` |
@@ -121,7 +121,7 @@ The supported mapping is:
 | `codex` | `codex_skill`; `command_template`; `$<canonical-skill> {message}` | Unknown or unavailable keeps the actual executor prompt and legacy dispatch template at generic `{message}`. Only an exact matching `observed_available` snapshot can make the candidate invocation dispatchable, and the parent handoff still requires `ask_before_dispatch`. |
 | `hermes` | `hermes_installed_skill`; `display_only`; installed `/<display-name> {message}` | Display metadata only; never dispatchable by this binding. The display name comes from the catalog, not from probing. |
 | `omx-runtime` | `omx_skill`; `display_only`; `$<canonical-skill> {message}` | Display metadata only; runtime handoff remains `prepare_only` and non-dispatchable. |
-| `omo-runtime` | `omo_skill_reference`; `skill_reference`; empty template | A canonical reference only. OMH does not serialize OMO `load_skills`, skill contents, or executable text. |
+| `pi-family-runtime` | `pi_family_skill_reference`; `skill_reference`; empty template | A canonical reference only. OMH does not serialize the runtime's `load_skills`, skill contents, or executable text. |
 | `omc-runtime` | `omc_skill_descriptor`; `descriptor_only`; empty template | A descriptor only. OMC's upstream discovery does not establish a portable OMH slash command. |
 
 `claude-code`, `generic`, `choose`, `pi`/generic aliases, and every unmapped
@@ -152,7 +152,7 @@ merge readiness, or merge occurred.
 
 `dispatchability` has exactly `handoff_dispatchable`,
 `candidate_invocation_dispatchable`, and `reason`. Runtime, Hermes display,
-OMX display, OMO reference, and OMC descriptor candidates always have
+OMX display, pi-family reference, and OMC descriptor candidates always have
 `candidate_invocation_dispatchable: false`. The only positive candidate gate is
 an exact `observed_available` Codex match under a parent
 `ask_before_dispatch` handoff. Its `reason` is restricted to
@@ -194,18 +194,15 @@ shape before consuming it.
 
 ## Hermes Surface Readiness
 
-| Priority | Focus | Why it matters | Target story |
-| --- | --- | --- | --- |
-| P0 | Hermes Agent consumes OMH contracts. | OMH should read as a Hermes-native capability layer, not as a separate bot product. | Keep OMH focused on fixture-backed chat contracts and local status artifacts. |
-| P1 | Hermes-facing examples should stay concrete. | Golden JSON locks the wrapper contract, but operators still need examples for rendering replies, actions, status cards, and thread keys. | Add fixture-backed examples that show chat UX without implying missing platform code. |
-| P2 | Run-backed Codex lifecycle reporting remains Codex-only, but runtime observation is available for Hermes/OMX/OMO/OMC handoffs. | Other targets are supported without overclaiming: prompt-only for Claude Code/generic agents, runtime handoff templates for Hermes/OMX/OMO/OMC, and `runtime_observation/v1` records for observed runtime ladder steps. | Keep lifecycle dispatch/result semantics separate from runtime observation until another executor exposes an equivalent lifecycle contract. |
+Run-backed lifecycle reporting is Codex-only; Claude Code and generic agents
+get prompt-only handoffs, and the runtime profiles get runtime handoff templates
+plus `runtime_observation/v1` records for observed ladder steps.
 
-## First Implementation Contract
+## Delegation contract
 
-The completed deterministic feature makes executor selection explicit without
-launching any coding executor from `omh`.
+Executor selection is explicit, and `omh` launches no coding executor.
 
-Expected behavior:
+Behavior:
 
 - `omh coding delegate` continues to work for generic wrappers.
 - `omh coding delegate --executor choose` returns a human-in-the-loop executor
@@ -398,15 +395,3 @@ wrapper can distinguish a draft plan from an approved plan and a blocked request
 from a guessed plan. Status payloads include `status_card/v1` so a wrapper can
 render workspace isolation, handoff, execution, verification, review, CI,
 merge-ready, and merged steps without parsing prose.
-
-## Success Criteria
-
-- The implementation adds a wrapper-native chat interaction contract while
-  preserving existing `coding_delegation/v1` callers.
-- Tests prove no raw prompt body is stored in runtime records by default.
-- Tests prove hostile shell text remains a placeholder in any argv/template
-  contract.
-- README and architecture docs describe Hermes as the orchestrator and the
-  selected executor, runtime, or Hermes coding skill as the main coding owner for implementation work, while
-  preserving Codex-only lifecycle tracking in Phase 1.
-- Runtime validation remains local-only and deterministic.

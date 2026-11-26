@@ -81,11 +81,25 @@ FANOUT_SPAWN_PLAN_CLAIM_BOUNDARY = (
 
 # Optional per-unit executable verification. A unit may carry command strings
 # the dispatcher runs itself under `--run-verification`; the prose
-# `integration_checks` stay beside them, unchanged. Bounded like every other
-# operator-typed contract string: eight commands is more than one unit boundary
-# can justify, and 240 chars is a command line rather than a pasted script.
+# `integration_checks` stay beside them, unchanged. Bounded in UTF-8 bytes,
+# not characters: `reproduction_command` enters the unit prompt verbatim, and
+# the unit prompt has a byte ceiling (UNIT_PROMPT_MAX_BYTES). Eight commands
+# is more than one unit boundary can justify, and 240 UTF-8 bytes is a command
+# line rather than a pasted script.
 MAX_UNIT_VERIFICATION_COMMANDS = 8
-MAX_UNIT_VERIFICATION_COMMAND_CHARS = 240
+MAX_UNIT_VERIFICATION_COMMAND_BYTES = 240
+
+# Optional per-unit review focus: what the reviewer will look at when the
+# unit's work comes back (OpenAI "Prompting GPT-6.2 in Codex" guide: tell the
+# executor what you will look for in review). Prose beside
+# `integration_checks`, bounded like them: a few sentences, not a checklist.
+# Bounded in UTF-8 bytes, not characters: the unit prompt has a byte ceiling
+# (UNIT_PROMPT_MAX_BYTES). The live-shaped worst case with the longest
+# reproduction command the contract accepts renders 7,800 B with no focus, and
+# the focus block costs its bytes plus a 46-byte label, so 150 bytes (one
+# sentence; about 50 Hangul characters) keeps that case at 7,996 B. Measured by
+# PromptCeilingTests; raise it only with that test.
+MAX_UNIT_REVIEW_FOCUS_BYTES = 150
 # Named once so the check rows the dispatcher writes, the journal event they
 # back, and the docs describing both cannot drift apart.
 UNIT_VERIFICATION_OBSERVATION_SOURCE = "dispatch_verification"
@@ -166,6 +180,92 @@ class FanoutContractError(ValueError):
     """Raised when a proposed fanout unit list cannot be frozen into a contract."""
 
 
+def contract_text_utf8_bytes(text: str, *, what: str) -> int:
+    """UTF-8 size of a byte-bounded contract string, refusing text with no UTF-8 form.
+
+    A JSON unit file may spell a lone surrogate (`"\\ud800"`); `json.loads`
+    accepts it, but it has no UTF-8 encoding, so measuring it raised a bare
+    UnicodeEncodeError (a traceback from `omh coding fanout prepare`) instead
+    of the contract error every other bad field gets.
+    """
+    try:
+        return len(text.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise FanoutContractError(f"{what} must be valid UTF-8 text (no lone surrogates)") from exc
+
+
+# Unquoted shell syntax in a command that no shell will ever read. Ordered so
+# a two-character operator is named before its one-character prefix.
+_UNQUOTED_SHELL_OPERATORS = ("&&", "||", "$(", "|", ";", "&", ">", "<", "`")
+
+
+def unquoted_shell_operator(command: str) -> str:
+    """The first shell operator outside quotes in `command`, or "".
+
+    Quote state is tracked the way POSIX `sh` does: nothing is special inside
+    single quotes, a backslash escapes the next character outside them, and
+    inside double quotes `$(` and backticks still substitute. `grep -E 'a|b'`
+    therefore carries no operator, while `test -f x && grep y x` does.
+    """
+    quote = ""
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = ""
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = ""
+            elif char == "`" or command.startswith("$(", index):
+                return "`" if char == "`" else "$("
+            index += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+            index += 1
+            continue
+        for operator in _UNQUOTED_SHELL_OPERATORS:
+            if command.startswith(operator, index):
+                return operator
+        index += 1
+    return ""
+
+
+def require_shell_free_command(command: str, *, field: str = "verification command") -> None:
+    """Refuse a command the dispatcher would run with `shell=False` that needs a shell.
+
+    The fanout dispatcher runs `verification_commands`, `reproduction_command`
+    and `task_linked_test_runner` without a shell, so an unquoted `&&`, `||`,
+    `|`, `;`, `&`, `>`, `<`, `$(` or backtick reaches the program as a literal
+    argument. `test -f x && grep -q y x` then runs `test` with five arguments
+    and exits 2 however correct the work is: a check that can never pass
+    (#2460). The refusal names both ways to write the check.
+
+    Separate from `verification_command_argv` on purpose: that parser also
+    compiles `handoff_contract` postconditions, which the executor runs itself.
+    """
+    operator = unquoted_shell_operator(command)
+    if not operator:
+        return
+    wrapped = (
+        f'sh -c "{command}"'
+        if not any(char in command for char in '"\\$`')
+        else f"sh -c {shlex.quote(command)}"
+    )
+    raise FanoutContractError(
+        f"{field} uses the shell operator {operator!r} outside quotes, but the dispatcher runs it "
+        "without a shell, so the operator would reach the program as a literal argument and the check "
+        "could never pass; declare each step as its own command, or wrap it in a shell explicitly: "
+        f"{wrapped}"
+    )
+
+
 def verification_command_argv(command: str) -> tuple[dict[str, str], list[str]]:
     """Split one verification command into env overrides and an argv.
 
@@ -174,7 +274,8 @@ def verification_command_argv(command: str) -> tuple[dict[str, str], list[str]]:
     ordinary argument text rather than operators. Leading `NAME=VALUE` tokens
     are the single exception, kept because `PYTHONPATH=tests uv run ...` is how
     this repo's own gate commands are written and refusing them would make the
-    field unusable for exactly the commands it exists to carry.
+    field unusable for exactly the commands it exists to carry. The fanout
+    freeze path refuses such operators first, with `require_shell_free_command`.
 
     Raises `FanoutContractError` so the freeze path rejects an unrunnable
     command where the operator can still fix it.

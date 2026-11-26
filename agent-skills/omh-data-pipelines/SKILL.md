@@ -1,6 +1,6 @@
 ---
 name: "omh-data-pipelines"
-description: "[omh] Data pipeline work -- an ETL or streaming job, a backfill or replay, duplicate events, a schema change downstream, a lineage question, a data-quality regression: make every rerun idempotent, bound every replay, and gate each load on observed checks. Use when the user says: data-pipelines, data pipeline, data pipelines, etl, elt, etl pipeline, etl job, etl backfill."
+description: "[omh] Data pipeline work on an ETL or streaming job."
 license: MIT
 metadata:
   hermes:
@@ -17,7 +17,7 @@ This is an OMH `data-pipelines` workflow skill, projected for Agent Skills hosts
 
 ## Why This Exists
 
-`data-pipelines` exists because pipeline work had no owner: `backend` owns a service's schema migration, `data-analysis` analyzes data it is handed, and `relational-db` owns a database's locks and indexes, while a backfill that duplicated events or a schema change with unknown readers reached memory and event lanes with no idempotency contract or replay bound at all.
+`data-pipelines` exists because pipeline work had no owner: `omh-backend` owns a service's schema migration, `omh-data-analysis` analyzes data it is handed, and `omh-relational-db` owns a database's locks and indexes, while a backfill that duplicated events or a schema change with unknown readers reached memory and event lanes with no idempotency contract or replay bound at all.
 
 ## First Steps
 

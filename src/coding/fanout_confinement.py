@@ -14,6 +14,7 @@ import subprocess
 from typing import cast
 from uuid import uuid4
 
+from .pi_family_interop import PI_DISTRIBUTION_AGENT_DIR_ENV, PI_DISTRIBUTION_HOME, PI_DISTRIBUTION_HOST, PI_FORK_HOME, PI_FORK_HOST
 from ..quality.cross_harness_adapter_backend import trusted_bwrap
 from ..quality.cross_harness_adapter_sandbox import (
     ChildContext,
@@ -29,8 +30,8 @@ FANOUT_FILESYSTEM_CONFINEMENT_SCHEMA_VERSION = "fanout_filesystem_confinement/v1
 FANOUT_FILESYSTEM_CONFINEMENT_CLAIM_BOUNDARY = (
     "A confinement receipt is observed only when its same-run sandbox probe wrote inside the unit worktree "
     "and every selected owner state directory, then was refused outside every write root. Owner state may also "
-    "include an exact file literal. On macOS the IPC allowances are the two named credential mach-lookup services "
-    "and the read side of the user preferences daemon (its two named mach-lookup services and read-only access to "
+    "include an exact file literal. On macOS the IPC allowances are the two named credential mach-lookup services, "
+    "the two named TLS trust-evaluation mach-lookup services, and the read side of the user preferences daemon (its two named mach-lookup services and read-only access to "
     "its apple.cfprefs. shared memory); none expands into a directory, a preference write, or broader IPC "
     "permission. Backend availability, preflight, and a prepared command alone are not "
     "confinement evidence. Reads are not part of this boundary: every command this confinement returns runs with "
@@ -54,8 +55,194 @@ _FANOUT_MACOS_CREDENTIAL_MACH_SERVICES = ("com.apple.securityd.xpc", "com.apple.
 # CFPreferencesSetAppValue plus synchronize and `defaults write` both fail
 # inside the fence and leave no domain behind.
 _FANOUT_MACOS_PREFERENCE_MACH_SERVICES = ("com.apple.cfprefsd.daemon", "com.apple.cfprefsd.agent")
+# Codex (and any HTTP client on the Security framework) verifies the server
+# certificate through trustd. Without it the TCP connect succeeds, the TLS
+# handshake fails, and `codex exec` retries until the unit times out with
+# "workspace routing discovery failed" / "waiting for network" (#2456).
+# Measured on macOS 26.6 with codex-cli 0.166: the profile as built fails, and
+# adding `com.apple.trustd.agent` alone returns the model reply; `com.apple.trustd`
+# is the system-side instance of the same lookup. Neither grants a write.
+_FANOUT_MACOS_TLS_TRUST_MACH_SERVICES = ("com.apple.trustd.agent", "com.apple.trustd")
 _FANOUT_MACOS_PREFERENCE_SHM_READ_PREFIXES = ("apple.cfprefs.",)
 _FANOUT_TOOLCHAIN_TEMP_DIRECTORY = Path(".omh") / "confinement-tmp"
+# Runs `$1` with `$0` as its argv[0]. `--posix` keeps a non-interactive bash
+# from sourcing `$BASH_ENV`, which the fenced command inherits (#3014).
+_NAMED_LAUNCH_SHELL = "/bin/bash"
+_NAMED_LAUNCH_SCRIPT = 'exec -a "$0" "$1" "${@:2}"'
+
+
+@dataclass(frozen=True, slots=True)
+class NamedLaunchIdentity:
+    """The PATH link name a worker is launched by, and the file it resolved to.
+
+    A multi-call binary (a mise shim, say) picks its tool from argv[0], so the
+    name on PATH is part of the command's identity, not a display detail. Both
+    halves are recorded: the link name is what runs, the resolved target is
+    what the fence hashed and what must still be behind that name at launch.
+    """
+
+    name: str
+    link_path: str
+    target_path: str
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+
+
+def external_launch_argv(link_path: str, arguments: Sequence[object] = ()) -> tuple[str, ...]:
+    """Run a user-declared executor by its absolute PATH link name.
+
+    Deliberately not `named_launch_argv`: that helper preserves argv[0] by
+    running `/bin/bash -c 'exec -a ...'`, which is fine for a constant script
+    but is still a shell in the worker's launch path. An external executor is
+    declared as argv data, so it needs no shell at all -- the link PATH found
+    already carries the name the binary expects in argv[0].
+    """
+    return (str(link_path), *(str(argument) for argument in arguments))
+
+
+def external_search_path(environment: Mapping[str, str], *, binary: str,
+                         repositories: Sequence[Path], write_roots: Sequence[Path]) -> str:
+    """Exclude mutable directory entries AND their executable link targets."""
+    repos = tuple(repo.resolve() for repo in repositories)
+    roots = (*repos, *(root.resolve() for root in write_roots))
+
+    def identity(path: Path) -> tuple[int, int] | None:
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            return None  # A planned write root or an absent PATH candidate.
+        return info.st_dev, info.st_ino
+
+    try:
+        root_ids = {key for root in roots if (key := identity(root)) is not None}
+        lane_parents = [(identity(repo.parent), f"{repo.name}-fanout-".casefold()) for repo in repos]
+    except OSError:
+        return ""  # Cannot establish the exclusion boundary.
+
+    def excluded(path: Path) -> bool:
+        # safe_chain visits every ancestor, including intermediate link hops.
+        # Filesystem identity survives case aliases that realpath can preserve.
+        if identity(path) in root_ids or any(path.is_relative_to(root) for root in roots):
+            return True
+        name = path.name.casefold()
+        return name == ".git" or any(name.startswith(prefix) and parent == identity(path.parent)
+                                     for parent, prefix in lane_parents)
+
+    def safe_chain(path: Path) -> bool:
+        # realpath alone loses intermediate links: a trusted link can reach a
+        # trusted binary *through* an alias a lane is allowed to replace.
+        pending = list(reversed(path.parts[1:]))
+        current = Path(path.anchor)
+        links = 0
+        while pending:
+            part = pending.pop()
+            current = current.parent if part == ".." else current / part
+            if excluded(current):
+                return False
+            if current.is_symlink():
+                links += 1
+                if links > 40:
+                    return False
+                target = current.readlink()
+                if target.is_absolute():
+                    current = Path(target.anchor)
+                    pending.extend(reversed(target.parts[1:]))
+                else:
+                    current = current.parent
+                    pending.extend(reversed(target.parts))
+        return True
+
+    trusted = []
+    for token in environment.get("PATH", "").split(os.pathsep):
+        entry = Path(token)
+        if not entry.is_absolute():
+            continue
+        try:
+            if not all(safe_chain(entry / name) for name in _external_program_names(binary)):
+                continue
+        except (OSError, RuntimeError):
+            continue
+        trusted.append(token)
+    return os.pathsep.join(trusted)
+
+
+def _external_program_names(binary: str) -> tuple[str, ...]:
+    if os.name != "nt":
+        return (binary,)
+    # Never let PATHEXT turn a declaration into a batch/shell launcher.
+    if Path(binary).suffix:
+        return (binary,) if Path(binary).suffix.lower() in {".exe", ".com"} else ()
+    return (binary + ".exe", binary + ".com")
+
+
+def observe_named_launch(
+    name: str, environment: Mapping[str, str]
+) -> NamedLaunchIdentity | None:
+    """Resolve a bare program name on the trusted PATH and record both identities.
+
+    Only absolute PATH entries are searched: a relative entry, an empty entry
+    (which some shells read as the cwd) or the cwd itself is not a trusted
+    place to find a worker we are about to run inside a fence. None when the
+    name cannot be established this way, which a caller must refuse rather
+    than replace with the resolved target.
+    """
+    if not name or os.sep in name or (os.altsep is not None and os.altsep in name):
+        return None
+    search = environment.get("PATH", "")
+    for entry in search.split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue
+        candidates = (Path(entry) / suffix for suffix in _external_program_names(name))
+        candidate = next((path for path in candidates if path.is_file() and os.access(path, os.X_OK)), None)
+        if candidate is None:
+            continue
+        try:
+            target = candidate.resolve(strict=True)
+            target_stat = target.stat()
+        except OSError:
+            return None
+        if not stat.S_ISREG(target_stat.st_mode):
+            return None
+        return NamedLaunchIdentity(
+            name=name,
+            link_path=str(candidate.absolute()),
+            target_path=str(target),
+            device=target_stat.st_dev,
+            inode=target_stat.st_ino,
+            size=target_stat.st_size,
+            mtime_ns=target_stat.st_mtime_ns,
+        )
+    return None
+
+
+def named_launch_identity_holds(identity: NamedLaunchIdentity) -> bool:
+    """Re-read the link and its target; False when either moved since observation.
+
+    This is the launch-time half of the guarantee: the fence proof and the
+    command that runs must describe the same file. A link retargeted to
+    another binary, a replaced target, or an unreadable path all refuse.
+    Nothing here falls back to the resolved multicall name.
+    """
+    try:
+        link = Path(identity.link_path)
+        target = Path(identity.target_path)
+        link_stat = link.lstat()
+        if not stat.S_ISLNK(link_stat.st_mode) and not stat.S_ISREG(link_stat.st_mode):
+            return False
+        if str(link.resolve(strict=True)) != identity.target_path:
+            return False
+        current = target.stat()
+    except OSError:
+        return False
+    return (
+        current.st_dev == identity.device
+        and current.st_ino == identity.inode
+        and current.st_size == identity.size
+        and current.st_mtime_ns == identity.mtime_ns
+        and stat.S_ISREG(current.st_mode)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +255,7 @@ class _OwnerStatePath:
 
 
 # The argv table in fanout_dispatch identifies the executable profile. These defaults
-# are each CLI's state home; an explicit environment value wins. OMO state follows
+# are each CLI's state home; an explicit environment value wins. Pi-family state follows
 # the resolved host, rather than Hermes state, because those are distinct owners.
 _OWNER_STATE_DIRECTORIES: dict[str, dict[str | None, tuple[_OwnerStatePath, ...]]] = {
     "codex": {None: (_OwnerStatePath("CODEX_HOME", Path(".codex")),)},
@@ -81,21 +268,25 @@ _OWNER_STATE_DIRECTORIES: dict[str, dict[str | None, tuple[_OwnerStatePath, ...]
         )
     },
     "hermes": {None: (_OwnerStatePath("HERMES_HOME", Path(".hermes")),)},
-    "omo-runtime": {
+    "pi-family-runtime": {
         "pi": (_OwnerStatePath("PI_CODING_AGENT_DIR", Path(".pi") / "agent"),),
-        # omh resolves and invokes senpi directly, never the branded `omo`
-        # launcher. The latter owns the observed ~/.omo tree beyond agent/
-        # (memory, codegraph, lsp-daemon, and config.jsonc), but that tree is
-        # not direct-senpi state. Senpi itself has only agent/ on this host;
-        # its resolver reads SENPI_CODING_AGENT_DIR then PI_CODING_AGENT_DIR,
-        # never OMO_CODING_AGENT_DIR.
-        "senpi": (
+        # omh resolves and invokes the distribution host directly, never the
+        # runtime's own branded launcher. That launcher owns its observed home
+        # tree beyond agent/ (memory, codegraph, lsp-daemon, and config.jsonc),
+        # but that tree is not the distribution host's state. The host itself
+        # has only agent/ here; its resolver reads its own agent-dir variable,
+        # then PI_CODING_AGENT_DIR, never the runtime launcher's variable.
+        PI_DISTRIBUTION_HOST: (
             _OwnerStatePath(
-                "SENPI_CODING_AGENT_DIR",
-                Path(".senpi") / "agent",
+                PI_DISTRIBUTION_AGENT_DIR_ENV,
+                Path(PI_DISTRIBUTION_HOME) / "agent",
                 fallback_environment_variables=("PI_CODING_AGENT_DIR",),
             ),
         ),
+        # The fork host's agent dir defaults to `<config root>/agent` under its
+        # own home, and pi's agent-dir variable overrides it for the default
+        # profile (upstream docs/environment-variables.md).
+        PI_FORK_HOST: (_OwnerStatePath("PI_CODING_AGENT_DIR", Path(PI_FORK_HOME) / "agent"),),
         # UNVERIFIED against a running OpenCode CLI: it is absent on this
         # host. Lead-observed XDG data contains logs/repos and XDG state is
         # present; ~/.opencode is absent and ~/.config/opencode is empty.
@@ -113,10 +304,10 @@ def _owner_state_paths(owner: str, environment: Mapping[str, str]) -> tuple[tupl
     if profiles is None:
         return ()
     host = None
-    if owner == "omo-runtime":
+    if owner == "pi-family-runtime":
         runtime_host = cast(
             Callable[[], str | None],
-            getattr(import_module("omh.coding.fanout_dispatch"), "omo_runtime_host"),
+            getattr(import_module("omh.coding.fanout_dispatch"), "pi_family_host"),
         )
         host = runtime_host()
     profile = profiles.get(host)
@@ -175,6 +366,11 @@ class FanoutFilesystemConfinement:
     # Off for fences whose commands only read local state: dispatcher git
     # (#2035) and a diagnostics analyzer (#2036).
     allow_network: bool = True
+    # Set only for a fence prepared for a user-declared executor. Such a worker
+    # is declared argv data, so its launch takes the direct named-path branch
+    # (`external_command`) instead of the built-in `exec -a` shim. Default off:
+    # every built-in owner and every check keeps the byte-identical launch.
+    external_worker: bool = False
 
     def command(self, argv: Sequence[str]) -> tuple[str, ...] | None:
         """Return the same-root sandbox command, or None when no receipt proved it."""
@@ -184,6 +380,35 @@ class FanoutFilesystemConfinement:
         if not executable:
             return None
         return self._fenced(executable, argv)
+
+    def external_command(self, argv: Sequence[str]) -> tuple[str, ...] | None:
+        """Fence a user-declared executor's own argv, launched by its PATH link name.
+
+        Never `/bin/bash -c`: the link PATH found carries the argv[0] a
+        multi-call binary picks its tool from, so the name is preserved without
+        a shell in the launch path. The link and its resolved target are
+        recorded first and re-checked after the command is built, so the fence
+        proof and the command name the same file. A link inside a write root
+        (the worker could retarget it) or one that moved refuses: no fallback
+        to the resolved multicall name, no shell. None when this fence was not
+        prepared for an external worker.
+        """
+        if not self.external_worker:
+            return None
+        if self.receipt.get("enforced") is not True or not argv or self.child is None:
+            return None
+        identity = observe_named_launch(str(argv[0]), self.environment)
+        if identity is None:
+            return None
+        if (self._within_write_roots(str(Path(identity.link_path).parent))
+                or self._within_write_roots(identity.target_path)):
+            return None
+        if not named_launch_identity_holds(identity):
+            return None
+        command = self._fenced_launch(external_launch_argv(identity.link_path, argv[1:]))
+        if not named_launch_identity_holds(identity):
+            return None
+        return command
 
     def dispatcher_command(self, argv: Sequence[str], *, path: str | None = None) -> tuple[str, ...] | None:
         """Fence a command the DISPATCHER runs in this unit's worktree.
@@ -247,9 +472,13 @@ class FanoutFilesystemConfinement:
         return None if located is None else str(Path(located).resolve())
 
     def _fenced(self, executable: str, argv: Sequence[str]) -> tuple[str, ...]:
+        return self._fenced_launch(named_launch_argv(str(argv[0]), executable, argv[1:]))
+
+    def _fenced_launch(self, launch: tuple[str, ...]) -> tuple[str, ...]:
+        """Wrap one already-built launch argv in this fence's sandbox command."""
         assert self.child is not None
         return sandbox_command(
-            (executable, *[str(argument) for argument in argv[1:]]),
+            launch,
             self.selected,
             self.roots,
             self.child,
@@ -260,7 +489,9 @@ class FanoutFilesystemConfinement:
             macos_write_data_literals=_FANOUT_MACOS_TOOLCHAIN_WRITE_DATA_LITERALS,
             write_literals=self.write_literals,
             macos_mach_lookup_names=(
-                *_FANOUT_MACOS_CREDENTIAL_MACH_SERVICES, *_FANOUT_MACOS_PREFERENCE_MACH_SERVICES
+                *_FANOUT_MACOS_CREDENTIAL_MACH_SERVICES,
+                *_FANOUT_MACOS_PREFERENCE_MACH_SERVICES,
+                *_FANOUT_MACOS_TLS_TRUST_MACH_SERVICES,
             ),
             macos_ipc_posix_shm_read_prefixes=_FANOUT_MACOS_PREFERENCE_SHM_READ_PREFIXES,
             allow_broad_file_read=True,
@@ -271,7 +502,17 @@ class FanoutFilesystemConfinement:
         )
 
     def command_environment(self, environment: Mapping[str, str] | None = None) -> dict[str, str]:
-        """Keep toolchain scratch writes within the confined worktree."""
+        """Keep toolchain scratch writes within the confined worktree.
+
+        TMPDIR covers most tools. zsh writes heredoc temp files under
+        TMPPREFIX (default `/tmp/zsh`) and uv locks its cache (default
+        `~/.cache/uv`); Claude Code keeps Bash project temp and sockets under
+        CLAUDE_CODE_TMPDIR (default `/tmp`). Those defaults are outside every
+        write root, so each is pointed into the same scratch directory, which
+        preparation creates (`_write_scratch_ignore`). Their subdirectories
+        are creatable inside the fence; a caller value already inside a write
+        root is kept. The fence itself is unchanged.
+        """
         selected_environment = self.environment if environment is None else environment
         if (
             self.receipt.get("enforced") is not True
@@ -279,10 +520,26 @@ class FanoutFilesystemConfinement:
             or self.selected not in {"sandbox-exec", "bwrap"}
         ):
             return dict(selected_environment)
-        return {
-            **selected_environment,
-            "TMPDIR": str(self.child.work / _FANOUT_TOOLCHAIN_TEMP_DIRECTORY),
-        }
+        scratch = self.child.work / _FANOUT_TOOLCHAIN_TEMP_DIRECTORY
+        result = {**selected_environment, "TMPDIR": str(scratch)}
+        # TMPPREFIX is a file-name prefix (`<prefix>XXXX`), so what must sit
+        # inside a root is its directory; `TMPPREFIX=<root>` writes beside it.
+        for key, default, as_prefix in (
+            ("TMPPREFIX", scratch / "zsh", True),
+            ("UV_CACHE_DIR", scratch / "uv-cache", False),
+            ("CLAUDE_CODE_TMPDIR", scratch / "claude-code", False),
+        ):
+            if not self._within_write_roots(selected_environment.get(key, ""), as_prefix=as_prefix):
+                result[key] = str(default)
+        return result
+
+    def _within_write_roots(self, value: str, *, as_prefix: bool = False) -> bool:
+        if not value or not os.path.isabs(value):
+            return False
+        resolved = Path(os.path.realpath(value))
+        if as_prefix:
+            resolved = resolved.parent
+        return any(resolved.is_relative_to(os.path.realpath(root)) for root in self.write_roots)
 
 
 # What git the dispatcher runs for itself in a unit worktree keeps of the
@@ -644,6 +901,7 @@ def prepare_fanout_filesystem_confinement(
     unit_branch: str = "",
     repo_root: Path | None = None,
     allow_unconfined: bool = False,
+    external_worker: bool = False,
 ) -> FanoutFilesystemConfinement:
     """Probe one unit's backend before allowing its owner or checks to use it.
 
@@ -655,6 +913,10 @@ def prepare_fanout_filesystem_confinement(
     The opt-in answers "this host cannot fence", never "the fenced tree broke
     the fence": it is honoured only for a reason `UNCONFINED_REASON_SOURCES`
     names a host capability (#2036).
+
+    `external_worker` marks the fence the dispatcher prepared for a
+    user-declared executor, whose launch takes `FanoutFilesystemConfinement.
+    external_command`: the same fence, a shell-free named-path command.
     """
     confinement = _prepare_fanout_filesystem_confinement(
         worktree, environment, commands,
@@ -669,6 +931,7 @@ def prepare_fanout_filesystem_confinement(
         confinement,
         receipt={**confinement.receipt, "unconfined_opt_in": opted_in},
         unconfined_allowed=opted_in,
+        external_worker=external_worker,
     )
 
 
@@ -888,6 +1151,22 @@ def _unconfined(
             reason_code=reason_code,
         ),
     )
+
+
+def named_launch_argv(name: str, executable: str, arguments: Sequence[object] = ()) -> tuple[str, ...]:
+    """Run the resolved `executable` under the `name` the command was written with (#3014).
+
+    The fence resolves each command to its real file, so the receipt names the
+    file that runs. A multi-call binary picks its tool from argv[0]: a mise
+    shim `codex` is a link to `mise`, and run as `mise` it is mise, not Codex.
+    When the resolved file has a different name, the launch keeps the file but
+    passes `name` as argv[0], the way a shell would have run it. Same name, or
+    no bash to set argv[0] with: the resolved file is run directly, as before.
+    """
+    rest = tuple(str(argument) for argument in arguments)
+    if Path(name).name == Path(executable).name or not os.path.isfile(_NAMED_LAUNCH_SHELL):
+        return (executable, *rest)
+    return (_NAMED_LAUNCH_SHELL, "--noprofile", "--norc", "--posix", "-c", _NAMED_LAUNCH_SCRIPT, name, executable, *rest)
 
 
 def _resolve_executables(

@@ -20,6 +20,19 @@ deliberately never ended there. It therefore produces no candidate here and
 no line, which is the right outcome rather than a gap: OMH would have no way
 to tell which of several live sessions the person was looking at.
 
+That recovery is the fallback. The OMH TUI writes the session it has open
+into a file of OMH's own (``tui/launch.py``, ``SESSION_FILE_ENV``), which
+``omh`` reads before removing it; only when that file names nothing (Hermes'
+own TUI opened instead, or the OMH TUI never got a session) does the
+``ended_at`` timing above choose. The timing cannot name a resumed session the
+person sent nothing in: Hermes mounts a resumed session read-only and leaves
+its old ``ended_at`` as it was until a prompt reopens it
+(``tui_gateway/methods_prompt.py``, ``_reopen_if_finalized``), so the row
+never falls inside the child's lifetime.
+
+Once the session is known, ``exit_card_lines`` reads its one row, by id, to
+say what it was: its title, never message content or the cwd.
+
 Everything here is best effort and runs after the person's session has
 already ended. A line naming the wrong session is worse than no line, so
 every ambiguity resolves to ``None``.
@@ -37,6 +50,10 @@ from ..plugin_bundle.omh.sqlite_readonly import connect_readonly
 # which mirrors ``hermes_cli/profiles.py``). A name that could not identify a
 # profile directory never becomes a path component here.
 _PROFILE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+# What a session id has to look like before a copyable line carries it.
+# Hermes' ids are `YYYYMMDD_HHMMSS_<hex>`; anything a shell would read as more
+# than one word, or as an option, is never printed.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
 
 # A database the gateway is still finishing with is reported as no line, never
 # as a wait: this runs in a shell that has just come back from the TUI.
@@ -177,3 +194,77 @@ def resume_command_line(session_id: str, profile: str | None = None) -> str:
     if profile:
         return f"omh -p {profile} --resume {session_id}"
     return f"omh --resume {session_id}"
+
+
+# The one row the exit card reads, by the id already chosen: its title, and
+# whether anything was said in it. No message content, no cwd.
+_CARD_SELECT = "SELECT title, message_count FROM sessions WHERE id = ?"
+
+# What a session nothing was said in leaves: Hermes stores a session's row
+# only once its first prompt is sent, and prints no epilogue for one without
+# messages, so there is nothing to resume.
+NOTHING_SAID_LINE = "omh: nothing was said in this session, so there is nothing to resume."
+UNTITLED = "untitled session"
+
+
+def _count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return max(value, 0)
+
+
+def _session_card_row(db_path: str | Path, session_id: str) -> tuple[str, int] | None | bool:
+    """The session's title and message count; None when it has no row; False when the database cannot be read."""
+    try:
+        connection = connect_readonly(db_path, timeout=_DB_BUSY_TIMEOUT_SECONDS)
+    except (sqlite3.Error, ValueError, OSError):
+        return False
+    try:
+        row = connection.execute(_CARD_SELECT, (session_id,)).fetchone()
+    except (sqlite3.Error, ValueError):
+        return False
+    finally:
+        try:
+            connection.close()
+        except sqlite3.Error:
+            pass
+    if row is None:
+        return None
+    return " ".join(str(row[0] or "").split()), _count(row[1])
+
+
+def exit_card_lines(db_path: str | Path | None, session_id: str, profile: str | None = None) -> list[str]:
+    """What `omh` prints for `session_id` as the TUI closes: the card, `NOTHING_SAID_LINE`, or nothing.
+
+    The card is the session's title and, after a blank line, the `omh` way
+    back, the command alone (`omh --resume <id>`; owner, 2026-10-31: no
+    `resume:` label), with the id whole so it can be copied,
+    then a blank line so the shell prompt does not sit right under it. The id
+    always resolves, where a title lookup can land on another session.
+
+    A session with no row is one nothing was said in: Hermes stores the row
+    with the first prompt. A database that cannot be read prints nothing,
+    since it cannot tell those apart from a session that has messages.
+    """
+    if db_path is None or not _SESSION_ID_RE.fullmatch(session_id):
+        return []
+    card = _session_card_row(db_path, session_id)
+    if card is False:
+        return []
+    if card is None or card[1] == 0:
+        return [NOTHING_SAID_LINE]
+    title = card[0]
+    return [
+        f"omh · {title if title and title.isprintable() else UNTITLED}",
+        "",
+        "  " + resume_command_line(session_id, profile),
+        "",
+    ]
+
+
+def session_known(db_path: str | Path, session_id: str) -> bool:
+    """Whether Hermes' state database at `db_path` has a row for `session_id`; False when it has none or cannot
+    be read (a missing database is a home no session was ever opened in)."""
+    if not session_id or not Path(db_path).is_file():
+        return False
+    return bool(_session_card_row(db_path, session_id))

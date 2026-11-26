@@ -68,6 +68,33 @@ class ClassifiedSite(NamedTuple):
 
 CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
     ClassifiedSite(
+        "src/maintenance/doctor.py", "_gateway_health_check", INTENTIONAL,
+        "The gateway health row reads Hermes' files and the kernel's process table; an unexpected failure becomes "
+        "an observed=False warning row naming the exception class ('gateway health could not be read'), never a "
+        "healthy report, and the other doctor rows still run.",
+    ),
+    ClassifiedSite(
+        "src/tui/proofread.py", "_run", INTENTIONAL,
+        "The daemon worker surfaces an unexpected failure as Outcome.error naming the exception class; "
+        "the main loop displays that failure instead of claiming a clean draft or applying corrections.",
+    ),
+    ClassifiedSite(
+        "src/skills/channel_watch_toolkit/scripts/channel_watch.py", "main", INTENTIONAL,
+        "The cron collector's last guard: an unexpected error prints only its class name and exits 1, which Hermes "
+        "reports as a Script Error the watch row shows as not readable; a traceback could quote the bot token.",
+    ),
+    ClassifiedSite(
+        "src/skills/monitor_watch_toolkit/scripts/api_watch.py", "call", INTENTIONAL,
+        "The monitor's HTTP read: http.client's malformed-reply errors (BadStatusLine and its kin) become "
+        "Transient('bad_response'), an exit 1 with one fixed stderr line that Hermes reports as a failed monitor "
+        "source, never a change; naming them would mean importing http.client into a network client the safety "
+        "invariants keep at urllib's surface, and the class or traceback never reaches stderr.",
+    ),
+    ClassifiedSite(
+        "src/workflows/repro_audit/operations.py", "_publish", INTENTIONAL,
+        "Exclusive publication rolls back only invocation-owned staged files and re-raises the original failure; it never relabels a failed audit as success.",
+    ),
+    ClassifiedSite(
         "src/plugin_bundle/omh/dashboard/plugin_api.py",
         "hud_payload",
         INTENTIONAL,
@@ -75,7 +102,13 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
         "exception class and message under `omh_desktop_hud/v1`, and no `display` key; the pane "
         "renders that record as a reader error, so it is never mistaken for a HUD payload; the "
         "route answers 200 because in the pane a thrown error is indistinguishable from a transport "
-        "failure, and the record is what lets it say which one happened.",
+        "failure, and the record is what lets it say which one happened. Its second handler is the "
+        "delegation drawing for the pane: a renderer failure becomes `delegation_drawing` with "
+        "`error` under `omh_desktop_dag/v1` beside the reader's payload, and the pane draws the "
+        "lane rows it drew before the drawing existed. Its third handler is the named chat's "
+        "recorded figures for the pane's usage board: a failed read becomes `session_usage` with "
+        "`error` beside the reader's payload, and the board shows dashes for the recorded row and "
+        "keeps the host's own stream.",
     ),
     ClassifiedSite(
         "src/plugin_bundle/omh/jev_ask_client.py",
@@ -134,6 +167,12 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
         "rather than losing the whole consolidation request.",
     ),
     ClassifiedSite(
+        "src/plugin_bundle/omh/memory_provider.py", "_conversation_session_ids", INTENTIONAL,
+        "A lineage failure withholds ancestors and preserves only this session's origin records. "
+        "The receipt reports op compaction_ancestors and its error class through the provider's "
+        "bounded failure counter; failed discovery never admits another conversation's full text.",
+    ),
+    ClassifiedSite(
         "src/plugin_bundle/omh/memory_provider.py",
         "_guard_digest",
         INTENTIONAL,
@@ -141,6 +180,15 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
         "Whatever its stores hold, a fault costs only the digest: it is counted and recorded as op "
         "`session_digest` with its error class in the write failures the next receipt reports, and "
         "the session gets no digest rather than a failed hook or a blank pack.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/memory_provider.py",
+        "_work_state_facts",
+        INTENTIONAL,
+        "The unfinished-work facts are read inside `on_pre_compress`, where Hermes drops the provider's "
+        "whole return on a raise. A fault costs only the facts: it is counted and recorded as op "
+        "`work_state` with its error class in the write failures the next receipt reports, and the "
+        "compaction keeps its memory blocks rather than losing them with the facts.",
     ),
     ClassifiedSite(
         "src/plugin_bundle/omh/memory_provider.py",
@@ -317,12 +365,21 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
     ),
     ClassifiedSite(
         "src/plugin_bundle/omh/hooks/llm_hooks.py",
-        "pre_llm_call",
+        "_turn_context",
         INTENTIONAL,
         "The activity fast path and the enclosing status/HUD projection both append "
         "`runtime_status_read` plus a sanitized error type before returning a bounded "
         "`omh_degradation` block. A genuinely idle host still returns None, while either "
         "projection failing remains distinguishable from absence.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/hooks/llm_hooks.py",
+        "_warm_imports",
+        INTENTIONAL,
+        "The register-time warm-up only pre-loads modules; it computes and returns nothing. A failed import "
+        "leaves the modules unloaded, and each call site (`context_brief._capability_family_cards`, "
+        "`awareness._user_trigger_pack_route_decision`) imports them again and takes its own guarded, "
+        "reported path, exactly as it did with no warm-up.",
     ),
     ClassifiedSite(
         "src/plugin_bundle/omh/host_observation.py",
@@ -424,6 +481,32 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
         "re-raise, so callers never read a crashed resume as a completed memory operation.",
     ),
     ClassifiedSite(
+        "src/plugin_bundle/omh/hooks/gateway_hooks.py",
+        "pre_gateway_dispatch",
+        INTENTIONAL,
+        "Hook boundary for the messenger chat gate: it runs before Hermes dispatches every inbound "
+        "Slack and Discord message, so an error in reading the event, the profile config or the "
+        "mute sidecar must never drop or stall a message. The handler logs the exception type and "
+        "returns None, which Hermes reads as no gate opinion: the message dispatches as without OMH.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/hooks/gateway_hooks.py",
+        "_acknowledge",
+        INTENTIONAL,
+        "The 🫡 acknowledgement through the adapter's private `_add_reaction`: the thread is already "
+        "muted and the skip recorded, so a failed, timed-out or moved reaction call can only lose "
+        "the reaction. The handler logs the exception type and the hook still returns the skip.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/messenger_judgement.py",
+        "judged_reply",
+        INTENTIONAL,
+        "A judged room's marker reply: the room allows silence, so the reply is already `[SILENT]` "
+        "whatever happens to its side effects. A failed skip-log line, mute write or 🫡 scheduling is "
+        "logged by exception type and the hook still returns the marker, so the raw token never reaches "
+        "the chat.",
+    ),
+    ClassifiedSite(
         "src/plugin_bundle/omh/approval_bypass.py",
         "record_approval_bypass",
         INTENTIONAL,
@@ -443,6 +526,16 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
         "a code no answer uses; stdout stays empty. An OmhError is re-raised ahead of it and stays "
         "`main`'s exit 2, and a single read re-raises, so its crash stays Python's own. The "
         "failure is never relabeled as a roster or a verdict.",
+    ),
+    ClassifiedSite(
+        "src/commands/setup.py",
+        "_installer_self_update_release",
+        INTENTIONAL,
+        "`omh update` on an installer-managed stable install asks npm for the newest release through "
+        "the update notice's urllib reader, which can raise an http.client error this module may not "
+        "import as well as OSError and ValueError. Any failure returns the skip reason naming the "
+        "error, so the command package stays on the installed release and the card says why; it is "
+        "never relabeled as an update, and it never falls back to the `main` archive.",
     ),
     ClassifiedSite(
         "src/commands/docs.py",
@@ -534,6 +627,17 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
         "per-turn latch and a readable process record showing nothing armed.",
     ),
     ClassifiedSite(
+        "src/plugin_bundle/omh/remote_wait_nudge.py",
+        "failed_wait_context",
+        INTENTIONAL,
+        "The turn-start half for a turn a failed watcher's notice opened, called from "
+        "`pre_llm_call`, which the host runs inside its own swallow (`agent/turn_context.py::"
+        "_collect_pre_llm_call_context` logs and drops a raise), so a raise would also drop every "
+        "other OMH line of that turn. The failure is counted by type in `remote_wait_declines()` and "
+        "the turn gets no directive; the per-turn latch is recorded only on the success path, so a "
+        "failure cannot make the end-of-turn half append its sentence.",
+    ),
+    ClassifiedSite(
         "src/plugin_bundle/omh/hooks/session_hooks.py",
         "subagent_start",
         INTENTIONAL,
@@ -567,6 +671,56 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
         "`absent`, never a working backend, and never a raise (#2166 follow-up).",
     ),
     ClassifiedSite(
+        "src/plugin_bundle/omh/package_backend.py",
+        "_off_path_install",
+        INTENTIONAL,
+        "The look for an oh-my-hermes install in the interpreter's own site directory that its "
+        "import path skips also runs inside `load_backend`'s handler. A failure there (an "
+        "unreadable directory, an unknown install scheme, a broken `site`) is no evidence of an "
+        "install, so `off_path_install` stays empty and the block a plain `absent`: never a "
+        "raise out of a tool and never a directory named without metadata in it (#2415).",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/package_site.py",
+        "ensure_recorded_package_site",
+        INTENTIONAL,
+        "Reading the bundle's own manifest and the recorded directory's oh-my-hermes metadata "
+        "runs at register() and before every backend import. A failure there (a malformed "
+        "manifest, unreadable metadata) is no evidence of a usable install, so the state reads "
+        "`unreadable`, nothing joins sys.meta_path, and the backend import then fails the "
+        "ordinary way and is classified: never a raise out of register() or a tool (#2166).",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/package_site.py",
+        "_omh_importable",
+        INTENTIONAL,
+        "`importlib.util.find_spec('omh')` runs every finder on sys.meta_path, and a host's import "
+        "hook can raise anything for that name. A raise means something answers for `omh`, so it is "
+        "not absent: the recorded directory is left alone, and the backend import that follows meets "
+        "the same failure and `load_backend` classifies it `broken`, as it did before (#2166).",
+    ),
+    ClassifiedSite(
+        "src/tui/bot_board.py",
+        "poll_once",
+        INTENTIONAL,
+        "The bot board's reading thread runs the board's readers, which catch the file and SQLite errors "
+        "they expect. Any other failure becomes a snapshot with no profiles and a `problem` naming the "
+        "exception class, which the board draws as `the board could not be read: <class>` in the warning "
+        "colour, so it is never mistaken for a machine without bots; catching it keeps the thread alive "
+        "and keeps a traceback from being printed over the board.",
+    ),
+    ClassifiedSite(
+        "src/tui/update_notice.py",
+        "_ask",
+        INTENTIONAL,
+        "The update notice's thread asks npm for the latest version through urllib, which can raise an "
+        "http.client error the bridge may not import as well as OSError and ValueError. Any failure keeps the "
+        "version the cache already had (so the notice neither appears nor goes on a failed ask) and is written "
+        "into `<omh_home>/tui/update-check.json` as `problem`, the exception class, beside `checked_at`, so the "
+        "record says the ask failed rather than that no newer release exists; catching it keeps a traceback from "
+        "being printed over the TUI's screen.",
+    ),
+    ClassifiedSite(
         "src/tui/panels.py",
         "_read",
         INTENTIONAL,
@@ -575,6 +729,38 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
         "keys, which `panel_lines` renders as a one-line `OMH HUD unavailable: <class>` notice, so it "
         "is never mistaken for an empty or healthy HUD; catching it here is what keeps the thread "
         "alive and keeps a traceback from being printed over the TUI's own screen.",
+    ),
+    ClassifiedSite(
+        "src/tui/panels.py",
+        "_run",
+        INTENTIONAL,
+        "The HUD poll thread's loop: a read that raises past every reader's own guard (a "
+        "PermissionError from a state.db probe, say) becomes `_read_failed`, a snapshot whose payload "
+        "is only `error` (drawn as `OMH HUD unavailable: <class>`) and whose background processes are "
+        "the ones last read with `refreshes` 0, so the failure is shown, never read as the processes' "
+        "end, and the thread reads again instead of dying for the rest of the session.",
+    ),
+    ClassifiedSite(
+        "src/tui/own_runtime.py",
+        "build_tui_home",
+        INTENTIONAL,
+        "A first build of the TUI's Hermes profile stages under a dot name the host never serves; when "
+        "`_build` raises (any exception, and a KeyboardInterrupt too, hence BaseException), the staging "
+        "directory is removed so no half-built profile without the standalone key is left for the host "
+        "to adopt, and the original exception is re-raised unchanged: the launch reports it, nothing is "
+        "relabeled as a built home.",
+    ),
+    ClassifiedSite(
+        "src/tui/app.py",
+        "_drawn",
+        INTENTIONAL,
+        "Only in the launched TUI (`contain_faults`, which `_run` sets and no test-built App does, so a "
+        "render bug still raises in tests): a part of the frame whose producer raises (the info line, the "
+        "live transcript, the rows above the composer, the menu or HUD panel, the agent view, the sticky "
+        "prompt) is drawn as one warning-colour row saying that part could not be drawn and the "
+        "exception's class, and its traceback is kept once in the TUI's `FaultLog`, which /logs shows. "
+        "It is never drawn as the part's normal rows or as nothing; catching it keeps one part's bug "
+        "from ending the session.",
     ),
     ClassifiedSite(
         "src/plugin_bundle/omh/host_process.py",
@@ -609,6 +795,16 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
     ),
     ClassifiedSite(
         "src/plugin_bundle/omh/tools/dag_tool.py",
+        "worktree_isolation_on",
+        INTENTIONAL,
+        "Hermes' `_get_worktree_isolation` or `local_backend_active` failing to import or raising is "
+        "never answered off: the profile's config.yaml is read the way Hermes reads the key (`bool()` "
+        "over PyYAML's value; a section the reader cannot place counts as on when the key is named), "
+        "and only a Docker or SSH terminal or a config that cannot be read at all answers off, which "
+        "is how define behaved before the guard.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/tools/dag_tool.py",
         "_backend_lines",
         INTENTIONAL,
         "Two handlers. Hermes' environment registry failing to import or raising is `no_read_path`, "
@@ -628,10 +824,211 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
         "classification, never the exception message or raw backend body, so failure is surfaced "
         "without leaking search content.",
     ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/tools/dag_tool.py",
+        "_single_query_session",
+        INTENTIONAL,
+        "Hermes' optional `agent.oneshot_footprint` detector is imported and called at define time. Only "
+        "ModuleNotFoundError during import naming exactly `agent` or `agent.oneshot_footprint` is the "
+        "documented absent path (no cap). A missing unrelated dependency during import, or any callable "
+        "or truth-conversion failure including ModuleNotFoundError, is refused with the named reason "
+        "`oneshot_detection_unavailable` and actionable text; the raw exception is suppressed. These "
+        "failures are never answered `False`, which would silently disable the one-shot child budget.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/lsp_bridge.py",
+        "available",
+        INTENTIONAL,
+        "Hermes' LSP service failing to import or construct is answered `(None, \"lsp_unavailable: cannot load "
+        "Hermes LSP (<exception class>)\")`; every lsp_* handler returns that as error `lsp_unavailable` with the "
+        "class in the hint, never a location list or an applied rename.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/lsp_bridge.py",
+        "in_git_worktree",
+        INTENTIONAL,
+        "Hermes' workspace resolver raising is answered not gated, so the handler refuses with error "
+        "`no_workspace` before any request or write; a resolver failure can only refuse a call, never run one "
+        "outside the worktree Hermes would gate in.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/lsp_bridge.py",
+        "_language_id",
+        INTENTIONAL,
+        "Only the didOpen languageId label falls back (python for .py/.pyi, else plaintext, the same answer "
+        "Hermes' `language_id_for` gives a .py file); the server was already chosen by path through "
+        "`enabled_for`/`_get_or_spawn`, and a server that cannot use the label fails the request, which "
+        "`request` reports as `server_unavailable`.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/lsp_bridge.py",
+        "request",
+        INTENTIONAL,
+        "Any failure driving Hermes' private LSP loop or client becomes BridgeError `server_unavailable` naming "
+        "the exception class; the handler answers it as `ok: false` with that code, separate from `timeout`, "
+        "`lsp_unavailable` and a real (possibly empty, `no_result`) server answer.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/lsp_bridge.py",
+        "notify_changed",
+        INTENTIONAL,
+        "Runs after the rename is already on disk: the result truthfully says applied with the files written. "
+        "A failed re-sync only leaves the server's copy stale until the next lsp_* call re-opens the files it "
+        "uses (from disk, or from the snapshot a rename later proves against the disk bytes), so it never "
+        "turns a failed write into success or lets a stale copy reach disk (`stale_file`).",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/lsp_bridge.py",
+        "diagnostics",
+        INTENTIONAL,
+        "Any failure driving Hermes' private LSP loop or client while collecting diagnostics becomes BridgeError "
+        "`server_unavailable` naming the exception class. `lsp_diagnostics` answers it as `ok: false` with that "
+        "code and the impact check stays silent; neither reads it as a clean file, which only a fresh server "
+        "verdict can produce (a file without one maps to None, `no_verdict`).",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/export_check.py",
+        "round_end_note",
+        INTENTIONAL,
+        "An unexpected failure reading the edited files is logged as a warning naming the exception class "
+        "(`export_check round_end ... failed=`) and yields no note; the turn ends as it would without the check. "
+        "A note is only ever built from names the parsed files show missing, so a failure never claims one is.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/test_expectation_check.py",
+        "note_request",
+        INTENTIONAL,
+        "Runs in pre_llm_call and must never fail the turn. A failure is logged as a warning naming the exception "
+        "class (`test_expectation_check note_request failed=`) and records nothing for the turn, and a turn with no "
+        "record gets no test note; it is never read as a request that asked for behaviour to stay the same.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/test_expectation_check.py",
+        "round_end_note",
+        INTENTIONAL,
+        "An unexpected failure comparing the turn's test files is logged as a warning naming the exception class "
+        "(`test_expectation_check round_end ... failed=`) and yields no note; the turn ends as it would without "
+        "the check. A note is only ever built from expected values the parsed turn-start test shows lost.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/impact_check.py",
+        "enabled",
+        INTENTIONAL,
+        "The opt-in setting read fails closed: an unreadable profile config leaves the impact check off, so a "
+        "host reader failure can only remove the note, never add one.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/impact_check.py",
+        "baseline_before_edit",
+        INTENTIONAL,
+        "Runs in pre_tool_call before an edit and must never fail or alter that edit. An unexpected failure is "
+        "logged as a warning naming the exception class (`impact_check baseline ... failed=`) and records no "
+        "baseline, so the round-end check has nothing to compare and says nothing; it is never recorded as a "
+        "clean baseline.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/impact_check.py",
+        "round_end_note",
+        INTENTIONAL,
+        "An unexpected failure re-checking the importers is logged as a warning naming the exception class "
+        "(`impact_check round_end ... failed=`) and yields no note; the turn ends as it would with the check "
+        "off. A note is only ever built from fresh server diagnostics, so a failure never claims callers broke.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/caller_check.py",
+        "round_end_note",
+        INTENTIONAL,
+        "An unexpected failure reading the turn's edited module or its importers is logged as a warning naming the "
+        "exception class (`caller_check round_end ... failed=`) and yields no note; the turn ends as it would "
+        "without the check. A note is only ever built from calls that bound to the turn-start signature and no "
+        "longer bind, so a failure never claims a call is broken.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/consistency_trigger.py",
+        "snapshot_before_edit",
+        INTENTIONAL,
+        "Runs in pre_tool_call before an edit and must never fail or alter that edit. A failure is logged as a "
+        "warning naming the exception class (`consistency_trigger snapshot failed=`) and keeps no snapshot, and "
+        "a changed file without a snapshot fires the round-end check (`no_snapshot`); it is never read as a "
+        "file with nothing to find.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/consistency_trigger.py",
+        "round_end_trigger",
+        INTENTIONAL,
+        "A failure deciding whether the round-end check can pay off becomes the verdict `fire=True, "
+        "reason=error` naming the exception class, logged with every verdict: the check fires exactly as it "
+        "did before the trigger, so a failure can only cost a round, never skip one.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/consistency_trigger.py",
+        "shell_changed_files",
+        INTENTIONAL,
+        "Runs in transform_tool_result after a terminal / execute_code call and must never fail or alter that "
+        "result. A failure is logged as a warning naming the exception class (`consistency_trigger "
+        "shell_changed failed=`) and reports no changed file, so the call's result goes out as it did before "
+        "the shell round end existed. A `_Budget` walk (past `MAX_SCAN_ENTRIES` or the deadline) is the "
+        "designed undecidable case, not a fault: it is logged at debug as `shell_changed skipped=` so a "
+        "large workspace does not warn on every command.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/lsp_nav.py",
+        "_write_atomic",
+        INTENTIONAL,
+        "Cleanup only: removes its own temp file and re-raises the original exception, which the rename "
+        "handler reports as an error; it never relabels a failed write as written.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/tools/lsp_nav_tool.py",
+        "_lsp_tools_enabled",
+        INTENTIONAL,
+        "The check_fn reading the profile's lsp_tools setting fails closed: a config read error hides the "
+        "opt-in omh-lsp tools, so a host reader failure can only remove them, never enable them.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/tools/lsp_nav_tool.py",
+        "_workspace_root",
+        INTENTIONAL,
+        "Hermes' private `_resolve_base_dir` absent or raising falls back to TERMINAL_CWD and then the process "
+        "cwd, the same roots Hermes' file tools fall back to. Every path stays confined to that root "
+        "(`scope_mismatch` otherwise), results are root-relative, and a miss names the root it used, so the "
+        "fallback is visible and cannot widen what a call may read or write.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/tools/lsp_nav_tool.py",
+        "_navigate",
+        INTENTIONAL,
+        "Handlers must not raise into the host: an unexpected failure is `ok: false`, error "
+        "`unexpected_error` with the exception class, never a location list or `no_result`.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/tools/lsp_nav_tool.py",
+        "lsp_rename_handler",
+        INTENTIONAL,
+        "Handlers must not raise into the host: an unexpected failure is `ok: false`, error "
+        "`unexpected_error` with the exception class, never `applied: true`; every new text is planned and "
+        "checked against the synced bytes before the first write.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/tools/lsp_nav_tool.py",
+        "lsp_diagnostics_handler",
+        INTENTIONAL,
+        "Handlers must not raise into the host: an unexpected failure is `ok: false`, error "
+        "`unexpected_error` with the exception class, never a diagnostics list or a file reported checked.",
+    ),
+    ClassifiedSite(
+        "src/plugin_bundle/omh/installed_skills.py",
+        "hermes_skill_search_roots",
+        INTENTIONAL,
+        "Hermes' own skill-root reader runs inside `pre_llm_call` and must not raise into the host; a failure "
+        "means 'resolution unknown' and the hint keeps the manifest's installed set, which is exactly what it "
+        "named before this check existed. The same question is answered independently, and surfaced, by "
+        "the `hermes_skill_visibility` doctor row and the launch card's count warning.",
+    ),
 )
 
 # Ruff reports one hit per handler; the inventory is keyed per enclosing
-# function. `_write_candidate_batch`, `_is_catalog_question`, `pre_llm_call`,
+# function. `_write_candidate_batch`, `_is_catalog_question`, `llm_hooks._turn_context`,
 # `_resume_unlocked`, `_execute_cell`, `host_process.this_process`,
 # `host_process.process_alive` and `dag_tool._backend_lines` each hold two
 # handlers, so the handler count is eight above the anchor count.
@@ -672,8 +1069,97 @@ CLASSIFIED_SITES: tuple[ClassifiedSite, ...] = (
 # 68 -> 69 / 60 -> 61: `search_tool.omh_search_handler`, which classifies
 # unexpected delegated search failures separately from success and optional
 # backend absence, without returning raw backend content.
-EXPECTED_HANDLER_COUNT = 69
-EXPECTED_ANCHOR_COUNT = 61
+# 69 -> 70 / 61 -> 62: `dag_tool._single_query_session`, Hermes' optional
+# one-shot detector at define time (an installed detector that fails is a named
+# refusal, `oneshot_detection_unavailable`, never a healthy `False` that
+# silently drops the child budget; #preflight review).
+# 70 -> 71 / 62 -> 63: `bot_board.BoardReader.poll_once`, the bot board's reading
+# thread, which draws an unexpected reader failure as a named warning row.
+# 71 -> 72 / 63 -> 64: `repro_audit.operations._publish`, which rolls back
+# only the staged files it owns and re-raises the original failure.
+# 72 -> 82 / 64 -> 74: the opt-in omh-lsp tools (`lsp_bridge`, `lsp_nav`,
+# `tools/lsp_nav_tool`), one handler per function: host-reader probes that fail
+# closed, Hermes' LSP loop failures named `server_unavailable`, a temp-file
+# cleanup that re-raises, and handlers that answer `unexpected_error`.
+# 82 -> 83 / 74 -> 75: `tui/panels.HudPoller._run`, the HUD poll loop (a read
+# that raises is a visible notice with the last processes kept, never a dead
+# thread and never the processes' end; #2388 review).
+# 83 -> 88 / 75 -> 80: the opt-in impact check and `lsp_diagnostics`
+# (`impact_check.enabled`, `baseline_before_edit`, `round_end_note`,
+# `lsp_bridge.diagnostics`, `lsp_nav_tool.lsp_diagnostics_handler`): a setting
+# read that fails closed, two hook bodies that log a named warning and say
+# nothing, a bridge failure named `server_unavailable`, and a handler that
+# answers `unexpected_error`.
+# 88 -> 89 / 80 -> 81: `package_backend._off_path_install`, the look for an
+# install the import path skips, inside `load_backend`'s handler (a failure
+# leaves `off_path_install` empty, never a raise out of a tool; #2415).
+# 89 -> 92 / 81 -> 83: `package_site.ensure_recorded_package_site`, the manifest
+# and metadata reads that decide whether OMH's recorded package joins the import
+# system (two handlers; a failure adds nothing and is reported, never raised), and
+# `package_site._omh_importable`, a host import hook raising for `omh` (#2166).
+# 92 -> 93 / 83 -> 84: `remote_wait_nudge.failed_wait_context`, the turn-start
+# half for a turn a failed watcher's notice opened (a raise is counted and the
+# turn gets no directive, never a dropped `pre_llm_call` context).
+# 93 -> 95 / 84 -> 86: `consistency_trigger.snapshot_before_edit` and
+# `round_end_trigger`, the round-end check's trigger: a pre_tool_call body that
+# logs a named warning and keeps nothing, and a verdict that fires the check on
+# any failure, so a failure costs a round and never skips one.
+# 95 -> 96 / 86 -> 87: `export_check.round_end_note`, the always-on round-end
+# read of the turn's edited `.py` files for dangling exports (a failure logs a
+# named warning and adds no note).
+# 96 -> 97 / 87 -> 88: `update_notice.UpdateCheck._ask`, the OMH TUI's update
+# notice thread (a failure keeps the cached version and is recorded as
+# `problem`, never a traceback over the screen).
+# 97 -> 99 / 88 -> 90: `test_expectation_check.note_request` and `round_end_note`,
+# the round-end test check: a pre_llm_call body that records nothing on a failure,
+# and a note that says nothing on one.
+# 99 -> 100 / 90 -> 91: `memory_provider._work_state_facts`, the unfinished-work
+# facts at compaction (a fault is recorded as a write failure and costs only the
+# facts, never the memory blocks).
+# 100 -> 101 / 91 -> 92: `memory_provider._conversation_session_ids`, the
+# compaction-lineage read that decides which records stay in full on a no-match
+# turn (a fault keeps only this session and is reported on the receipt).
+# 101 -> 102 / 92 -> 93: `installed_skills.hermes_skill_search_roots`, Hermes' own
+# skill-root reader inside `pre_llm_call` (a failure keeps the manifest's
+# installed set, what the hint named before the check, never a raise into the host).
+# 102 -> 103 / 93 -> 94: `app.App._drawn`, the launched OMH TUI's render containment
+# (a part of the frame that raises is a warn row naming it, its traceback in /logs).
+# 103 -> 104 / 94 -> 95: `llm_hooks._warm_imports`, the register-time warm-up thread for the
+# first turns' package imports (a failure loads nothing, and the call sites import and report as before).
+# 104 -> 105 / 95 -> 96: `caller_check.round_end_note`, the always-on round-end
+# read of call sites a signature change broke (a failure logs a named warning and
+# adds no note).
+# 105 -> 106 / 96: a second handler inside the classified `plugin_api.hud_payload`, the
+# Desktop pane's delegation drawing (a failure is a record with `error` beside a HUD that
+# still reads, and the pane draws its lane rows instead).
+# 106 -> 107 / 96 -> 97: `dag_tool.worktree_isolation_on`, Hermes' own worktree-isolation
+# getters (a failure reads the profile's config.yaml the way Hermes reads it, never a
+# guessed "off").
+# 107 -> 108 / 97 -> 98: `consistency_trigger.shell_changed_files`, the re-index after a
+# command for the shell round end (a failure logs a named warning and adds no note).
+# 108 -> 109 / 98 -> 99: `setup._installer_self_update_release`, the stable install's
+# newest-release read for `omh update` (a failure skips the command package move and
+# names the error, never the `main` archive).
+# 109 -> 111 / 99 -> 101: the messenger chat gate's hook boundary (`gateway_hooks.pre_gateway_dispatch`,
+# fail open) and its reaction (`gateway_hooks._acknowledge`).
+# 111 -> 112 / 101 -> 102: the judged messenger room's `[SHUTUP]` side effects
+# (`messenger_judgement.judged_reply`: a failed mute or reaction still returns `[SILENT]`).
+# `llm_hooks.pre_llm_call`'s body moved to `_turn_context` unchanged.
+# 112 -> 113 / 102: a third handler inside the classified `plugin_api.hud_payload`, the
+# Desktop pane's usage board (a failure is a `session_usage` record with `error` beside a HUD
+# that still reads, and the board shows dashes for the recorded row).
+# 113 -> 114 / 102 -> 103: `own_runtime.build_tui_home`, the staged first build of the TUI's Hermes
+# profile (a failed `_build` removes its staging and re-raises; the host never sees a half-built
+# profile).
+# 114 -> 115 / 103 -> 104: the channel-watch collector's `main` (an unexpected error names its class only, exit 1;
+# a traceback could quote the bot token).
+# 115 -> 116 / 104 -> 105: proofread.Worker._run reports unexpected failure as Outcome.error.
+# 116 -> 117 / 105 -> 106: doctor's `_gateway_health_check` (#3147: an unexpected failure is an observed=False
+# warning row naming the exception class, never a healthy report).
+# 117 -> 118 / 106 -> 107: the monitor-recipe HTTP read, `api_watch.Client.call` (a malformed reply is a
+# fixed `unreachable reason=bad_response`, exit 1, never a change).
+EXPECTED_HANDLER_COUNT = 118
+EXPECTED_ANCHOR_COUNT = 107
 
 
 class DerivedSite(NamedTuple):

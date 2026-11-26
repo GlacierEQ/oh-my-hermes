@@ -10,51 +10,23 @@ metadata:
     phase: provider-profile-posture
     role: operator
     quality_tier: workflow-surface-gated
+    related_skills: [omh-external-connector-readiness, omh-toolbelt-readiness, omh-model-setup]
 ---
 
 # Provider Profile Posture
 
-This is a Hermes-native `provider-profile-posture` workflow skill.
+Required: user request, target context, delivery or status expectation, known missing evidence. Output: provider_profile_posture/v1, metadata-only secret requirements, allowed and prohibited actions.
 
 ## Why This Exists
 
-`provider-profile-posture` exists so Hermes users can ask for this workflow in chat and get a structured, checkable answer instead of an improvised one.
+`provider-profile-posture` exists so a profile's required secret names and capabilities are recorded as present, missing, or unknown without any secret value being read or any provider being called.
 
-## Do Not Use When
-
-- The request is already handled by a narrower explicit skill with stronger evidence.
-- The user asks OMH to secretly run external platforms, connectors, schedulers, file exports, or runtime agents.
-- The only safe answer is to ask for missing authority, credentials, target, or observed evidence first.
-
-## Examples
-
-Good example:
-
-- Prompt: Prepare provider profile posture for this connector using metadata-only secret presence.
-- Expected behavior: Produce `prepare_provider_profile_posture` with required context, wrapper actions, and not-evidence boundaries.
-- Why: The prompt names a real workflow surface that Hermes can orchestrate without hiding execution.
-
-Bad example:
-
-- Prompt: Read the secret, validate the credential, call the provider, or create a payment route.
-- Expected behavior: Report the missing observed evidence or authority instead of claiming the external step happened.
-- Why: Prepared OMH guidance is not platform, runtime, connector, file, memory, or delivery evidence.
-
-## Completion Checklist
-
-- Provider ID, profile ID, requested capabilities, and secret-presence metadata are explicit.
-- No secret value, credential validation, provider call, model route, wallet, or payment action is claimed.
-- Any host observation reference remains supplied metadata, not a live connector check.
-
-## Recovery Notes
-
-- If required context is missing, ask one blocking question or route back to the narrower workflow.
-- If runtime or wrapper evidence is unavailable, keep the status as not_observed and expose the next observable action.
+Contract: `references/full-contract.md` (examples, sibling boundaries, full artifact details).
 
 ## Workflow Lane
 
-- Current lane: **Automation and status** (`achievements`, `workspace-audit`, `production-audit`, `live-incident-response`, `automation-blueprint`, `github-event-ops`, `github-issue-intake`, `buzz`, `+40 more`) - schedules, status, health, and ops review.
-- If intent belongs to another lane, hand back to `oh-my-hermes` or name the adjacent workflow.
+- Current lane: **Automation and status** - schedules, status, health, and ops review.
+- If intent belongs to another lane, hand back to `omh-routing` or name the adjacent workflow.
 - Shared product, routing, compatibility, and evidence rules: `skill_view(name='omh-routing', file_path='references/skill-common-rail.md')`.
 
 ## When to Use
@@ -81,27 +53,22 @@ Handoff policy:
 
 Keep this as Hermes-facing orchestration guidance first. Prepare executor, connector, gateway, or host-runtime handoff only when the user accepts that next step and observed evidence can be recorded.
 
-Required inputs:
-
-- user request
-- target context
-- delivery or status expectation
-- known missing evidence
-
-Expected outputs:
-
-- provider_profile_posture/v1
-- metadata-only secret requirements
-- allowed and prohibited actions
-
-Artifact expectations:
-
-- provider_profile_posture/v1 metadata-only preparation record
-
 Safety rules:
 
 - Provider/profile posture is OMH-local preparation metadata; it is not credential validation, provider connectivity, model routing, payment/wallet, or host execution evidence.
 - Do not claim connector, gateway, runtime, file generation, memory mutation, or host automation evidence from prepared guidance.
+
+## Completion Checklist
+
+- Provider ID, profile ID, requested capabilities (chat, embedding, tool_call, image), and secret presence are explicit, and `omh ops provider-profile-posture --input <file>` made the record from JSON with `schema_version` `provider_profile_posture_input/v1`, `provider_id`, `profile_id`, `requested_capabilities`, `secret_requirements` as `{name, present: true|false|"unknown"}`, optional `host_observations`.
+- No secret value, credential validation, provider call, model route, wallet, or payment action is claimed.
+- Any host observation reference remains supplied metadata, not a live connector check.
+
+## Recovery Notes
+
+- If provider ID or profile ID is missing, retain the supplied capability requirements, mark provider_profile_posture/v1 unresolved, and hand back a request for the missing ID without reading any secret.
+- If secret-presence metadata is absent, retain the named provider, profile, and requested capabilities, mark secret presence not_observed, and hand back metadata-only secret requirements plus allowed and prohibited actions.
+- If only a host observation reference is supplied, retain it as metadata, mark provider connectivity not_observed, and hand back provider_profile_posture/v1 without claiming credential validation or making a provider call.
 
 ## Runtime Evidence
 
@@ -115,7 +82,7 @@ Record observed delegation results; otherwise return `not_available` or `not_obs
 Prepared OMH routing is not execution, review, CI, merge-readiness, or merge evidence.
 - Treat wrapper memory/context summaries as advisory local context, not proof of opaque Hermes memory reads or changes.
 Preserve workflow intent and stop conditions; verify before claiming completion.
-Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only; OMH's record terms (surface, lane, wrapper, handoff, evidence boundary, not_observed) stay in records and tool calls, never in the sentence the user reads unless they ask about one; and when a real unresolved user decision or a useful briefing discussion remains, offer one specific, content-linked question. Completed work needs no question; omit unrelated non-action footers and generic offers to continue.
+Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only. When the requested output is delivered, put any open points inside the result and end with no question or offer; only when the person asked to choose or decide and that choice is still theirs, end with one specific question about it, not a list, a generic offer, or a footer; the shared rail's Reply Language And Host Voice and Turn Ending sections hold the full rule.
 
 Use Hermes-native subagent/delegation features when available: native subagents -> Hermes delegation when available, otherwise sequential lanes.
 

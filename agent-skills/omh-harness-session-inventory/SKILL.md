@@ -1,6 +1,6 @@
 ---
 name: "omh-harness-session-inventory"
-description: "[omh] Lost track of agent sessions and worktrees: normalize Codex, Claude Code, Hermes, OpenCode, Cursor, MCP host, worktree, and wrapper session metadata into one drift-aware inventory. Use when the user says: harness-session-inventory, harness session inventory, session inventory, session adapter, session adapters, harness sessions, mcp inventory, mcp config inventory."
+description: "[omh] Lost track of agent sessions and worktrees: normalize Codex…"
 license: MIT
 metadata:
   hermes:
@@ -24,6 +24,7 @@ This is an OMH `harness-session-inventory` workflow skill, projected for Agent S
 - The request is already handled by a narrower explicit skill with stronger evidence.
 - The user asks OMH to secretly run external platforms, connectors, schedulers, file exports, or runtime agents.
 - The only safe answer is to ask for missing authority, credentials, target, or observed evidence first.
+- The request is one repository's own skill, prompt, plugin, or config surfaces and gaps with no cross-harness comparison; use `omh-workspace-audit`.
 
 ## Examples
 
@@ -49,6 +50,9 @@ Bad example:
 
 - If config sources are unavailable, report only the discovered surfaces and mark the missing hosts not_observed.
 - If cleanup, host load, connector execution, or session progress is requested, route to the owning workflow instead of folding it into inventory.
+- To recover a previous coding session, list candidates read-only by metadata only (file name, modified time, size): Codex `~/.codex/sessions/`, Claude Code `~/.claude/projects/<project-slug>/`, Hermes `hermes sessions list`; mark an unreadable source not_observed, and read a transcript body only when the person asks for that next step.
+- For `omh harness mcp-tool-name-compatibility`, each snapshot is a JSON file with exactly `schema_version` (`mcp_tool_name_compatibility_snapshot/v1`), `target_harness`, `adapter` (an object of `id` and `version`; only `id` `opencode-mcp-tool-naming` with `version` `v1` and `target_harness` `opencode` carries naming rules, and any other adapter reports `unsupported_adapter`), `required_tools` (entries of `logical_name` and `evidence_refs`) and `advertised_tools` (entries of `name`, `observation` of `registered` or `config_only`, and `evidence_refs`); one `--snapshot` per distinct target harness (1 to 20 files), and a malformed file is refused with no field named.
+- Write each of the other inventory artifacts as a table with columns entry, source path, and state in {observed, prepared, missing, stale, drifted, not_observed}, so completion can be checked row by row.
 
 
 
@@ -56,7 +60,7 @@ Bad example:
 
 Use when operators need a cross-harness/session/MCP/worktree inventory and drift summary before claiming any host loaded, connector ran, or agent session progressed.
 
-    Strong routing signals: `harness-session-inventory`, `harness session inventory`, `session inventory`, `session adapter`, `session adapters`, `harness sessions`, `mcp inventory`, `mcp config inventory`, `mcp drift`, `harness drift`, `connector drift`, `worktree inventory`, `worktree lifecycle`, `operator inventory`, `control pane inventory`, `codex session inventory`, `claude code session inventory`, `find previous coding session`, `recover coding session`, `previous codex coding session`, `coding session recall`, `세션 인벤토리`, `지난 코딩 세션`, `코딩 세션 복구`, `세션 기억 복구`, `하네스 세션`, `하네스 드리프트`, `MCP 인벤토리`, `MCP 설정 드리프트`, `워크트리 인벤토리`, `커넥터 드리프트`
+    Strong routing signals: `harness-session-inventory`, `harness session inventory`, `session inventory`, `session adapter`, `session adapters`, `harness sessions`, `mcp inventory`, `mcp config inventory`, `mcp drift`, `harness drift`, `connector drift`, `worktree inventory`, `worktree lifecycle`, `operator inventory`, `control pane inventory`, `codex session inventory`, `claude code session inventory`, `find previous coding session`, `recover coding session`, `previous codex coding session`, `coding session recall`, `세션 인벤토리`, `지난 코딩 세션`, `코딩 세션 복구`, `세션 기억 복구`, `하네스 세션`, `하네스 드리프트`, `MCP 인벤토리`, `MCP 설정 드리프트`, `워크트리 인벤토리`, `커넥터 드리프트`, `сессии агентов`, `инвентарь харнессов`, `восстанови сессию агента`, `инвентарь сессий`, `каждый харнесс`, `харнесс подхватывает`, `харнес подхватывает`
 
 ## Catalog Metadata
 

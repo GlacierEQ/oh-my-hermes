@@ -42,6 +42,7 @@ from omh.wrapper.localized_copy import detect_copy_locale
 from omh.wrapper.native_commands import build_native_command_surface, render_native_command_response
 from omh.wrapper.route_hints import build_chat_route_hint_payload
 from omh.wrapper.orchestration_guidance import build_omh_orchestration_guidance
+from omh.coding.pi_family_interop import RUNTIME_CONFIG_FILES, RUNTIME_HOME
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -1378,9 +1379,9 @@ class WrapperContractTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths = resolve_paths(root / ".omh", root / ".hermes")
-            omo_config = root / ".omo" / "omo.json"
-            omo_config.parent.mkdir(parents=True)
-            omo_config.write_text(
+            runtime_config = root / RUNTIME_HOME / RUNTIME_CONFIG_FILES[0]
+            runtime_config.parent.mkdir(parents=True)
+            runtime_config.write_text(
                 json.dumps(
                     {
                         "models": [
@@ -1530,9 +1531,9 @@ class WrapperContractTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             paths = resolve_paths(root / ".omh", root / ".hermes")
-            omo_config = root / ".omo" / "omo.json"
-            omo_config.parent.mkdir(parents=True)
-            omo_config.write_text(
+            runtime_config = root / RUNTIME_HOME / RUNTIME_CONFIG_FILES[0]
+            runtime_config.parent.mkdir(parents=True)
+            runtime_config.write_text(
                 json.dumps(
                     {
                         "models": [
@@ -1572,7 +1573,8 @@ class WrapperContractTests(unittest.TestCase):
         self.assertIn("choose_executor", actions)
         self.assertIn("not dispatch", payload["chat_response"]["claim_boundary"])
 
-    def test_route_coding_workflow_uses_visible_reversible_learned_owner_default(self) -> None:
+    def test_route_coding_workflow_never_picks_an_owner_from_earlier_choices(self) -> None:
+        # Mutation: restore the learned default; the card then preselects codex from three earlier answers.
         with TemporaryDirectory() as tmp:
             paths = resolve_paths(Path(tmp) / ".omh", Path(tmp) / ".hermes")
             state = empty_owner_preference_state()
@@ -1593,30 +1595,32 @@ class WrapperContractTests(unittest.TestCase):
 
         decision = payload["coding_route_decision"]
         actions = {action["id"]: action for action in payload["chat_response"]["actions"]}
-        self.assertEqual(payload["executor_resolution"]["source"], "learned_owner_preference")
-        self.assertEqual(payload["delegation"]["selected_executor_profile"], "codex")
-        self.assertEqual(decision["owner_preference_action"], "use_learned_default")
-        self.assertEqual(decision["owner_preference_route_family"], "ulw-coding-delivery")
+        self.assertEqual(payload["executor_resolution"]["source"], "caller_default")
+        self.assertEqual(payload["next_action"], "choose_executor")
+        self.assertTrue(payload["delegation"]["executor_selection"]["choice_required"])
+        self.assertNotEqual(payload["delegation"].get("selected_executor_profile"), "codex")
+        self.assertEqual(decision["owner_preference_action"], "ask_explicit_owner")
         self.assertEqual(decision["owner_preference_evidence_count"], 3)
-        self.assertTrue(decision["owner_preference_override_available"])
-        self.assertTrue(decision["owner_preference_reset_available"])
+        self.assertFalse(decision["owner_preference_override_available"])
+        self.assertFalse(decision["owner_preference_reset_available"])
         self.assertIn("choose_executor", actions)
-        self.assertEqual(actions["choose_executor"]["label"], "Override learned coding agent")
-        self.assertIn("reset_coding_owner_preference", actions)
-        self.assertEqual(
-            payload["chat_response"]["state"]["handoff_status"],
-            "prepared_not_observed",
-        )
-        self.assertEqual(
-            decision["claim_boundary"],
-            payload["delegation"]["coding_route_decision"]["claim_boundary"],
-        )
-        self.assertEqual(
-            payload["chat_response"]["state"]["handoff_status"],
-            "prepared_not_observed",
-        )
+        self.assertNotIn("reset_coding_owner_preference", actions)
+        from omh.wrapper.contract import VISIBLE_ACTIONS
+        self.assertNotIn("reset_coding_owner_preference", VISIBLE_ACTIONS)
 
-    def test_explicit_owner_acceptance_learns_only_after_three_safe_choices(self) -> None:
+    def test_a_setup_profile_owner_still_stands_without_a_named_owner(self) -> None:
+        with TemporaryDirectory() as tmp:
+            paths = resolve_paths(Path(tmp) / ".omh", Path(tmp) / ".hermes")
+            write_setup_profile(paths, default_executor="claude-code")
+            payload = build_chat_interaction_payload(
+                "research the repo, plan, implement, code-review, sync docs, and prepare a PR",
+                source="discord",
+                paths=paths,
+            )
+        self.assertEqual(payload["executor_resolution"]["source"], "setup_profile")
+        self.assertEqual(payload["executor_resolution"]["resolved_executor_target"], "claude-code")
+
+    def test_three_explicit_owner_answers_then_a_fourth_request_still_asks(self) -> None:
         message = "research the repo, plan, implement, code-review, sync docs, and prepare a PR"
         with TemporaryDirectory() as tmp:
             paths = resolve_paths(Path(tmp) / ".omh", Path(tmp) / ".hermes")
@@ -1641,12 +1645,13 @@ class WrapperContractTests(unittest.TestCase):
                     expected_count,
                 )
 
-            learned = build_chat_interaction_payload(message, source="discord", paths=paths)
-            self.assertEqual(learned["executor_resolution"]["source"], "learned_owner_preference")
-            self.assertEqual(learned["delegation"]["selected_executor_profile"], "codex")
+            # A fourth request that names no owner asks again: the three answers count only for their own requests.
+            fourth = build_chat_interaction_payload(message, source="discord", paths=paths)
+            self.assertEqual(fourth["executor_resolution"]["source"], "caller_default")
+            self.assertEqual(fourth["next_action"], "choose_executor")
             self.assertEqual(
-                learned["coding_route_decision"]["owner_preference_action"],
-                "use_learned_default",
+                fourth["coding_route_decision"]["owner_preference_action"],
+                "ask_explicit_owner",
             )
 
     def test_authority_gate_prevents_explicit_owner_acceptance_learning(self) -> None:
@@ -1663,7 +1668,7 @@ class WrapperContractTests(unittest.TestCase):
             self.assertEqual(payload["coding_route_decision"]["source"], "user_choice_required")
             self.assertFalse(owner_preference_path(paths).exists())
 
-    def test_changed_explicit_owner_reset_is_visible_on_choice_card(self) -> None:
+    def test_changed_explicit_owner_keeps_its_reset_reason_in_card_state(self) -> None:
         with TemporaryDirectory() as tmp:
             paths = resolve_paths(Path(tmp) / ".omh", Path(tmp) / ".hermes")
             state = empty_owner_preference_state()
@@ -1694,7 +1699,8 @@ class WrapperContractTests(unittest.TestCase):
         self.assertEqual(decision["owner_preference_action"], "ask_explicit_owner")
         self.assertEqual(decision["owner_preference_evidence_count"], 1)
         self.assertEqual(decision["owner_preference_reset_reason"], "explicit_owner_changed")
-        self.assertIn("explicit_owner_changed", response["body"])
+        # No streak selects an owner, so the card no longer narrates a streak reset.
+        self.assertNotIn("streak", response["body"])
         self.assertEqual(
             response["state"]["owner_preference_reset_reason"],
             "explicit_owner_changed",

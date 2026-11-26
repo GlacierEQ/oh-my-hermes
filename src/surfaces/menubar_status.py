@@ -9,7 +9,7 @@ from typing import Any
 from ..plugin_bundle.omh.run_records import CODING_DELEGATION_FILE
 from ..executors import executor_label
 from ..hud import build_hud_payload
-from ..local_store import read_json_object
+from ..local_store import read_json_object, read_runtime_record
 from ..paths import OmhPaths
 from ..runtime.artifacts import summarize_delegated_coding_status
 from ..routing.action_copy import next_action_label
@@ -75,6 +75,7 @@ def build_menubar_status_payload(
         now=now,
     )
     settings = _settings(hud, hermes_agents, current_executor)
+    settings["tui_runtime"] = tui_runtime_setting(paths)
     return {
         "schema_version": MENUBAR_STATUS_SCHEMA_VERSION,
         "package": "oh-my-hermes",
@@ -338,7 +339,7 @@ def _recent_run_ids(paths: OmhPaths, *, limit: int) -> list[str]:
     run_ids: list[str] = []
     for run_json in sorted(runs_dir.glob("*/run.json"), reverse=True)[:limit]:
         try:
-            run = read_json_object(run_json)
+            run = read_runtime_record(run_json)
         except (OSError, JSONDecodeError, ValueError):
             continue
         if isinstance(run, dict):
@@ -348,7 +349,7 @@ def _recent_run_ids(paths: OmhPaths, *, limit: int) -> list[str]:
 
 def _run_coding_record(paths: OmhPaths, run_id: str) -> dict[str, Any]:
     try:
-        coding = read_json_object(paths.runtime_runs_dir / run_id / CODING_DELEGATION_FILE)
+        coding = read_runtime_record(paths.runtime_runs_dir / run_id / CODING_DELEGATION_FILE)
     except (OSError, JSONDecodeError, ValueError):
         return {}
     return coding if isinstance(coding, dict) else {}
@@ -435,6 +436,29 @@ def _settings(
             raw=f"dispatch_policy:{dispatch_policy}",
         ),
     }
+
+
+def tui_runtime_setting(paths: OmhPaths) -> dict[str, str]:
+    """Where bare `omh` opens its sessions (`omh theme runtime`), and whether the TUI's own gateway runs now.
+
+    `shared`: the Hermes gateway the bots use. `own` (the default): a TUI-only
+    Hermes profile under the root (`tui/own_runtime.py`), its gateway's pid
+    when it is live. Read-only, from the saved choice, the profile's marker and
+    its record.
+    """
+    from ..skin_pack import RUNTIME_OWN, read_runtime_choice
+    from ..tui.own_runtime import tui_home_status
+
+    status = tui_home_status(Path(paths.hermes_home), read_runtime_choice(paths.omh_home))
+    if status.runtime != RUNTIME_OWN:
+        return _setting(value="shared", label="TUI runtime: shared gateway", raw="tui_runtime:shared")
+    if status.gateway_live:
+        label = f"TUI runtime: own (gateway pid {status.gateway_pid})"
+    elif status.built:
+        label = "TUI runtime: own (gateway idle)"
+    else:
+        label = "TUI runtime: own (home not built yet)"
+    return _setting(value="own", label=label, raw=f"tui_runtime:own:{status.gateway_pid or 0}")
 
 
 def _coding_handoff_source(current_executor_row: dict[str, Any], current_executor: str) -> str:

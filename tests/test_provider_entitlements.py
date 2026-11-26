@@ -66,10 +66,26 @@ class ParityTests(unittest.TestCase):
     # same reason: a machine-level chain override may still name them.
     _RECOGNITION_ONLY_ALIAS_FAMILIES: dict[str, tuple[str, ...]] = {
         "claude-mythos-5-1": ("ccapi", "anthropic", "openrouter"),
+        # Mythos 5.2 is Fable 5.2 served only to verified organizations
+        # (onboarded 2026-11-10), on the Mythos 5.1 terms.
+        "claude-mythos-5-2": ("ccapi", "anthropic", "openrouter"),
+        # Retired 2026-11-10 when Claude Fable 5.2 took every Fable 5.1 slot.
+        "claude-fable-5-1": ("ccapi", "anthropic", "openrouter"),
+        # Onboarded 2026-10-27 ahead of any chain placement.
+        "gpt-6.1-terra": ("openai-codex", "openai", "openrouter"),
+        # Onboarded 2026-11-06, access-gated (Daybreak Red), so never chained:
+        # GPT-6 Cyber follows Mythos 5.1.
+        "gpt-6-cyber": ("openai-codex", "openai"),
+        # Onboarded 2026-11-23 as a provider row only; in no shipped chain.
+        "glm-5.4": ("zai",),
+        # Onboarded 2026-11-06; a legal specialist, in no shipped chain.
+        "glm-5.3-flashx-legal": ("zai",),
         # Onboarded 2026-10-24; no shipped chain names the Highspeed tier.
         "kimi-k3.1-pro-highspeed": ("kimi-coding",),
         # Retired 2026-10-24 when Kimi K3.1 Pro took every K3 slot.
         "kimi-k3": ("apitopia", "kimi-coding", "openrouter", "opencode"),
+        # Retired 2026-10-28 when Gemini 4 Argon took every Gemini 3.1 Pro slot.
+        "gemini-3.1-pro": ("google", "gemini", "openrouter"),
         # The versioned spelling of the shipped `deepseek-flash` pointer;
         # gateways serve it under this id.
         "deepseek-v4.1-flash": ("deepseek", "openrouter", "opencode"),
@@ -87,10 +103,35 @@ class ParityTests(unittest.TestCase):
         "grok-code-fast": ("xai", "openrouter"),
         # Retired 2026-10-01 when GPT-6.1 Sol took every GPT-6 Sol slot.
         "gpt-6-sol": ("openai-codex", "openai"),
+        # Retired 2026-11-18 when GPT-6.2 Astra and GPT-6.2 Sol took every slot
+        # of GPT-6 Astra and GPT-6.1 Sol.
+        "gpt-6-astra": ("openai-codex", "openai"),
+        "gpt-6.1-sol": ("openai-codex", "openai"),
         # Retired 2026-10-13: Claude Haiku 4.5 behind Haiku 5.5, and the 2025
         # Qwen3-Coder with no Qwen successor.
         "claude-haiku-4-5": ("ccapi", "anthropic", "openrouter"),
         "qwen3-coder": ("qwen-oauth", "openrouter", "opencode"),
+        # Catalog sync 2026-10-28: recognized, priced, and provider-mapped
+        # ahead of any chain placement.
+        "deepseek-v4-pro": ("deepseek", "openrouter"),
+        "glm-5.3-flashx": ("zai", "openrouter"),
+        # grok-4.7 left this table on 2026-10-28, when the routing recipe
+        # placed it at the x-search head.
+        "grok-4.6": ("xai", "openrouter"),
+        "grok-4.5": ("xai", "openrouter"),
+        "grok-4.3": ("xai", "openrouter"),
+        "gemini-3.8-flash": ("google", "gemini", "openrouter"),
+        "gemini-3.6-flash": ("google", "gemini", "openrouter"),
+        "gemini-3.5-flash-lite": ("google", "gemini", "openrouter"),
+        # Catalog sync 2026-11-11: recognized, priced, and provider-mapped
+        # ahead of any chain placement.
+        "gemini-4-carbon": ("google", "gemini", "openrouter"),
+        # Catalog sync 2026-11-13: recognized, priced, and provider-mapped
+        # ahead of any chain placement.
+        "gemini-4-hydrogen": ("google", "gemini", "openrouter"),
+        # Catalog sync 2026-11-20: recognized, priced, and provider-mapped
+        # ahead of any chain placement.
+        "gemini-4-neon": ("google", "gemini", "openrouter"),
     }
     # Provider families whose last catalog member retired, kept in the
     # vocabulary by name. The entitlement parser is strict and atomic, so
@@ -278,10 +319,10 @@ class ChainSurfaceConsistencyTests(unittest.TestCase):
             self.assertTrue(architect["entitlement_shaped"])
             # The one GPT entry is served by the confirmed openai-codex
             # provider and leads; the Claude and Kimi entries follow as
-            # unserved in shipped order (Opus 5.5 before Fable 5.1).
-            self.assertEqual(architect["chain"][0]["model"], "gpt-6-astra")
+            # unserved in shipped order (Opus 5.5 before Fable 5.2).
+            self.assertEqual(architect["chain"][0]["model"], "gpt-6.2-astra")
             self.assertEqual(architect["chain"][1]["model"], "claude-opus-5-5")
-            self.assertEqual(architect["chain"][2]["model"], "claude-fable-5-1")
+            self.assertEqual(architect["chain"][2]["model"], "claude-fable-5-2")
             self.assertTrue(architect["chain"][0]["served"])
             for entry in architect["chain"][1:]:
                 self.assertFalse(entry["served"], entry)
@@ -289,7 +330,7 @@ class ChainSurfaceConsistencyTests(unittest.TestCase):
             with redirect_stdout(out):
                 _print_state(state)
             self.assertIn(
-                "architect: gpt-6-astra:xhigh, claude-opus-5-5:xhigh, claude-fable-5-1:xhigh, kimi-k3.1-pro:xhigh",
+                "architect: gpt-6.2-astra:xhigh, claude-opus-5-5:xhigh, claude-fable-5-2:xhigh, kimi-k3.1-pro:xhigh",
                 out.getvalue(),
             )
             self.assertIn("(reordered by this machine's providers)", out.getvalue())
@@ -311,14 +352,14 @@ class ChainSurfaceConsistencyTests(unittest.TestCase):
                 omh_delegate_route_handler({"action": "set", "category": "architect", **common}, **host)
             )
             self.assertEqual(routed["status"], "routed", routed)
-            self.assertEqual(routed["applied"]["alias"], "gpt-6-astra")
-            for expected in ("claude-opus-5-5", "claude-fable-5-1", "kimi-k3.1-pro"):
+            self.assertEqual(routed["applied"]["alias"], "gpt-6.2-astra")
+            for expected in ("claude-opus-5-5", "claude-fable-5-2", "kimi-k3.1-pro"):
                 fallback = json.loads(
                     omh_delegate_route_handler({"action": "fallback", "category": "architect", **common}, **host)
                 )
                 self.assertEqual(fallback["applied"]["alias"], expected)
             status = json.loads(omh_delegate_route_handler({"action": "status", **common}))
-            self.assertEqual(status["categories"]["architect"][0]["alias"], "gpt-6-astra")
+            self.assertEqual(status["categories"]["architect"][0]["alias"], "gpt-6.2-astra")
 
 
 class ConfigReaderTests(unittest.TestCase):
@@ -615,6 +656,7 @@ class MultiChoicePromptTests(unittest.TestCase):
             "provider_detected_config",
             "provider_detected_env",
             "provider_detected_login",
+            "provider_detected_plugin",
             "provider_recorded_before",
             "provider_opengateway_desc",
             "provider_skip_label",
@@ -824,6 +866,26 @@ class SetupInterviewTests(unittest.TestCase):
         self.assertEqual(values[:2], ["openai-codex", "openai"])
         self.assertEqual(preselected, ["openai-codex", "openai"])
         self.assertEqual(kinds["openai"], "openai")
+
+    def test_an_installed_provider_plugin_is_offered_as_a_pre_ticked_row(self) -> None:
+        directsdk = "claude-subscription-directsdk-experimental"
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            paths = self._paths(root)
+            plugin = paths.hermes_home / "plugins" / "directsdk"
+            plugin.mkdir(parents=True)
+            (plugin / "plugin.yaml").write_text(f"name: {directsdk}\nkind: model-provider\n", encoding="utf-8")
+            (plugin / "__init__.py").write_text("", encoding="utf-8")
+            with patch.object(setup_module, "_env_key_names", return_value=set()):
+                candidates = setup_module._provider_candidates(paths)
+        self.assertEqual(candidates, [(directsdk, "anthropic", "plugin")])
+        # A plugin row is a provider of its own, never folded into a recorded
+        # account of the same kind the way a key name is.
+        options, preselected, kinds = setup_module._provider_entitlement_options(candidates, {"my-anthropic": "anthropic"}, "en")
+        self.assertEqual([option["value"] for option in options][:2], [directsdk, "my-anthropic"])
+        self.assertEqual(options[0]["description"], "found: a Hermes provider plugin is installed")
+        self.assertEqual(preselected[:2], [directsdk, "my-anthropic"])
+        self.assertEqual(kinds[directsdk], "anthropic")
 
     def test_a_hermes_auth_login_is_offered_as_a_pre_ticked_row(self) -> None:
         with TemporaryDirectory() as tmp:

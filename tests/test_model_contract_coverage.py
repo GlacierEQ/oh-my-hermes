@@ -100,11 +100,12 @@ class CoverageMatrixTests(unittest.TestCase):
         self.assertEqual(pointer["dimensions"]["effort"]["unsupported_efforts"], {})
         self.assertEqual(pointer["dimensions"]["calibration"]["high_effort"], "model_specific")
         # The projection lists every category whose chain names the alias:
-        # simple-work joined on 2026-09-11, and deep dropped it on 2026-10-13
-        # (a Flash budget model does not fit the strong tier).
+        # simple-work joined on 2026-09-11, deep dropped it on 2026-10-13
+        # (a Flash budget model does not fit the strong tier), and swarm
+        # joined on 2026-10-28 with it at the head.
         self.assertEqual(
             pointer["dimensions"]["category_projection"]["categories"],
-            ["simple-work", "unspecified-low"],
+            ["simple-work", "swarm", "unspecified-low"],
         )
         self.assertEqual(
             pointer["dimensions"]["provider_eligibility"]["families"],
@@ -217,17 +218,14 @@ class CoverageMatrixTests(unittest.TestCase):
                     row["dimensions"]["calibration"]["composition"],
                     "model_specific",
                 )
-                self.assertEqual(
-                    row["dimensions"]["provider_eligibility"]["families"],
-                    ["openai-codex", "openai"],
-                )
-                # deep-work joined architect and ultrabrain on 2026-09-11 and
-                # moved to Opus 5.5 and GPT-6.1 Sol on 2026-10-13, so two
-                # shipped chains name gpt-6-astra again.
-                self.assertEqual(
-                    row["dimensions"]["category_projection"]["categories"],
-                    ["architect", "ultrabrain"],
-                )
+                # GPT-6 Astra left every shipped chain on 2026-11-18 (GPT-6.2
+                # Astra took its architect, forensics, and ultrabrain slots),
+                # and both dimensions are read from the shipped chains, so the
+                # retired id and its declared aliases report them missing; it
+                # keeps its contract, price, and docs.
+                self.assertEqual(row["dimensions"]["provider_eligibility"]["families"], [])
+                self.assertEqual(row["dimensions"]["provider_eligibility"]["status"], "missing")
+                self.assertEqual(row["dimensions"]["category_projection"]["categories"], [])
                 self.assertEqual(row["dimensions"]["price"]["status"], "documented_list")
                 self.assertEqual(row["dimensions"]["docs"]["status"], "covered")
 

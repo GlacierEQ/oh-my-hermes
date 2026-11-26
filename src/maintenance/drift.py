@@ -188,12 +188,6 @@ def _routing_precision_intervention_case_count() -> int:
     return count if not isinstance(count, bool) else 0
 
 
-def _installable_skill_count() -> int:
-    from ..skills.catalog import installable_skill_names
-
-    return len(installable_skill_names())
-
-
 def _common_request_case_count() -> int:
     from ..quality.common_request_coverage import build_common_request_coverage_demo
 
@@ -877,7 +871,176 @@ def count_metrics() -> tuple[CountMetric, ...]:
             # Three domain-science vocabulary controls (+3).
             # Career actor repair adds five employer requests and two references.
             # Normalized actor/objective follow-up adds seven employer contrasts.
-            expected=1114,
+            # The pi-family runtime rename: `family` alone never names the
+            # executor readiness owner (+1).
+            # The Russian trigger pack adds three chat turns its generic words
+            # dispatched or named before they were held back to whole phrases:
+            # a weekend chores plan, a family trip plan and a bank site down (3).
+            # The ru pack review (#2301): twenty everyday Russian turns that say
+            # a pack word in its everyday sense or inside a longer word -- a
+            # fence to fix, a lift that does not work, a film review, an app
+            # preview, a past-tense remembered, a car rolled out of a garage,
+            # a family budget, an estate agent (+20). Then two turns where a
+            # held-back phrase inside a longer one of the same skill scored
+            # twice and dispatched: a grandmother's "запомни это" and metro
+            # tokens (+2). Then three turns where two held-back phrases of one
+            # skill, overlapping or apart, summed to a dispatch: reports to the
+            # bosses already handed in, a secretary's weekly report, a vague
+            # geometry problem (+3).
+            # repro-audit adds one vocabulary control (+1). Its review replaces
+            # that control, which no trigger reached, with 19 that each say a
+            # phrase the skill once dispatched on or a HellaSwag phrase in
+            # another sense, one per clause of its admission rule (+18). The
+            # #2324 review adds ten more: execution by stem anywhere in the
+            # request (hyphen, -ing, retrain, keep training, fine-tune, again,
+            # a later sentence) and the record-to-relation shape (an upload
+            # state, a citing appendix, a table before sending) (+10). The delta
+            # review makes the whole request an allow-listed shape and adds one
+            # control per position: trailing clauses, a second sentence, a tail
+            # word, a word before the owner, the record slot, the relation, the
+            # owner and the target (+10). A quoted, code-span, curly-quoted or
+            # single-quoted trailing clause is masked before the predicate
+            # reads it, so shielded messages never admit the skill (+4).
+            # show-reel promo/demo/launch/trailer names: the same words as a
+            # playback fault, an edit, an upload, a conversion, a chained post,
+            # a towed trailer, a video call and a renderer install (+8).
+            # The #2322 review classes: a demo, product or explainer video of
+            # a fault (4), a renderer-led statement about a render (4), and
+            # editing or trimming an everyday video (3) (+11).
+            # The #2322 delta review classes: a timed, cinematic or numbered
+            # fault recording (4), a fault in a later sentence (3), a
+            # marketing noun over a fault (2), and cut or edit on a sizzle
+            # reel (2) (+11).
+            # The #2322 third delta: a closed form beside a backticked,
+            # quoted, curly-quoted, `>`-quoted, fenced or linked fault (8), a
+            # three-digit v-version (1), and a with-adjunct that does not end
+            # the sentence (1) (+10).
+            # The #2322 fourth delta: a closed form beside a source path, a
+            # file and line, a bare-domain link or a script the router strips
+            # (4), under a reply pointer or an attachment note (2), with an
+            # emoji (1), and a with-adjunct naming people (2) (+9).
+            # sprite-forge adds CSS pixel, soda brand and spreadsheet-sheet controls (+3).
+            # The rendered-scene lane: voxel morphometry, a crime scene, a city art
+            # scene and two everyday "three"/"scene" lines stay out of frontend (+4).
+            # A closed show-reel form beside a modifier symbol that folding
+            # drops (1), and one after a channel backfill of a fault (1) (+2).
+            # show-reel backfill content: fourteen backfills one word or one
+            # shape from inert -- a negation, a state, an echo, a question, an
+            # instruction, a statement, an everyday-word fault, a second
+            # separator, no header, a tag or a notice alone, a sentence for a
+            # sender name, a bracketed non-sender line and the replied-to
+            # context block (14) -- and two more characters the fold drops
+            # whole (2) (+16). A sender name with a word of digits or of
+            # capitals, and a first line with no sender (+3).
+            # show-reel's idea-video lane: a fault recording, an outage topic,
+            # a support ticket, a chained Slack post, a janky UI animation, a
+            # definite causative, a recommendation, a failed-deploy animation
+            # and a quoted ask (9), a Korean video call and playback fault (2),
+            # a Japanese bug reproduction video and a Japanese summary (2) (+13).
+            # Its second review's families: five UI effects, five loop phrasings
+            # (two Japanese), five faults named as events (one Japanese) and
+            # three recordings (+18).
+            # Its third review: a Japanese logo animation at app launch and on a
+            # splash screen, which are UI work (+2).
+            # The recall follow-up: a bare word after a logo intro, an intro for
+            # a login flow, two chat channels after an intro, a recording made
+            # "for me", and a one-word Japanese fault before 説明 (+6).
+            # Its review round: a kebab id after a logo intro, a bare 3D scene
+            # with shaders, a two-noun chain after an intro, and a leading
+            # Japanese format before an open topic (+4).
+            # fix/coding-request-meta-discussion-misroute: a coding request that
+            # names OMH as the tool ("Use OMH to fix the failing test", "With
+            # OMH, add a unit test") stays off workflow-learning (+2).
+            # Owner decision on #2440: two throwaway OMH test messages and the
+            # user's own router picking an option stay off workflow-learning (+3).
+            # #2440 review: two tasks on what OMH selected or picked, and a
+            # Korean login-API test request, stay off workflow-learning (+3).
+            # #2440 re-review: a clause on what OMH chose followed by the user's
+            # own command (copy, open, set, run) is not a report (+4).
+            # #2440 re-review 3: bump, ship, check into git and find the bug
+            # after what OMH chose are requests too (+4).
+            # #2455 follow-up (#2485): "find out" after a neutral setting, an
+            # OMH terminology loader migration and a Korean task after what
+            # OMH picked stay off workflow-learning (+3); a find-out task with
+            # a courtesy tail (+1); Korean messages with "OMH가 / OMH는" that
+            # an earlier head of the PR read as reports, each as on main: an
+            # edit after a setting sentence, three requests in other endings,
+            # two in unlisted endings, a coding-work complaint, a deferred
+            # complaint, 회원인증, an English choice before a Korean request,
+            # and seven statements (code noun, coding verb, 결과, 이유, 왠지, a
+            # later request, English praise) (+17); OMH ignoring an ignore
+            # file and the user's path aliases (+2); and a filler adverb, a
+            # why-question about a parser, and "Hermes with OMH" before a
+            # find-out task (+3).
+            # feature/architecture-deepening: shallow water, a new system's
+            # architecture, a roadmap trade-off, a Korean system design and an
+            # architecture firm never name tech-debt-audit (+5). Its review: a
+            # model's, a bridge's, and (in Korean) a model's, cloud infra's and
+            # company org's architecture improvement, a course's shallow
+            # modules, deepening opportunities with clients, and a solar module
+            # that is hard to test never name it either (+8). Its second
+            # review: twenty English requests that quote a shipped phrase (job
+            # ads, translations, a README line, a bank repo, a contract) never
+            # dispatch it, and a Korean course, blog post, job posting, dress
+            # code and QR code never name it (+25). Follow-up
+            # omh/code-skills-round-followups: the same dress code and QR
+            # code in the architecture request form never dispatch it (+2,
+            # no forbidden_candidate: they name it as a clarify candidate).
+            # fix/design-hint-precision: a concept question and a Korean
+            # remark under a busy-path gateway origin never dispatch
+            # gateway-intent-card (+2).
+            # systematic-review: a PR reviewed systematically, job applicants,
+            # support tickets, a rapid PR review, a paper's title and abstract
+            # and one trial's inclusion criteria stay off literature screening (+6).
+            # A Korean manuscript, paper search and PRISMA diagram, five reviews
+            # of a pointed-at software object, logging practices and our test
+            # coverage stay off it too (+10).
+            # The reach round adds what its narrowed triggers no longer take, and two sentences that say dap
+            # or printf in passing beside native-debugging's wording. Its named reach phrases add seven sentences
+            # using their words in another sense, and three more for the phrases that failed that test. Its review
+            # adds a case per hold-back and what the narrowing must keep out: `주가`, `time in`, the market gate.
+            # Its re-review keeps `주가` and `time in` as they were and pins the lookups instead of the compounds.
+            # The ops-review pair's follow-up adds four sentences where `리스크` or `블로커` is only spelled across
+            # other words or split by a space.
+            # model-compression: a video, image colors, a hedge, whisky, a show flat, a churn model, a
+            # regression's variables, fruit trees, audio bit depth, a Blender asset and a 3D asset in Korean
+            # stay off it (+11); "distill this model", a reach case kept off rules-distill, now dispatches to
+            # model-compression and moves to the intervention corpus (-1).
+            # model-compression review round: the review's statistics, 3D, game, signal and know-how
+            # sentences and fresh ones with an ordinary anchor-like word beside a shared phrase (+24).
+            # Its second review round: billions of money, data or volume, game, pixel-art and 3D bit widths,
+            # grid transformers and firmware quantization stay off it (+18).
+            # Its third review round: two billions of money or data, each followed by a noun, stay off it (+4).
+            # dag-ulw backlogs: one bug, two and three listed bugs, a which-first question, a review, a backlog to
+            # prioritize, explain, hold back or put off, a fenced list, chores, a reading list, and a fix in or a
+            # check of the current directory or branch stay off a graph and off live information (+13).
+            # skill-eval: a chess, tennis, job-interview and Korean sales skill stay off the host-fit check (+4).
+            # Its review round: a person's skill at using Codex stays off it too (+1).
+            # PR watch: a PR queue, a video (English and Korean), a how-to question, a CI concept question and a
+            # watch-out warning stay off github-event-ops (+6).
+            # Its verification round: a PR metric, a deploy watched before a PR is opened, and a staging deploy
+            # watched beside a merged PR stay off it (+3).
+            # Its final round: a PR merge rate until a sprint ends, a weekly merge count, and review speed until a
+            # sprint ends are measures, not waits on one PR (+3).
+            # Its hold round: four declined watches (three English, one Korean) and CI on main stay off it (+5).
+            # Monitor recipes: an inbox summary, a Gmail tidy-up, today's calendar, a Sentry root cause, Obsidian
+            # plugins, a one-time reminder, email as the delivery target, a video, a linear regression and adding a
+            # meeting stay off automation-blueprint (+10).
+            # Its review round: twelve time questions, outages, APIs, `in linear`/`on linear`, 이전에 and a plugin
+            # update stay off it (+12).
+            # Cross-platform workflows: an email reply (English and Korean), a calendar question (English and
+            # Korean), a reminder alert, a Sentry concept question, a bare vault, and a Figma export (English and
+            # Korean) stay off app-work-intake, operating-rhythm, wiki, and frontend (+9).
+            # Its review round: Linear as a common noun, 지라 inside 지라도, a Sentry alert read, a reply about work in
+            # Korean, a secrets vault, a bolt (볼트), and two questions about meeting notes stay off them (+8).
+            # Merged with monitor recipes: 1584 (#3153) + 17 cross-platform cases = 1601, re-derived from the producer.
+            # Its anchor round: viewing a Figma frame in presentation mode is a question, not design to code (+1).
+            # bot-template: a bot template coded for Discord, Slack or Telegram, in Python, in Korean, and a
+            # Jinja and two prompt templates stay off it (+8). Its review round: four repository template files
+            # named like a template id (release-notes, pr-review) stay off it (+4). Its verification round: deleting,
+            # removing, exporting a template and building one in Python stay off it (+4). Its last round: a
+            # pr-review and a meeting-to-issues bot template written in Python stay off it (+2).
+            expected=1632,
             # The one reviewed test pin. Every other test compares its payload
             # against build_routing_precision_demo() rather than a literal.
             sites=("tests/test_routing_precision.py",),
@@ -1380,28 +1543,150 @@ def count_metrics() -> tuple[CountMetric, ...]:
             # install drift, and /omh-doctor status runs doctor (+1).
             # Career actor repair retains five personal/target/quoted controls.
             # Actor/objective follow-up adds two third-person candidate controls.
-            expected=1130,
+            # The pi-family runtime rename: asking whether pi-family is ready
+            # checks executor readiness (+1).
+            # The Russian trigger pack adds eleven requests that fell back
+            # without it: code review, build failure (bare and with a compile
+            # error), an implementation plan, a bare make-a-plan clarify, a
+            # site accessibility check, deep research, a task graph, what is
+            # running, prod down and save to memory (11).
+            # The ru pack review (#2301): five of those now ask instead of
+            # dispatching, because their words are everyday ones (the build,
+            # site accessibility, task graph, what agents do, save to memory;
+            # same count), plus a screen-reader check, remember-this, a bug, a
+            # landing page, a tech-debt audit, a commit message, the logs and
+            # IT-jargon research, which dispatch on a software word (+8). Then
+            # the nested-phrase fix: "сделай ревью кода" and "запомни это" ask
+            # instead of dispatching on a double count (same count), and a
+            # pull-request review dispatches on its own word (+1). A skill now
+            # credits one held-back pack phrase per message, so an
+            # implementation plan asks instead of dispatching (same count);
+            # `компиляции` is a software word, so the build failure with a
+            # compile error still dispatches. That credit is the ru pack's
+            # only: three Korean requests whose held-back phrases add up on
+            # purpose (chart styling, an architecture diagram with the code
+            # structure, model serving with a serving benchmark) still
+            # dispatch (+3).
+            # repro-audit adds one HellaSwag log versus paper request (+1), and
+            # its review three more: own results, a score against a reported
+            # metric, a courtesy opener (+3), and its delta review a request
+            # that closes on the compared metric (+1).
+            # show-reel promo/demo/launch/trailer names, a two-word duration
+            # and a renderer-led brief, each of which dispatched another lane
+            # or asked on main (+8).
+            # A with-adjunct closes a promo video brief (+1).
+            # sprite-forge adds one game character sprite sheet request (+1).
+            # The rendered-scene lane: four scene requests and one scene-polish
+            # request dispatch frontend (+5).
+            # A show-reel closed form after an acknowledgement-only channel
+            # backfill, plain and under the trigger note and unverified notice (+2).
+            # show-reel's idea-video lane: nine English videos from an idea
+            # (explainer, motion graphics, logo intro, 3D scene, the recipe
+            # motion graphic, the TikTok vertical and the SaaS launch that
+            # dispatched img-summary or connector-operator on main, a music
+            # visualizer, a data-viz animation), three Korean, one Japanese,
+            # and the display name invoked (+14).
+            # Its second review: the Korean vertical-shorts case leaves (the
+            # request stays img-summary's, as on main) (-1), and a video named
+            # as a source or target keeps its owner: four image cards, three
+            # connector actions and one pitch-deck material (+8).
+            # The recall follow-up: "make me" before an explainer video, a logo
+            # intro for this product's own name, a motion graphics piece, a 3D
+            # scene, a Korean concept explainer and a Japanese format beside an
+            # explainer genre (+6).
+            # fix/coding-request-meta-discussion-misroute: an OMH developer test
+            # of the route hint vocabulary and a test of how the router reads
+            # workflow names keep workflow-learning (+2).
+            # Owner decision on #2440: the OMH router misreading a message and
+            # choosing the wrong workflow reach workflow-learning (+2).
+            # #2440 review: two CI-workflow edits through OMH are coding, OMH
+            # picking a workflow is a report, and four meta messages with a
+            # late edit verb, OMH vocabulary or a Korean log report keep
+            # workflow-learning (+7).
+            # #2440 re-review: a later command keeps release-cut, a later
+            # clause that only adds to the report keeps it, and an edit lead
+            # naming workflow learning stays about OMH (+3).
+            # #2440 re-review 3: a command after "then" keeps command-operator,
+            # and "list the reasons" after what OMH chose is a complaint (+2).
+            # #2455 follow-up: a Korean "why did OMH send it" (보냈어), OMH
+            # ignoring the request, and OMH "apparently" choosing ultrawork reach
+            # workflow-learning (+3). Its second review: a Korean casual edit
+            # request ending in "?" after a setting sentence keeps ultrawork (+1).
+            # Its fourth review: a Korean 정리해 둬 after a setting sentence keeps
+            # toolbelt-readiness (+1). Its fifth review: OMH missing a test, then
+            # a request to add tests, keeps ultrawork (+1). Its final review:
+            # two reports that quote the user's own ask, opened by migrate or
+            # rewrite, reach workflow-learning (+2).
+            # feature/architecture-deepening: three code-anchored
+            # architecture-deepening requests dispatch tech-debt-audit, a
+            # Korean codebase-architecture request and shallow modules in this
+            # repo name it as the clarify candidate, and improving an
+            # architecture diagram stays codebase-uml's dispatch (+6). Its
+            # second review makes the phrases clarify-only: five requests name
+            # the audit in the question, a tech-debt request that also names
+            # the architecture still dispatches it, and Korean meeting notes
+            # and a paper search keep operating-rhythm and source-finder (+3).
+            # fix/design-hint-precision: a demo-video request, a Korean
+            # build-fix request and a PR review under a busy-path gateway
+            # origin route as they do bare (+3).
+            # systematic-review: four screening requests (one through the ko
+            # pack) plus a systematic code review and a find-papers request that
+            # keep their own owners (+6). A Korean two-reviewer abstract screen, a
+            # statin-trial review and a telehealth scoping review reach it, and a
+            # plain PR review clarifies toward code-review (+4).
+            # The reach round takes out the Korean Hermes update cue, and adds `release gate` asking, the same
+            # words in a film, the lengthened phrase dispatching, and a person asking for a dap debugger; and
+            # six requests that its named reach phrases carry. Its review adds what the narrowing must leave reaching.
+            # Its re-review adds the stock and time lookups, a search through a web search connection, the risk and
+            # blocker pair in either order, a repeat schedule, and a softened market request.
+            # The ops-review pair's follow-up adds the pair written as one word and inside a longer word, which a
+            # word-opening rule lost.
+            # model-compression: eight compression requests (two through the ko pack, one the "distill this
+            # model" reach case moved from the negative corpus) and three that keep inference-serving,
+            # rules-distill and model-finetuning (+11).
+            # model-compression review round: GGUF and 4-bit Korean quantization, 70B-to-8B distillation in
+            # both languages, and a llama model slimmed in Korean reach the skill (+8).
+            # Its second review round drops the Korean 4-bit case, which falls back to main (-1).
+            # Korean design routing: thirty frontend-design requests, whole-request redesigns and phone-viewport
+            # faults that reach frontend, and the look-alikes that keep their verdict (+30).
+            # dag-ulw backlogs: five listed code backlogs reach a graph, four listed look-alikes keep their owner
+            # (GitHub issues, a named agent, failing test files, one fault's notes), and two live lookups said with
+            # "current" stay live information (+11).
+            # skill-eval: seven host-fit checks in English and Korean reach the skill, and five asks keep
+            # skill-health, skill-scout and agent-evaluation (+12).
+            # Its review round: an agent skill loading in Codex and SKILL.md compatibility reach it, and a
+            # Korean staff assessment keeps deep-interview (+3).
+            # PR watch: five waits on one PR (three English, two Korean) reach github-event-ops, and a PR review
+            # and CI on main keep code-review and verification-gate (+7).
+            # Its verification round: a deploy monitored after a PR merges keeps deploy-and-monitor (+1).
+            # Its final round: five PR waits that name logs, production, a server or a deploy elsewhere still
+            # reach github-event-ops (+5).
+            # Its hold round: a declined review followed by a PR watch, in English and Korean, still reaches it (+2).
+            # Monitor recipes: twelve platform triggers (six English, six Korean) reach automation-blueprint, and an
+            # issue creation in Linear and Jira, a notification how-to, a wait on the bot's own reading and a GitHub
+            # issue opening keep connector-operator and github-issue-intake (+17).
+            # Its review round: an API question, a trigger followed by a write, a Korean check before sending, and
+            # three Korean calendar-alert settings and questions keep connector-operator and gateway-intent-card (+6).
+            # Cross-platform workflows: eleven app items reach app-work-intake (spec to PR, inbox to work, alert to
+            # fix; three Korean), three meeting records reach operating-rhythm and three vault uses reach wiki (one
+            # Korean each), two Figma frames reach frontend, and eight sentences in another lane keep their owner
+            # (+27).
+            # Its review round: four one-action connector sentences, an inbox on a cadence, research collected into a
+            # vault on a cadence, a transcript to translate, and a Sentry SDK crash keep their owners (+8).
+            # Cross-platform, merged with monitor recipes: two trigger sentences that name the work they become (a
+            # Linear issue to a PR, a Korean Notion change to a PR) stay with automation-blueprint (+2).
+            # Merged: 1390 (#3153) + 37 cross-platform cases = 1427, re-derived from the producer.
+            # Its verification round: an existing PR link opened from a Jira ticket keeps connector-operator, and an
+            # urgent Linear issue to PR and a recall said apart from the vault still reach their recipes (+3).
+            # bot-template: eight applies and lists (five English including omher's apply message, three
+            # Korean) reach it, and a PR, a release notes and an issue template keep their owners (+11). Its review
+            # round: a Korean template file edit keeps content-operator and a Korean ask to recommend one reaches it (+2).
+            # Its verification round: a Korean ask to delete a template keeps code-review (+1). Its last round: Korean
+            # Python code for a pr-review bot template keeps code-review (+1).
+            expected=1496,
             # The one reviewed test pin. Every other test compares its payload
             # against build_routing_precision_demo() rather than a literal.
             sites=("tests/test_routing_precision.py",),
-        ),
-        CountMetric(
-            name="installable_skill_count",
-            describe="Installable workflow skills quoted in reference surfaces",
-            live=_installable_skill_count,
-            # The current workflow additions are part of the installable catalog.
-            # `data-share-review` adds one. `spend-gate` adds one. `dag-ulw` adds one.
-            # `market-research` adds one.
-            # show-reel adds one installable motion-production method.
-            # Three optional executable science methods (+3).
-            expected=151,
-            sites=(
-                "docs/README.md",
-                # The docs index quotes the count in prose and
-                # `test_first_release_trust_surfaces_are_present` asserts that
-                # exact string, so the number lives in two files, not one.
-                "tests/test_router_content.py",
-            ),
         ),
         CountMetric(
             name="common_request_case_count",

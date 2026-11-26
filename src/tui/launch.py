@@ -27,12 +27,29 @@ the screen it was said on. `omh_tui_blocker` is the
 same choice made before anything starts. Exit 75 without that file (Hermes
 uses 75 on paths of its own), like every other exit code, is the session
 ending and is returned as it is.
+
+The TUI also writes the session it has open, with the Hermes home it runs
+on, into the file `omh` named in `SESSION_FILE_ENV`, beside the fallback
+marker, so `omh` can name that session once the TUI exits
+(`closed_session`). Hermes keeps a file like it for its own epilogue, but
+removes it before `omh` gets control back. A session the person closes then
+exits `CLOSED_EXIT` instead of 0, so Hermes prints no epilogue of its own and
+`omh` prints its card in its place, returning 0 to the shell.
+
+An `omh` that runs from an installer generation also names a relaunch marker
+(`RELAUNCH_FILE_ENV`). When `omh update` installs another generation under
+the running TUI and the person picks Restart, the TUI creates that file and
+exits `RELAUNCH_EXIT`; `omh` then opens the installed generation's own
+`omh --resume <session>` in its place (`commands.bare_launch`), with
+`UPDATED_ENV` set so that TUI offers `/gateway restart` once when the shared
+gateway still runs the old OMH plugin code.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
 import shutil
@@ -52,16 +69,72 @@ FALLBACK_EXIT = 75
 # (`fallback_sentinel`); `gateway_spawn` drops every `OMH_TUI_` name, so the
 # gateway and its tools never see it.
 FALLBACK_SENTINEL_ENV = "OMH_TUI_FALLBACK_SENTINEL"
+# The file the TUI keeps `{"session_id": ..., "hermes_home": ..., "opened": [...]}` in for the
+# session it has open (`write_active_session`), in the same private directory.
+SESSION_FILE_ENV = "OMH_TUI_SESSION_FILE"
+# Set to "1" by a bare `omh --resume` (no session named): the TUI opens the session picker as soon as it starts.
+PICK_SESSION_ENV = "OMH_TUI_PICK_SESSION"
+# Set by a bare `omh --onboard <name>` (only `omh setup`'s last question runs one): the TUI sends that packaged
+# onboarding prompt (`tui/onboarding.py`) once, as the first turn of the new session it opens, in the language
+# `ONBOARD_LANG_ENV` names. The one prompt the TUI sends that the person did not type; never on a resume.
+ONBOARD_ENV = "OMH_TUI_ONBOARD"
+ONBOARD_LANG_ENV = "OMH_TUI_ONBOARD_LANG"
+# How much of that file `closed_session` reads: an id, a path and the launch's earlier ids.
+SESSION_FILE_BYTES = 16384
+# What the TUI exits with, in place of 0, when the person closes a session `omh` launched (`SESSION_FILE_ENV`
+# set), and what `omh` turns back into 0. Hermes' launcher prints its exit summary, naming `hermes --tui
+# --resume`, only for 0 and 130 (`_launch_tui` in `hermes_cli/main_tui_launch.py`), so `omh`'s card is the
+# only one. The same condition gates its `--worktree` exit question, which `omh` never asks for. Not 1 or 2,
+# not 42 (Hermes relaunches as `hermes update`), not `FALLBACK_EXIT`, and below the 128 + signal range.
+CLOSED_EXIT = 77
 # How much of the TUI's reason the marker keeps (`request_fallback`).
 FALLBACK_REASON_BYTES = 4096
+# What the TUI exits with when the person asked it to restart on the OMH generation `omh update` installed under
+# it (`request_relaunch`): `omh` then starts the installed generation's `omh --resume <session>` in its place.
+# Not 0/1/2/130, not 42 (Hermes relaunches as `hermes update`), not `FALLBACK_EXIT` or `CLOSED_EXIT`, below the
+# 128 + signal range, and passed on by Hermes' launcher as it is (no epilogue: it prints one for 0 and 130 only).
+RELAUNCH_EXIT = 78
+# The file that makes a `RELAUNCH_EXIT` a relaunch request, in the same private directory, as `FALLBACK_SENTINEL_ENV`
+# makes a 75 a fallback: a 78 from anything else is an exit code. A TUI whose environment names none (one `omh`
+# did not launch) cannot be relaunched and does not offer it.
+RELAUNCH_FILE_ENV = "OMH_TUI_RELAUNCH_FILE"
+# Set to "1" in the relaunched `omh`'s environment: the TUI it opens started for an update, so when the shared
+# gateway it attaches to still runs the old OMH plugin code it offers `/gateway restart` once.
+UPDATED_ENV = "OMH_TUI_UPDATED"
+# Set by `omh` when it opens the TUI on its own Hermes runtime (`tui/own_runtime.py`): `RUNTIME_ENV` is `own`, and
+# `BOTS_HOME_ENV` names the bots' Hermes home, which the bot board and `/sessions` of the bots keep reading while
+# `HERMES_HOME` is the TUI home. Both are `OMH_TUI_` names: the gateway child never sees them.
+RUNTIME_ENV = "OMH_TUI_RUNTIME"
+RUNTIME_OWN_VALUE = "own"
+BOTS_HOME_ENV = "OMH_TUI_BOTS_HOME"
+# Its value and the marker's content when the TUI left in plan mode, which only the TUI knows (a prompt goes as `/plan`).
+UPDATED_PLAN = "plan"
+UPDATED_PLAIN = "1"
 # Windows opens a descriptor in text mode unless told otherwise, which rewrites line ends and stops at Ctrl+Z.
 _BINARY = getattr(os, "O_BINARY", 0)
 # The directory the TUI's interpreter imports `omh` from when its own path
 # does not already import it from there (`omh_import_root`). `omh` always sets
 # it, so a value left in the person's environment never picks the tree.
 SITE_ENV = "OMH_TUI_SITE"
-# Signals that end `omh` while the TUI runs: closing the terminal window sends SIGHUP.
-EXIT_SIGNALS = ("SIGTERM", "SIGHUP")
+# Frontend-only launch state: Hermes' own terminal must not inherit it on fallback.
+# OMH_HOME is a general store selection, not frontend state; HERMES_HOME is set by the caller.
+TUI_LAUNCH_ENV_NAMES = (
+    "HERMES_TUI_DIR",
+    "OMH_TUI_PYTHON",
+    SITE_ENV,
+    FALLBACK_SENTINEL_ENV,
+    SESSION_FILE_ENV,
+    PICK_SESSION_ENV,
+    ONBOARD_ENV,
+    ONBOARD_LANG_ENV,
+    RELAUNCH_FILE_ENV,
+    UPDATED_ENV,
+    RUNTIME_ENV,
+    BOTS_HOME_ENV,
+)
+# Signals that end `omh` while the TUI runs: closing the terminal window sends SIGHUP on POSIX; on Windows the
+# C runtime turns Ctrl+Break and a closed console window into SIGBREAK. A name the platform lacks is skipped.
+EXIT_SIGNALS = ("SIGTERM", "SIGHUP", "SIGBREAK")
 
 FRONTEND_DIR = Path(__file__).resolve().parent / "frontend"
 FRONTEND_ENTRY = FRONTEND_DIR / "dist" / "entry.js"
@@ -111,7 +184,8 @@ def hermes_tui_fits(environ: Mapping[str, str]) -> bool:
     Not under `TERM=dumb`, where no TUI draws, and not under `OMH_NO_TUI=1`,
     the escape every OMH cursor UI honours beside it (the setup menu, the
     theme picker). The reasons that are the OMH TUI's alone, no `termios`
-    (Windows), its frontend missing, its own exit 75, leave Hermes' TUI
+    (a platform other than Windows) or a Windows console without virtual
+    terminal input, its frontend missing, its own exit 75, leave Hermes' TUI
     able to open. Node is the caller's separate check (`node_available`):
     Hermes' TUI needs it as much as the OMH TUI does.
     """
@@ -132,7 +206,9 @@ def omh_import_root() -> str:
 
 
 def omh_tui_environment(
-    environ: Mapping[str, str], *, python: str, site: str, omh_home: Path, fallback_sentinel: Path
+    environ: Mapping[str, str], *, python: str, site: str, omh_home: Path, fallback_sentinel: Path,
+    session_file: Path, pick_session: bool = False, relaunch_file: Path | None = None,
+    bots_home: Path | None = None, onboard: str = "", onboard_language: str = "en",
 ) -> dict[str, str]:
     """The environment `hermes --tui` runs with when it should start the OMH TUI.
 
@@ -140,13 +216,38 @@ def omh_tui_environment(
     `--scope project`, and for `--profile <name>` the store that profile's
     config names) across the three processes in between, which do not see
     `omh`'s own arguments. `SITE_ENV` is set over any inherited value.
+    `PICK_SESSION_ENV` is set only for `pick_session` (a bare `omh --resume`),
+    and an inherited one is dropped otherwise. `RELAUNCH_FILE_ENV` likewise:
+    only a launch that can relaunch the TUI names one. `bots_home` is given
+    only when the TUI opens on its own Hermes runtime: `RUNTIME_ENV` says so
+    and `BOTS_HOME_ENV` names the bots' home; both are dropped otherwise.
+    `onboard` (a bare `omh --onboard <name>`) sets `ONBOARD_ENV` to it and
+    `ONBOARD_LANG_ENV` to `onboard_language`; without it both are dropped, so
+    an inherited value never sends an onboarding prompt.
     """
     env = dict(environ)
+    env.pop(RUNTIME_ENV, None)
+    env.pop(BOTS_HOME_ENV, None)
+    if bots_home is not None:
+        env[RUNTIME_ENV] = RUNTIME_OWN_VALUE
+        env[BOTS_HOME_ENV] = str(bots_home)
     env["HERMES_TUI_DIR"] = str(FRONTEND_DIR)
     env["OMH_TUI_PYTHON"] = python
     env[SITE_ENV] = site
     env["OMH_HOME"] = str(omh_home)
     env[FALLBACK_SENTINEL_ENV] = str(fallback_sentinel)
+    env[SESSION_FILE_ENV] = str(session_file)
+    env.pop(PICK_SESSION_ENV, None)
+    if pick_session:
+        env[PICK_SESSION_ENV] = "1"
+    env.pop(RELAUNCH_FILE_ENV, None)
+    if relaunch_file is not None:
+        env[RELAUNCH_FILE_ENV] = str(relaunch_file)
+    env.pop(ONBOARD_ENV, None)
+    env.pop(ONBOARD_LANG_ENV, None)
+    if onboard:
+        env[ONBOARD_ENV] = onboard
+        env[ONBOARD_LANG_ENV] = onboard_language
     return env
 
 
@@ -229,6 +330,39 @@ def request_fallback(environ: Mapping[str, str], reason: str = "") -> int:
     return FALLBACK_EXIT
 
 
+def relaunch_requested(returncode: int, marker: Path) -> bool:
+    """Whether the TUI asked `omh` to start the installed generation in its place: `RELAUNCH_EXIT` and the file."""
+    return returncode == RELAUNCH_EXIT and os.path.lexists(marker)
+
+
+def relaunch_updated_value(marker: Path) -> str:
+    """What `UPDATED_ENV` says in the relaunched `omh`: what the marker holds (`request_relaunch`)."""
+    try:
+        return UPDATED_PLAN if marker.read_bytes() == UPDATED_PLAN.encode() else UPDATED_PLAIN
+    except OSError:
+        return UPDATED_PLAIN
+
+
+def request_relaunch(environ: Mapping[str, str], *, plan_mode: bool = False) -> bool:
+    """Create the file named in `RELAUNCH_FILE_ENV`, holding `UPDATED_PLAN` for a TUI in plan mode and empty otherwise;
+    whether it now exists, so the TUI may exit `RELAUNCH_EXIT`. False when the environment names none or it cannot be
+    written: then a 78 would only end the session, and the TUI does not leave for it."""
+    path = environ.get(RELAUNCH_FILE_ENV, "")
+    if not path:
+        return False
+    try:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | _BINARY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
+        try:
+            if plan_mode:
+                os.write(descriptor, UPDATED_PLAN.encode())
+        finally:
+            os.close(descriptor)
+    except OSError:
+        return False
+    return True
+
+
 def fallback_reason(sentinel: Path) -> list[str]:
     """The lines the TUI wrote into the fallback marker (`request_fallback`), printable characters only."""
     try:
@@ -243,3 +377,41 @@ def fallback_reason(sentinel: Path) -> list[str]:
         os.close(descriptor)
     lines = ("".join(char for char in line if char.isprintable()) for line in data.decode("utf-8", "replace").splitlines())
     return [line for line in lines if line.strip()]
+
+
+def closed_session(path: Path) -> tuple[str, str, tuple[str, ...]]:
+    """The session id and Hermes home the TUI last wrote to the file named in `SESSION_FILE_ENV`, with the sessions
+    the launch had open before it, newest last; ("", "", ()) when it wrote none, or wrote something this cannot
+    read as an id and a home.
+
+    Read before the private directory is removed. The home is the
+    `HERMES_HOME` the TUI ran with, which is where Hermes put the session:
+    Hermes' launcher may pick a profile (`--profile`, or the sticky active
+    profile) that `omh` did not name.
+    """
+    nothing: tuple[str, str, tuple[str, ...]] = ("", "", ())
+    try:
+        descriptor = os.open(path, os.O_RDONLY | _BINARY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return nothing
+    try:
+        data = os.read(descriptor, SESSION_FILE_BYTES)
+    except OSError:
+        data = b""
+    finally:
+        os.close(descriptor)
+    try:
+        record = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return nothing
+    if not isinstance(record, dict):
+        return nothing
+    session_id, hermes_home = record.get("session_id"), record.get("hermes_home")
+    if not isinstance(session_id, str) or not isinstance(hermes_home, str):
+        return nothing
+    if not session_id.isprintable() or not session_id.strip() or not os.path.isabs(hermes_home):
+        return nothing
+    opened = record.get("opened")
+    earlier = tuple(item.strip() for item in opened if isinstance(item, str) and item.isprintable() and item.strip()) \
+        if isinstance(opened, list) else ()
+    return session_id.strip(), hermes_home, earlier

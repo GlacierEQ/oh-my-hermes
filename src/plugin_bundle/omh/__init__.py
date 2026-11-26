@@ -166,6 +166,13 @@ def register(ctx: _PluginContext) -> None:
     # Metadata/parser imports serve the maintenance CLI, even on unsupported hosts.
     # Admit only at the loader entry, before any registration side effects.
     _admit_host()
+    # Before any module that imports `omh` loads: on a Hermes install its
+    # package manager prepares, the package OMH's installer recorded beside
+    # this bundle is the only `omh` this interpreter can reach (#2166). A
+    # metadata read, no package import, so the plugin-load deadline barely moves.
+    from . import package_site
+
+    package_site.ensure_recorded_package_site()
     from . import runtime_paths
     runtime_paths.note_host_registration(ctx)
     from .memory_provider import OmhMemoryProvider
@@ -199,6 +206,11 @@ def register(ctx: _PluginContext) -> None:
         CHILD_CALIBRATION_SECTION_MAX_CHARS,
         child_calibration_section,
     )
+    from .main_calibration import (
+        MAIN_CALIBRATION_SECTION_ID,
+        MAIN_CALIBRATION_SECTION_MAX_CHARS,
+        main_calibration_section,
+    )
     from .delegation_protocol import (
         DELEGATION_PROTOCOL_SECTION,
         DELEGATION_PROTOCOL_SECTION_ID,
@@ -209,11 +221,13 @@ def register(ctx: _PluginContext) -> None:
         AWARENESS_SECTION_MAX_CHARS,
         awareness_system_prompt_section,
         pre_llm_call,
+        start_import_warmup,
     )
+    from .hooks.gateway_hooks import pre_gateway_dispatch
     from .hooks.result_transforms import transform_llm_output, transform_tool_result
     from .hooks.session_hooks import on_session_end, on_session_start, subagent_start, subagent_stop
     from .hooks.tool_hooks import post_tool_call, pre_tool_call
-    from .hooks.verify_hooks import pre_verify
+    from .hooks.verify_hooks import post_api_request, pre_verify
     from .tools.agent_board_tool import OMH_AGENT_BOARD_SCHEMA, omh_agent_board_handler
     from .tools.capability_tool import OMH_CAPABILITIES_SCHEMA, omh_capabilities_handler
     from .tools.chat_tool import OMH_INTERACT_SCHEMA, omh_interact_handler
@@ -225,8 +239,21 @@ def register(ctx: _PluginContext) -> None:
     from .tools.evidence_tool import OMH_EVIDENCE_SCHEMA, omh_evidence_handler
     from .tools.hud_tool import OMH_HUD_SCHEMA, omh_hud_handler
     from .tools.jev_ask_tool import OMH_JEV_ASK_SCHEMA, jev_ask_available, omh_jev_ask_handler
+    from .tools.lsp_nav_tool import (
+        OMH_LSP_DEFINITION_SCHEMA,
+        OMH_LSP_DIAGNOSTICS_SCHEMA,
+        OMH_LSP_REFERENCES_SCHEMA,
+        OMH_LSP_RENAME_SCHEMA,
+        LSP_TOOLSET,
+        _lsp_tools_enabled,
+        lsp_definition_handler,
+        lsp_diagnostics_handler,
+        lsp_references_handler,
+        lsp_rename_handler,
+    )
     from .tools.loop_tool import OMH_LOOP_SCHEMA, omh_loop_handler
     from .tools.memory_tool import OMH_MEMORY_SCHEMA, omh_memory_handler
+    from .tools.omher_terminal_tool import OMH_OMHER_TERMINAL_SCHEMA, omh_omher_terminal_handler, omher_present
     from .tools.probe_tool import OMH_PROBE_SCHEMA, omh_probe_handler
     from .tools.recommend_tool import OMH_RECOMMEND_SCHEMA, omh_recommend_handler
     from .tools.resume_tool import OMH_RESUME_SCHEMA, omh_resume_handler
@@ -302,6 +329,42 @@ def register(ctx: _PluginContext) -> None:
         omh_hud_handler,
         description=OMH_HUD_SCHEMA["description"],
     )
+    # Opt-in semantic navigation tools over Hermes' own LSP service. A
+    # dedicated toolset (`omh-lsp`, NOT the shared `omh` toolset) plus
+    # `check_fn` keep their schema out of every turn unless the operator sets
+    # OMH_LSP_TOOLS=1/true or the profile setting `lsp_tools`.
+    _ = ctx.register_tool(
+        "lsp_definition",
+        LSP_TOOLSET,
+        OMH_LSP_DEFINITION_SCHEMA,
+        lsp_definition_handler,
+        check_fn=_lsp_tools_enabled,
+        description=OMH_LSP_DEFINITION_SCHEMA["description"],
+    )
+    _ = ctx.register_tool(
+        "lsp_references",
+        LSP_TOOLSET,
+        OMH_LSP_REFERENCES_SCHEMA,
+        lsp_references_handler,
+        check_fn=_lsp_tools_enabled,
+        description=OMH_LSP_REFERENCES_SCHEMA["description"],
+    )
+    _ = ctx.register_tool(
+        "lsp_rename",
+        LSP_TOOLSET,
+        OMH_LSP_RENAME_SCHEMA,
+        lsp_rename_handler,
+        check_fn=_lsp_tools_enabled,
+        description=OMH_LSP_RENAME_SCHEMA["description"],
+    )
+    _ = ctx.register_tool(
+        "lsp_diagnostics",
+        LSP_TOOLSET,
+        OMH_LSP_DIAGNOSTICS_SCHEMA,
+        lsp_diagnostics_handler,
+        check_fn=_lsp_tools_enabled,
+        description=OMH_LSP_DIAGNOSTICS_SCHEMA["description"],
+    )
     # The one tool that sends data off the machine. `check_fn` keeps its
     # schema out of every turn unless a route resolves (a TypeSafe key, or an
     # OpenRouter key plus the operator setting), and `requires_env` is the
@@ -336,6 +399,15 @@ def register(ctx: _PluginContext) -> None:
         OMH_MEMORY_SCHEMA,
         omh_memory_handler,
         description=OMH_MEMORY_SCHEMA["description"],
+    )
+    # omher terminal links: only where omher keeps its folder, so other installs never carry the schema
+    _ = ctx.register_tool(
+        "omh_omher_terminal",
+        _TOOLSET,
+        OMH_OMHER_TERMINAL_SCHEMA,
+        omh_omher_terminal_handler,
+        check_fn=omher_present,
+        description=OMH_OMHER_TERMINAL_SCHEMA["description"],
     )
     _ = ctx.register_tool(
         "omh_probe",
@@ -451,17 +523,33 @@ def register(ctx: _PluginContext) -> None:
             position="after_memory",
             max_chars=CHILD_CALIBRATION_SECTION_MAX_CHARS,
         )
+    # Main-session counterpart: one per-family execution block, rendered once at
+    # session start; children are excluded and keep their own section above.
+    if not _section_already_registered(ctx, MAIN_CALIBRATION_SECTION_ID):
+        _register_optional_surface(
+            ctx,
+            "register_system_prompt_section",
+            MAIN_CALIBRATION_SECTION_ID,
+            main_calibration_section,
+            position="after_memory",
+            max_chars=MAIN_CALIBRATION_SECTION_MAX_CHARS,
+        )
     _ = ctx.register_hook("pre_tool_call", pre_tool_call)
     _register_optional_hook(ctx, "on_session_start", on_session_start)
     _register_optional_hook(ctx, "post_tool_call", post_tool_call)
     _register_optional_hook(ctx, "pre_verify", pre_verify)
+    _register_optional_hook(ctx, "post_api_request", post_api_request)
     _register_optional_hook(ctx, "subagent_start", subagent_start)
     _register_optional_hook(ctx, "subagent_stop", subagent_stop)
     _register_optional_hook(ctx, "transform_tool_result", transform_tool_result)
     _register_optional_hook(ctx, "transform_llm_output", transform_llm_output)
+    _register_optional_hook(ctx, "pre_gateway_dispatch", pre_gateway_dispatch)
     get_config = getattr(ctx, "get_config", None)
     browser_config = get_config("browser_adapter", {}) if callable(get_config) else {}
     if isinstance(browser_config, dict) and browser_config.get("enabled") is True:
         from .browser_bridge import register as register_browser
 
         setattr(ctx, "browser_task", register_browser(ctx, browser_config))
+    # Last, after every registration: the first turns' package imports move onto a daemon thread,
+    # so register() itself takes no longer and a failed import there cannot unregister anything.
+    start_import_warmup()

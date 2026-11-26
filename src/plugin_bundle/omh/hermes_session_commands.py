@@ -128,8 +128,10 @@ import re
 import unicodedata
 
 from .jev_consent import BACKFILL_SEPARATOR, HOST_BLOCK_END, HOST_BLOCK_OPENERS, SENDER_PREFIX
+from .memory_query_sanitizer import GATEWAY_ORIGIN_CLOSING, GATEWAY_ORIGIN_OPENING
 from .reference_regions import executable_routing_text
 from .request_lead import after_courtesy
+from .show_reel_cues import backfill_is_inert
 
 
 @dataclass(frozen=True)
@@ -202,6 +204,27 @@ _BLOCK_CLOSES = (
 # its own (`jev_consent` counts it unsplittable too), so no cut finds where the
 # person's words start: the turn is left whole, as it read before this module.
 _UNSPLITTABLE_BLOCK = "[Quoted message]"
+# A message that reaches a messaging gateway while the agent is busy steers or
+# redirects the running turn with its origin written before it
+# (`_steer_text_with_origin`, `gateway/run_busy.py`): this opening line, the
+# origin as one JSON line, and this closing line, then a blank line and the
+# person's text. A redirect opens a turn on that text. Read as the request,
+# the JSON keys (platform, chat, thread, profile, message, reply) ranked the
+# same three skills on every such Discord or Slack turn and, being ASCII,
+# kept a Korean request off the Hangul line. Hermes joins steers that arrive
+# together with a newline (`agent/interrupt_control.py`) and a leftover steer
+# opens the next turn (`run_busy.py`), so a turn can hold several blocks, each
+# at the start of a line: every one is cut and the person's lines stay in
+# order. Only the exact shape is cut: the opening line, one JSON object of ids
+# on one line (`json.dumps(ensure_ascii=True)` with `[` and `]` escaped, so no
+# bracket), the closing line, a blank line. The two lines are
+# `memory_query_sanitizer`'s, the one source for both readers.
+_GATEWAY_ORIGIN_BLOCK = re.compile(
+    r"^" + re.escape(GATEWAY_ORIGIN_OPENING) + r"\n"
+    r"\{[^\n\[\]]*\}\n"
+    + re.escape(GATEWAY_ORIGIN_CLOSING) + r"\n\n",
+    re.MULTILINE,
+)
 # Hermes writes `[<display name>] ` before the person's text in a shared session
 # on a messaging gateway and nowhere else (`_prefix_inbound_sender_context`:
 # `is_shared_multi_user_session` and a user name). The name is one line with its
@@ -395,11 +418,15 @@ _FOLDED_FRAMES = tuple(
 )
 
 
-def _opens_with_frame(text: str) -> bool:
+# `/plan`'s frame alone, for `host_plan_turn`.
+_FOLDED_PLAN_FRAMES = tuple(frame for frame in _FOLDED_FRAMES if frame.opening == _fold("[/plan — plan mode]"))
+
+
+def _opens_with_frame(text: str, frames: tuple[HostFrame, ...] = _FOLDED_FRAMES) -> bool:
     first, _, rest = text.replace("\r\n", "\n").partition("\n")
     first = first.rstrip()
     rest = rest.lstrip("\n")
-    for frame in _FOLDED_FRAMES:
+    for frame in frames:
         if frame.holds:
             opens = first.startswith(frame.opening) and frame.holds in first[len(frame.opening):]
         elif frame.open_ended:
@@ -416,7 +443,7 @@ def _after_gateway_material(text: str) -> str:
     never closes, or that cannot be split, is left in place."""
     if BACKFILL_SEPARATOR in text:
         text = text.rsplit(BACKFILL_SEPARATOR, 1)[1]
-    text = text.lstrip()
+    text = _GATEWAY_ORIGIN_BLOCK.sub("", text.lstrip()).lstrip()
     while text.startswith(HOST_BLOCK_OPENERS) and not text.startswith(_UNSPLITTABLE_BLOCK):
         end, block_end = -1, HOST_BLOCK_END
         for opener, close in _BLOCK_CLOSES:
@@ -536,6 +563,33 @@ def person_request_text(message: str, *, messaging: bool = False) -> str:
     return text
 
 
+# A reply pointer, an attachment or image note, and the channel backfill a
+# gateway puts before `[New message]`: material a person's words may point at
+# ("make a demo video of this") that routing does not read. `[New message]`
+# stays last: `host_context_removed` reads the backfill by its content.
+_CONTEXT_BLOCK_OPENERS = ("[Replying to", "[The user sent", "[If you need a closer look", "[Image attached", "[New message]")
+
+
+def host_context_removed(message: str) -> bool:
+    """Whether `person_request_text` removes a reply pointer, an attachment note or the channel backfill from this turn.
+
+    Routing reads only the person's words; a reader that must prove the request
+    whole (a closed show-reel form) treats removed context like masked text.
+    An inert backfill (`backfill_is_inert`: the Discord adapter's shape, with
+    acknowledgement-only messages), after the trigger note Hermes writes
+    before it, is not counted: it holds nothing such a request could be
+    pointing at.
+    """
+    text = _after_gateway_material(message)
+    removed = message[: len(message) - len(text)] if message.endswith(text) else message
+    if BACKFILL_SEPARATOR in removed and not any(opener in removed for opener in _CONTEXT_BLOCK_OPENERS[:-1]):
+        backfill, after = removed.rsplit(BACKFILL_SEPARATOR, 1)
+        if backfill.startswith("[Triggering message id:"):
+            backfill = backfill.partition(HOST_BLOCK_END)[2]
+        return bool(after.strip()) or not backfill_is_inert(backfill)
+    return any(opener in removed for opener in _CONTEXT_BLOCK_OPENERS)
+
+
 def handed_on_text(message: str) -> str:
     """The turn as OMH hands it on (a coding handoff, a plan's statement): whole, except that the scaffold of a
     slash skill of OMH's own is the invocation typed, after any gateway material and sender prefix before it.
@@ -575,6 +629,19 @@ def host_command_turn(message: object) -> bool:
     routes on its invocation as typed (`person_request_text`).
     """
     return isinstance(message, str) and _host_command_turn(message)
+
+
+def host_plan_turn(message: object) -> bool:
+    """Whether Hermes opened this turn from `/plan`'s template, read as `host_command_turn` reads every frame."""
+    if not isinstance(message, str):
+        return False
+    text = _after_gateway_material(message)
+    if text.startswith(HOST_BLOCK_OPENERS):
+        return False
+    sender = SENDER_PREFIX.match(text)
+    return _opens_with_frame(_fold(text), _FOLDED_PLAN_FRAMES) or (
+        bool(sender) and _opens_with_frame(_fold(text[sender.end():]), _FOLDED_PLAN_FRAMES)
+    )
 
 
 def _interval_term(term: str) -> bool:

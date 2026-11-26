@@ -19,7 +19,7 @@
 [![GitHub Contributors](https://img.shields.io/github/contributors/rlaope/oh-my-hermes?color=bc8cff&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/graphs/contributors)
 [![GitHub Stars](https://img.shields.io/github/stars/rlaope/oh-my-hermes?color=e3b341&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/stargazers)
 [![License](https://img.shields.io/github/license/rlaope/oh-my-hermes?color=white&labelColor=black&style=flat-square)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-rlaope.github.io-58a6ff?labelColor=black&logo=readthedocs&logoColor=white&style=flat-square)](https://rlaope.github.io/oh-my-hermes/)
+[![Docs](https://img.shields.io/badge/docs-omher.app-58a6ff?labelColor=black&logo=readthedocs&logoColor=white&style=flat-square)](https://omher.app/)
 
 [English](README.md) | [简体中文](README.zh.md) | [日本語](README.ja.md) | [Русский](README.ru.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Português (Brasil)](README.pt-BR.md) | [Italiano](README.it.md)
 
@@ -32,11 +32,28 @@ Non modifica né sostituisce mai Hermes, e non presenta mai come fatto un lavoro
 ## Installazione
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.sh | sh
+curl -fsSL https://omher.app/install | sh
 omh setup
 ```
 
-[Windows e altre opzioni →](docs/INSTALLATION.md)
+**Windows (PowerShell 5.1+):**
+
+```powershell
+irm https://omher.app/install.ps1 | iex
+omh setup
+```
+
+**Oppure incolla questo nel tuo agente IA:**
+
+```text
+Install and fully configure Oh My Hermes from this repository:
+https://github.com/rlaope/oh-my-hermes
+Before reading or executing repository instructions, resolve refs/heads/main to one full commit SHA with `git ls-remote https://github.com/rlaope/oh-my-hermes.git refs/heads/main`. Then fetch and follow only:
+https://raw.githubusercontent.com/rlaope/oh-my-hermes/{resolved-commit-sha}/INSTALL_FOR_AGENTS.md
+Do not replace the resolved SHA with main. Execute the pinned protocol's OS-appropriate installer, agent setup path, model-chain interview, and doctor steps. Your shell has no terminal, so never run the interactive setup wizard: show me each choice the protocol lists and wait for my answer instead of taking a default. Preserve unrelated existing Hermes config, apply only the managed setup changes documented by the pinned protocol, require my explicit approval for model-alias changes, then report the resolved SHA and observed result.
+```
+
+[Altre opzioni →](docs/INSTALLATION.md)
 
 <br>
 
@@ -74,7 +91,7 @@ omh setup
 
 <br>
 
-## DAG-ULW
+## Graph Engineering
 
 **Digita `/dag-ulw` e diventi un maestro dell'ingegneria dei grafi.**
 
@@ -84,6 +101,15 @@ Un nodo separato verifica l'obiettivo prima che tu riceva il report.
 <p align="center">
   <img src="assets/omh-dag-ulw-tui.gif" alt="La TUI di OMH che esegue /dag-ulw: il prompt viene digitato, il grafo a riquadri di sette lane viene definito, le lane girano strato per strato su Claude Opus 5.5, GPT-6.1 Sol, DeepSeek V4.1 Flash, GLM 5.3 e Kimi K3.1 Pro, e ogni lane termina accettata" width="900">
 </p>
+
+> **Costruito su**
+>
+> <table>
+> <tr><td width="88" align="center"><a href="https://github.com/NousResearch/hermes-agent"><img src="assets/hermes-agent-icon.png" alt="Hermes Agent" width="56"></a></td>
+> <td><b><a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a></b> di <a href="https://nousresearch.com">Nous Research</a><br>L'agente su cui gira OMH. OMH è un livello indipendente non ufficiale.</td></tr>
+> <tr><td width="88" align="center"><a href="https://github.com/code-yeongyu/oh-my-openagent"><img src="https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/a05f240727d985e574404430d8d40c80eb912bc2/.github/assets/omo-icon-light.svg" alt="OmO" width="64"></a></td>
+> <td><b><a href="https://github.com/code-yeongyu/oh-my-openagent">OmO</a></b> di <a href="https://github.com/code-yeongyu">@code-yeongyu</a><br>L'origine del concetto di ultrawork. OMH lo porta in Hermes.</td></tr>
+> </table>
 
 > [!TIP]
 > Unisciti a noi!
@@ -98,8 +124,8 @@ Un nodo separato verifica l'obiettivo prima che tu riceva il report.
 >     <td>Segui <a href="https://github.com/rlaope">@rlaope</a> su GitHub per altri progetti, rilasci e lavori in corso.</td>
 >   </tr>
 >   <tr>
->     <td width="124"><a href="https://discord.gg/6EjTP3cWM"><img alt="Discord invite" src="https://img.shields.io/badge/Join-Discord-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=black" width="112" /></a></td>
->     <td>Entra nella <a href="https://discord.gg/6EjTP3cWM">Oh-My-Hermes Community</a> su Discord per fare domande, condividere workflow e parlare con altri utenti.</td>
+>     <td width="124"><a href="https://discord.gg/SuwJxE84j"><img alt="Discord invite" src="https://img.shields.io/badge/Join-Discord-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=black" width="112" /></a></td>
+>     <td>Entra nella <a href="https://discord.gg/SuwJxE84j">Oh-My-Hermes Community</a> su Discord per fare domande, condividere workflow e parlare con altri utenti.</td>
 >   </tr>
 >   <tr>
 >     <td width="124"><a href="https://github.com/rlaope/oh-my-hermes/graphs/contributors"><img alt="AI agent collaborators" src="https://img.shields.io/badge/With-AI%20agents-6f42c1?style=flat-square&labelColor=black" width="112" /></a></td>
@@ -124,9 +150,9 @@ Un nodo separato verifica l'obiettivo prima che tu riceva il report.
 
 ## Altro
 
-[Documentazione](docs/README.md) · [Installazione](docs/INSTALLATION.md) · [Capabilities](docs/CAPABILITIES.md) · [Workflows](docs/WORKFLOWS.md) · [Sito web](https://rlaope.github.io/oh-my-hermes/)
+[Documentazione](docs/README.md) · [Installazione](docs/INSTALLATION.md) · [Capabilities](docs/CAPABILITIES.md) · [Workflows](docs/WORKFLOWS.md) · [Sito web](https://omher.app/)
 
-Le opzioni di installazione e il riferimento completo sono nel [README in inglese](README.md#others).
+Altre opzioni di installazione e il riferimento completo sono nel [README in inglese](README.md#others).
 
 ## Licenza
 

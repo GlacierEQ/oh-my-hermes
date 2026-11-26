@@ -47,13 +47,12 @@ OMH_LOOP_SCHEMA = {
     "name": "omh_loop",
     "description": (
         "Manage one durable, permission-scoped OMH Loop (loop_cycle/v2) for this session without "
-        "shell commands. Every mutation binds to the configured OMH home and this host session; no "
-        "argument selects a store. A successful call records an OMH transition only: never executor "
-        "dispatch, implementation, review, CI, merge readiness, or merge, and a queue item OMH "
-        "prepares stays prepared_not_observed until separate evidence is recorded. Each action "
-        "accepts only the fields marked with its name below; a field from another action is "
-        "refused, not ignored. Tick, sticky rules, queue dispatch and recovery, driver binding and "
-        "migration, handoffs, and narration stay on the `omh loop` CLI. "
+        "shell commands; every mutation binds to the configured OMH home and this session. A call "
+        "records an OMH transition only, never dispatch, implementation, review, CI or merge, and a "
+        "prepared queue item stays prepared_not_observed until separate evidence is recorded. Each "
+        "action takes only the fields marked with its name; another action's field is refused. "
+        "Tick, sticky rules, queue dispatch, driver binding, handoffs and narration stay on the "
+        "`omh loop` CLI. "
         "Relay any `say` field to the user once, in their language and your own words."
     ),
     "parameters": {
@@ -224,11 +223,11 @@ def omh_loop_handler(args: dict[str, Any], **kwargs) -> str:
     # accepts no home field at all, on any host. Loop mutations are the state a
     # caller-chosen root would most obviously be abused to plant.
     if error := runtime_paths.tool_home_error(args):
-        return json.dumps(error, sort_keys=True)
+        return json.dumps(error, ensure_ascii=False, sort_keys=True)
     observer_args = {key: args[key] for key in _OBSERVER_ARG_KEYS if key in args}
     observation = observe_plugin_tool_call("omh_loop", observer_args, kwargs)
     request = {key: value for key, value in args.items() if key != "observation"}
     payload = run_loop_tool_action(request, session_ref=host_session_id(kwargs))
     payload["plugin_tool"] = "omh_loop"
     with_say(payload, loop_say(request, payload))
-    return json.dumps(attach_public_observation(payload, observation), sort_keys=True)
+    return json.dumps(attach_public_observation(payload, observation), ensure_ascii=False, sort_keys=True)

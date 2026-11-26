@@ -57,7 +57,9 @@ or which `clear` dropped while it was still running, comes back the next time
 it reports. `complete` never makes one: a verdict on an agent that was never
 shown has no row to land on. A finished agent is frozen, so a repeated
 `complete` or a late frame cannot change its verdict, its time or its log,
-and a late `subagent.tail` can only fill a log that is still empty.
+and a late `subagent.tail` can only fill a log that is still empty. `apply`
+returns the agent a `complete` finished, once, with what it said in
+`Agent.reply`, which the app briefs in the transcript (`transcript.AgentDoneBlock`).
 
 Tokens. No frame before `subagent.complete` counts tokens, but Hermes adds
 each of the child's API calls to the `output_tokens` of the child's own row
@@ -93,16 +95,19 @@ from ..plugin_bundle.omh.hud_text import compact_count, elapsed_text
 from . import gateway_contract as contract
 from .markdown import clean_text, wrap_prefixed
 from .panels import SPINNER_FRAMES
+from .prompts import CHOICE_MARK
 from .style import Line, Span
 from .theme import Theme, kind_style
-from .width import cell_width, truncate, truncate_line, wrap_line
+from .width import cell_width, clusters_as_written, truncate, truncate_line, wrap_line
 
 QUEUED = "queued"
 RUNNING = "running"
 COMPLETED = "completed"
 INTERRUPTED = "interrupted"
+ENDED = "ended"  # cancelled: over, but not a success, so no green check
+CANCELLED_STATUSES = frozenset({"cancelled", "canceled"})
 FAILED_STATUSES = frozenset({"failed", "error", "timeout"})  # Hermes' SUBAGENT_FAILURE_STATUSES
-FINISHED_STATUSES = FAILED_STATUSES | {COMPLETED, INTERRUPTED}
+FINISHED_STATUSES = FAILED_STATUSES | {COMPLETED, INTERRUPTED, ENDED}
 
 MAIN_ID = ""  # the main agent's row: `apply` ignores an empty `subagent_id`, so no agent has it
 
@@ -128,15 +133,16 @@ MAIN_NAME = "main"
 UNNAMED = "agent"
 UNNAMED_TOOL = "tool"
 MAIN_MARK = "●"
-DONE_MARK = "○"
+DONE_MARK = "✓"
+OTHER_END_MARK = "○"  # an `ENDED` agent keeps the hollow mark every finished one had before the check
 FAILED_MARK = "✗"
 QUEUED_MARK = "◌"
 INTERRUPTED_MARK = "▪"
 OPEN_MARK = "↓ agents"  # what Down opens, after the count on the info line
 WAITING = "waiting"  # a queued agent's figure: how long it has waited for a worker
 # The order the agent view keeps rows in when it has no room for all: running first, done last.
-KEEP_RANK = {RUNNING: 0, QUEUED: 1, **{status: 2 for status in FAILED_STATUSES}, INTERRUPTED: 3, COMPLETED: 4}
-SELECTED_MARK = "▸ "
+KEEP_RANK = {RUNNING: 0, QUEUED: 1, **{status: 2 for status in FAILED_STATUSES}, INTERRUPTED: 3, COMPLETED: 4, ENDED: 4}
+SELECTED_MARK = CHOICE_MARK  # the pointer every menu marks its row with; `▸` here is a folded row
 UNSELECTED_MARK = "  "
 COLUMN_GAP = "  "
 FACT_SEPARATOR = " · "
@@ -201,6 +207,7 @@ class Agent:
     said: LogRow | None = None  # its latest thinking or reply line
     progress: LogRow | None = None  # its latest progress line, the names of its last calls
     progress_newest: bool = False  # `progress` came after `said`
+    reply: tuple[str, ...] = ()  # its `subagent.complete` summary, line by line: its reply, or its error
 
     @property
     def name(self) -> str:
@@ -219,7 +226,12 @@ class Agent:
 
 
 def _first_words(words: list[str], cells: int) -> str:
-    """The first of `words` that fit `cells`; a first word longer than that is cut. Empty with no words."""
+    """The first of `words` that fit `cells`; a first word longer than that is cut. Empty with no words.
+
+    A `:` or `;` the last word ended on goes (`child alpha:` is `child
+    alpha`): a name is set into sentences (`steering {name}: …`,
+    `Interrupted {name}.`). A `.` stays, as `e.g.` and `v1.2.` keep theirs.
+    """
     if not words:
         return ""
     name = words[0]
@@ -227,7 +239,7 @@ def _first_words(words: list[str], cells: int) -> str:
         if cell_width(f"{name} {word}") > cells:
             break
         name = f"{name} {word}"
-    return truncate(name, cells)
+    return truncate(name.rstrip(":;") or name, cells)
 
 
 def _text(value: object) -> str:
@@ -235,7 +247,14 @@ def _text(value: object) -> str:
 
 
 def _cut(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit] + CUT_MARK
+    return text if len(text) <= limit else _whole_clusters(text, limit) + CUT_MARK
+
+
+def _whole_clusters(text: str, limit: int) -> str:
+    """`text` from its start to at most `limit` of its own characters, in whole clusters (`width.clusters_as_written`):
+    the one `limit` falls in is left out, so a cut never splits a ZWJ family, a skin tone, a flag or a base from its
+    marks, and never normalizes what it keeps."""
+    return text if len(text) <= limit else "".join(clusters_as_written(text[: limit + 1])[:-1])
 
 
 def _lines(text: str) -> list[str]:
@@ -250,7 +269,7 @@ def _one_line(value: object, limit: int) -> str:
     At most `limit` characters are read, so a huge field costs what a small one does.
     """
     raw = _text(value)
-    line = " ".join(" ".join(_lines(raw[:limit])).split())
+    line = " ".join(" ".join(_lines(_whole_clusters(raw, limit))).split())
     return line + CUT_MARK if len(raw) > limit else line
 
 
@@ -302,7 +321,9 @@ def _mark(agent: Agent, theme: Theme, spinner_frame: int) -> Span:
         return Span(FAILED_MARK, theme.error)
     if agent.status == INTERRUPTED:
         return Span(INTERRUPTED_MARK, theme.muted)
-    return Span(DONE_MARK, theme.muted)
+    if agent.status == COMPLETED:
+        return Span(DONE_MARK, theme.ok)
+    return Span(OTHER_END_MARK, theme.muted)
 
 
 # Where a structured goal's title ends: at its first field label or at the end of its first sentence. The labels are
@@ -340,15 +361,18 @@ def _tokens_text(count: int | None) -> str:
 
 
 def _collapsed_row(cut: list[Agent], theme: Theme) -> Line:
-    """The agent view's last row, for the agents it has no room for: `○ 3 done`, else `+4 more · 1 waiting · 3 done`
+    """The agent view's last row, for the agents it has no room for: `✓ 3 done` (muted `▪` when one was
+    interrupted, never a green check for it), else `+4 more · 1 waiting · 3 done`
     (running, waiting, failed and done ones counted, in that order)."""
-    if all(agent.status in (COMPLETED, INTERRUPTED) for agent in cut):
-        return (Span(UNSELECTED_MARK), Span(DONE_MARK, theme.muted), Span(f" {len(cut)} done", theme.muted))
+    if all(agent.status in (COMPLETED, INTERRUPTED, ENDED) for agent in cut):
+        mark = (Span(DONE_MARK, theme.ok) if all(agent.status == COMPLETED for agent in cut)
+                else Span(INTERRUPTED_MARK, theme.muted))
+        return (Span(UNSELECTED_MARK), mark, Span(f" {len(cut)} done", theme.muted))
     counts = [
         (sum(1 for agent in cut if agent.status == RUNNING), "running"),
         (sum(1 for agent in cut if agent.status == QUEUED), WAITING),
         (sum(1 for agent in cut if agent.status in FAILED_STATUSES), "failed"),
-        (sum(1 for agent in cut if agent.status in (COMPLETED, INTERRUPTED)), "done"),
+        (sum(1 for agent in cut if agent.status in (COMPLETED, INTERRUPTED, ENDED)), "done"),
     ]
     said = "".join(f"{FACT_SEPARATOR}{count} {word}" for count, word in counts if count)
     return (Span(UNSELECTED_MARK), Span(f"+{len(cut)} more{said}", theme.muted))
@@ -399,8 +423,9 @@ class Roster:
 
     # ── input ──
 
-    def apply(self, event_type: str, payload: object, now: float) -> None:
-        """Fold one gateway event; `now` is the app's clock.
+    def apply(self, event_type: str, payload: object, now: float) -> Agent | None:
+        """Fold one gateway event; `now` is the app's clock. The agent this frame finished, else None: only a
+        `subagent.complete` for an agent the roster holds unfinished finishes one, once.
 
         An event type that is not one of the six above, a payload that is not
         an object, and a `subagent_id` that is missing, blank (the gateway
@@ -409,15 +434,19 @@ class Roster:
         """
         handler = self._handlers.get(event_type) if isinstance(event_type, str) else None
         if handler is None or not isinstance(payload, dict):
-            return
+            return None
         subagent_id = payload.get("subagent_id")
         if not isinstance(subagent_id, str) or not subagent_id.strip() or len(subagent_id) > ID_CHARS:
-            return
+            return None
+        before = self.agents.get(subagent_id)
+        open_before = before is not None and before.status not in FINISHED_STATUSES
         handler(subagent_id, payload, now)
         agent = self.agents.get(subagent_id)
-        if agent is not None:
-            self._frames += 1
-            agent.seen = self._frames
+        if agent is None:
+            return None
+        self._frames += 1
+        agent.seen = self._frames
+        return agent if open_before and agent is before and agent.status in FINISHED_STATUSES else None
 
     def token_sessions(self, now: float) -> tuple[str, ...]:
         """The child sessions whose state.db rows the HUD poller reads output tokens from, for `ingest_tokens`.
@@ -466,8 +495,16 @@ class Roster:
         """Drop the agents `clear` kept whose dag node belongs to one of `runs` (`d:<run>`, the runs a payload shows
         over), a node that left the drawing since (a superseded repair) included; the ids dropped. An agent that
         arrived in this turn is never one of them."""
-        dropped = frozenset(key for key in self.kept
-                            if key in self.agents and self.agents[key].dag_node.rpartition(":")[0] in runs)
+        return self._drop(frozenset(key for key in self.kept
+                                    if key in self.agents and self.agents[key].dag_node.rpartition(":")[0] in runs))
+
+    def drop_runs(self, runs: frozenset[str]) -> frozenset[str]:
+        """Drop every agent whose dag node belongs to one of `runs` (`d:<run>`): a run that is over, which the view no
+        longer draws (`AgentViewMixin._retire_finished_run`); the ids dropped."""
+        return self._drop(frozenset(key for key, agent in self.agents.items()
+                                    if agent.dag_node and agent.dag_node.rpartition(":")[0] in runs))
+
+    def _drop(self, dropped: frozenset[str]) -> frozenset[str]:
         for key in dropped:
             del self.agents[key]
             self._wrapped.pop(key, None)
@@ -556,7 +593,7 @@ class Roster:
             return
         _identify(agent, payload)
         status = _text(payload.get("status")).lower()
-        agent.status = status if status in FINISHED_STATUSES else COMPLETED
+        agent.status = status if status in FINISHED_STATUSES else ENDED if status in CANCELLED_STATUSES else COMPLETED
         agent.finished_at = now
         duration = payload.get("duration_seconds")
         if _bounded(duration, MAX_SECONDS):
@@ -565,6 +602,7 @@ class Roster:
         if isinstance(tokens, int) and _bounded(tokens, MAX_TOKEN_COUNT):
             agent.output_tokens, agent.tokens_final = tokens, True
         summary = _lines(_text(payload.get("summary") or payload.get("text"))[:SUMMARY_CHARS])
+        agent.reply = tuple(summary)
         for line in summary:
             _push(agent, LOG_TEXT, line)
         if summary:  # its reply's first line, or its error
@@ -594,7 +632,7 @@ class Roster:
         so Down highlights a row without moving one. More agents than
         `max_rows` holds collapse into one last row: running agents are kept
         first, then those waiting for a worker, then failed, interrupted and
-        done ones, and the last row counts the rest, `○ 3 done` when every one
+        done ones, and the last row counts the rest, `✓ 3 done` when every one
         of them finished, else `+4 more · 1 waiting · 3 done`. The rows kept
         stay in roster order. In two rows or fewer `● main` gives its row up
         first, so a running agent is still named. With no agent there is no
@@ -694,7 +732,8 @@ class Roster:
             elapsed_text(agent.elapsed(now)), _tools_text(agent.tool_count),
             _tokens_text(agent.output_tokens).replace(" ", NO_BREAK_SPACE), agent.model,
         ]
-        state = _mark(agent, theme, 0).style  # the agent's own state: running blue, failed red, else grey
+        mark_style = _mark(agent, theme, 0).style
+        state = theme.muted if mark_style == theme.ok else mark_style  # running blue, failed red, else grey
         status = Span(agent.status, state)
         rest = Span("".join(f"{FACT_SEPARATOR}{fact}" for fact in facts if fact), theme.muted)
         header: list[Line] = [

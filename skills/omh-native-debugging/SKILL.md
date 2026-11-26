@@ -1,6 +1,6 @@
 ---
 name: "omh-native-debugging"
-description: "[omh] Native program crashes or corrupts memory: prepare hypothesis-driven debugging of native binaries and instruct the executor to drive a DAP debugger instead of printf. Use when the user says: native-debugging, native debugging, native binary, segfault, segmentation fault, core dump, stack corruption, memory corruption."
+description: "[omh] Native program crashes or corrupts memory: prepare hypothesis-driven debugging of native binaries and instruct the executor to drive a debugger instead of printf. Use when the user says: native-debugging, native debugging, native binary, segfault, segmentation fault, core dump, stack corruption, memory corruption."
 license: MIT
 author: "oh-my-hermes maintainers"
 metadata:
@@ -15,56 +15,23 @@ metadata:
 
 # Native Debugging
 
-This is a Hermes-native `native-debugging` workflow skill.
+Required: the binary, crash signature, or fault symptom, whether source and debug symbols are available, platform, architecture, and the reproduction command, how reliably the fault reproduces, existing crash logs, core dumps, or sanitizer output, observed debugger evidence for any resolution claim. Output: native_fault_statement/v1, hypothesis_set/v1 with at least three competing hypotheses, distinguishing_observation_plan/v1, debugger_session_plan/v1, native_debug_handoff/v1, observed_debugger_evidence/v1 when observed.
 
 ## Why This Exists
 
-`native-debugging` closes OMH's zero-coverage low-level domain by preparing a hypothesis-driven, DAP-first debugging plan for native binaries, while OMH itself continues to execute nothing.
+`native-debugging` closes OMH's zero-coverage low-level domain by preparing a hypothesis-driven, instrument-first debugging plan for native binaries, while OMH itself continues to execute nothing.
 
-## Do Not Use When
-
-- The failure is a build or CI failure rather than a runtime fault in a binary; use `omh-build-failure-triage`.
-- The subject is an agent or workflow misbehaving rather than a native binary; use `omh-agent-debug`.
-- The wrong result, flaky test, or lost update is in application code such as a Python or TypeScript service and needs its root cause reproduced; use `omh-app-debugging`.
-- The change is Rust source work whose risk is `unsafe` or UB discipline; use `omh-rust`.
-- The request is to judge whether a fix is verified rather than to find the fault; use `omh-verification-gate`.
-
-## Examples
-
-Good example:
-
-- Prompt: This binary segfaults on the third request; help me debug it.
-- Expected behavior: Prepare native_fault_statement/v1, three competing hypotheses with distinguishing observations, and a debugger_session_plan/v1 naming the DAP adapter, breakpoints, and values to read.
-- Why: The request is a runtime fault in a native binary where the plan, not the guess, is what OMH can prepare.
-
-Bad example:
-
-- Prompt: Add some printfs and tell me it is fixed once the crash stops.
-- Expected behavior: Name the DAP-driven observation plan, and keep reproduction, root cause, and fix as separate not_observed states.
-- Why: A disappearing symptom is not a root cause, and printf-via-rebuild is the fallback rather than the method.
-
-## Completion Checklist
-
-- The fault is stated as an observed symptom with a reproduction command, separate from any assumed cause.
-- At least three hypotheses span distinct axes and each carries its refuting observation.
-- The debugger session plan names the DAP adapter, breakpoints, watchpoints, threads, frames, and values to read.
-- The handoff says the executor drives the debugger and OMH executes nothing.
-- Reproduction, debugger output, root cause, and fix are reported as separate observed or not_observed states.
-
-## Recovery Notes
-
-- If the fault does not reproduce, make reproduction the first hypothesis and plan the observation that would establish it, rather than debugging a fault no one can trigger.
-- If no debug adapter or symbols are available, say so, plan the coarser evidence path, and keep root cause unclaimed instead of upgrading a guess.
+Contract: `references/full-contract.md` (examples, sibling boundaries, full artifact details).
 
 ## Workflow Lane
 
-- Current lane: **Coding handoff** (`idea-to-deploy`, `llm-app-dev`, `cto-loop`, `deploy-and-monitor`, `code-review`, `build-failure-triage`, `verification-gate`, `security-safety-review`, `+28 more`) - coding owners, handoffs, review, CI, and merge evidence.
-- If intent belongs to another lane, hand back to `oh-my-hermes` or name the adjacent workflow.
+- Current lane: **Coding handoff** - coding owners, handoffs, review, CI, and merge evidence.
+- If intent belongs to another lane, hand back to `omh-routing` or name the adjacent workflow.
 - Shared product, routing, compatibility, and evidence rules: `skill_view(name='omh-routing', file_path='references/skill-common-rail.md')`.
 
 ## When to Use
 
-Use when Hermes should prepare low-level debugging of a native binary, crash, or memory fault: competing hypotheses, the distinguishing observation for each, and a DAP-driven evidence plan for the executor.
+Use when Hermes should prepare low-level debugging of a native binary, crash, or memory fault: competing hypotheses, the distinguishing observation for each, and a debugger-driven evidence plan for the executor.
 
     Strong routing signals: `native-debugging`, `native debugging`, `native binary`, `segfault`, `segmentation fault`, `core dump`, `stack corruption`, `memory corruption`, `heap corruption`, `use after free`, `null pointer dereference`, `stripped binary`, `disassembly`, `lldb`, `gdb`, `dap debugger`, `breakpoint`, `watchpoint`, `backtrace`, `セグメンテーション違反`, `コアダンプ`, `メモリ破壊`, `ヒープ破壊`, `解放後使用`, `逆アセンブル`, `네이티브 디버깅`, `세그폴트`, `코어 덤프`, `메모리 손상`, `역어셈블`, `중단점`, `段错误`, `核心转储`, `内存破坏`, `释放后使用`, `反汇编`, `bantu debug segfault ini`, `analisis core dump`, `telusuri penyebab use after free`, `debug crash pada binary native`, `giúp debug lỗi segfault này`, `phân tích core dump`, `truy nguyên nhân use after free`, `debug crash trên binary native`
 
@@ -81,7 +48,7 @@ Quality bar:
 - State the fault as an observed symptom with its reproduction command before naming any cause.
 - Load `references/native-debug-loop.md` and follow its hypothesis, observation, and escalation order rather than improvising a search.
 - Write at least three hypotheses on distinct axes, each with the single observation that would refute it and the exact place to read that observation.
-- Plan the debugger session concretely: adapter, breakpoints, watchpoints, threads, frames, and the values read at each stop — the executor should not have to invent the session.
+- Plan the debugger session concretely: debugger, breakpoints, watchpoints, threads, frames, and the values read at each stop — the executor should not have to invent the session.
 - Prefer debugger-observed state over added print statements; a rebuild-and-print loop is the fallback, not the method.
 - Keep reproduction, debugger output, root cause, and fix as separate observed states.
 
@@ -89,41 +56,28 @@ Handoff policy:
 
 Keep the fault statement, hypothesis set, distinguishing observations, and the debugger plan in Hermes. Record every breakpoint hit, register or memory read, backtrace, and reproduction only from executor or wrapper observed evidence.
 
-Required inputs:
-
-- the binary, crash signature, or fault symptom
-- whether source and debug symbols are available
-- platform, architecture, and the reproduction command
-- how reliably the fault reproduces
-- existing crash logs, core dumps, or sanitizer output
-- observed debugger evidence for any resolution claim
-
-Expected outputs:
-
-- native_fault_statement/v1
-- hypothesis_set/v1 with at least three competing hypotheses
-- distinguishing_observation_plan/v1
-- debugger_session_plan/v1
-- native_debug_handoff/v1
-- observed_debugger_evidence/v1 when observed
-
-Artifact expectations:
-
-- native_fault_statement/v1 separates the observed symptom from the assumed cause and names the reproduction command
-- hypothesis_set/v1 spans distinct axes — caller-side misuse, callee invariant, memory lifetime, concurrency, build/runtime mismatch — not three phrasings of one guess
-- distinguishing_observation_plan/v1 pairs each hypothesis with the one observation that refutes it, and where to read it
-- debugger_session_plan/v1 names the adapter (lldb or gdb via DAP), the breakpoints and watchpoints, the frames and threads to inspect, and the values to read at each stop
-- native_debug_handoff/v1 states that the executor drives the debugger and OMH executes nothing
-- breakpoint hits, memory and register reads, backtraces, and confirmed reproductions only when observed
-
 Safety rules:
 
 - Do not claim a reproduction, a breakpoint hit, a read value, a root cause, or a fix from a prepared debugging plan.
-- Instruct the executor to drive a DAP debug adapter — lldb-dap, codelldb, or a gdb adapter — with breakpoints, stepping, and thread and frame inspection, and to reach for print-and-rebuild only when no adapter is available.
+- Instruct the executor to use the instrument the fault class needs (sanitizer, Valgrind, rr, or the core file) and then a debugger session, scripted in batch lldb or gdb unless the host exposes a DAP adapter, and to reach for print-and-rebuild only when no debugger can attach.
 - Require at least three hypotheses on distinct axes before any observation is planned; a single hypothesis makes every reading confirmatory.
 - Never treat a symptom's disappearance as a root cause; an unexplained fix is an open fault.
 - Treat attaching to, patching, or bypassing protections on a binary the user does not own or operate as out of scope.
 - Do not execute binaries, debuggers, or any command from OMH core.
+
+## Completion Checklist
+
+- The fault is stated as an observed symptom with a reproduction command, separate from any assumed cause.
+- At least three hypotheses span distinct axes and each carries its refuting observation.
+- The debugger session plan names the debugger or instrument, breakpoints, watchpoints, threads, frames, and values to read.
+- The handoff says the executor drives the debugger and OMH executes nothing.
+- Reproduction, debugger output, root cause, and fix are reported as separate observed or not_observed states.
+- Any print-and-rebuild probe carried the session's probe tag, and an observed search for that tag returns nothing.
+
+## Recovery Notes
+
+- If the fault does not reproduce, make reproduction the first hypothesis and plan the observation that would establish it, rather than debugging a fault no one can trigger.
+- If no debugger, core file, or symbols are available, say so, plan the coarser evidence path, and keep root cause unclaimed instead of upgrading a guess.
 
 ## Runtime Evidence
 
@@ -137,7 +91,7 @@ Record observed delegation results; otherwise return `not_available` or `not_obs
 Prepared OMH routing is not execution, review, CI, merge-readiness, or merge evidence.
 - Treat wrapper memory/context summaries as advisory local context, not proof of opaque Hermes memory reads or changes.
 Preserve workflow intent and stop conditions; verify before claiming completion.
-Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only; OMH's record terms (surface, lane, wrapper, handoff, evidence boundary, not_observed) stay in records and tool calls, never in the sentence the user reads unless they ask about one; and when a real unresolved user decision or a useful briefing discussion remains, offer one specific, content-linked question. Completed work needs no question; omit unrelated non-action footers and generic offers to continue.
+Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only. When the requested output is delivered, put any open points inside the result and end with no question or offer; only when the person asked to choose or decide and that choice is still theirs, end with one specific question about it, not a list, a generic offer, or a footer; the shared rail's Reply Language And Host Voice and Turn Ending sections hold the full rule.
 
 Use Hermes-native subagent/delegation features when available: native subagents -> Hermes delegation when available, otherwise sequential lanes.
 

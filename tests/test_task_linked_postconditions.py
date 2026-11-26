@@ -11,9 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
-import shlex
 import subprocess
-import sys
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -21,13 +19,15 @@ from _local_package import load_local_package
 
 load_local_package()
 
+from _verification_python import verification_python  # noqa: E402
+
 from omh.codegraph import build_codegraph  # noqa: E402
 from omh.coding.fanout import build_fanout_contract  # noqa: E402
 from omh.coding.fanout_artifacts import write_fanout_contract  # noqa: E402
 from omh.coding.fanout_contracts import FanoutContractError  # noqa: E402
 from omh.coding.fanout_dispatch import _unit_verification_is_observed, dispatch_fanout  # noqa: E402
 from omh.coding.postconditions import (  # noqa: E402
-    MAX_TASK_LINKED_TEST_RUNNER_CHARS,
+    MAX_TASK_LINKED_TEST_RUNNER_BYTES,
     TASK_LINKED_POSTCONDITION_SCHEMA_VERSION,
     normalized_task_linked_test_runner,
     resolve_task_linked_postcondition,
@@ -37,8 +37,8 @@ from omh.runtime.artifacts import append_journal_observation  # noqa: E402
 from omh.system.paths import OmhPaths  # noqa: E402
 
 _GOAL = "change the sample module"
-_RUNNER = f"{shlex.quote(sys.executable)} -m unittest"
-_PASSING_COMMAND = f"{shlex.quote(sys.executable)} -c pass"
+_RUNNER = f"{verification_python()} -m unittest"
+_PASSING_COMMAND = f"{verification_python()} -c pass"
 
 _MODULE = "def value():\n    return 1\n"
 _BROKEN_MODULE = "def value():\n    return 2\n"
@@ -146,7 +146,18 @@ class RunnerDeclarationTests(unittest.TestCase):
         )
 
     def test_unusable_runners_are_refused_at_freeze(self) -> None:
-        for bad in ("", "   ", 3, "PYTHONPATH=tests", "python 'unterminated", "x" * (MAX_TASK_LINKED_TEST_RUNNER_CHARS + 1)):
+        max_emoji = "echo " + "😀" * ((MAX_TASK_LINKED_TEST_RUNNER_BYTES - 5) // 4)
+        self.assertEqual(normalized_task_linked_test_runner(max_emoji, 0), max_emoji)
+        over_emoji = max_emoji + "😀"
+        for bad in (
+            "",
+            "   ",
+            3,
+            "PYTHONPATH=tests",
+            "python 'unterminated",
+            "x" * (MAX_TASK_LINKED_TEST_RUNNER_BYTES + 1),
+            over_emoji,
+        ):
             with self.subTest(bad=bad), self.assertRaises(FanoutContractError):
                 normalized_task_linked_test_runner(bad, 0)
 

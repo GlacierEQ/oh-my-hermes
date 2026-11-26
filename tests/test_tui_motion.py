@@ -61,16 +61,17 @@ def ev(kind: str, **payload: object) -> Event:
 
 
 def mark(line: tuple) -> object:
-    """The span of a tool row's mark: after its rail (`┃` and a space)."""
+    """The span of a tool row's mark: after its rail (the bar and a space)."""
     return line[2]
 
 
 class SaidAndDoneTests(unittest.TestCase):
     def test_a_reply_opens_in_the_text_colour_and_each_call_is_named_in_its_familys_hue(self) -> None:
-        reply = block_rows(AssistantBlock("hello", done=True), 40, THEME)[0]
-        self.assertEqual((reply[2].text, reply[2].style), ("● ", replace(THEME.text, bold=True)))
+        header, reply = block_rows(AssistantBlock("hello", done=True), 40, THEME)[:2]
+        self.assertEqual((header[0].text, header[0].style), ("⚚ Hermes", replace(THEME.brand, bold=True)))
+        self.assertEqual(reply[-1], Span("hello", THEME.text))
         group = ToolGroup([ToolRow("a", "read_file", status=TOOL_OK), ToolRow("b", "terminal", status=TOOL_OK)], done=True)
-        rows = [row for row in block_rows(group, 40, THEME) if row]  # a blank row between two calls
+        rows = [row for row in block_rows(group, 40, THEME) if row]  # blank rows between two calls
         self.assertEqual([(row[4].text, row[4].style) for row in rows],
                          [("read_file", kind_style("read_file", THEME)), ("terminal", kind_style("terminal", THEME))])
         self.assertNotEqual(kind_style("read_file", THEME), kind_style("terminal", THEME))
@@ -130,7 +131,7 @@ class PulseTests(unittest.TestCase):
         app._on_event(ev("message.start"))
         app._on_event(ev("tool.start", tool_id="t1", name="terminal", context="ls"))
         clock.now += PULSE_SECONDS + 0.1
-        *_rest, tool, _working, _tip = app._tail(80)
+        *_rest, tool, _gap, _working, _tip = app._tail(80)
         self.assertEqual(mark(tool).style, THEME.dim)
 
     def test_without_a_clock_the_mark_holds_the_accent(self) -> None:
@@ -154,8 +155,8 @@ class PulseTests(unittest.TestCase):
         flushed: list = []
         take = app.transcript.take_stable_lines
 
-        def recorded(*args: object) -> list:
-            lines = take(*args)
+        def recorded(*args: object, **kwargs: object) -> list:
+            lines = take(*args, **kwargs)
             flushed.extend(lines)
             return lines
 
@@ -164,7 +165,7 @@ class PulseTests(unittest.TestCase):
         history = app.terminal.screen.history() + app.terminal.screen.lines()  # type: ignore[attr-defined]
         self.assertTrue(any(line.startswith("┃ ● terminal") for line in history), history)
         self.assertTrue(any(line.startswith("┃ ✗ read_file") for line in history), history)
-        calls = [row for row in flushed if len(row) > 4 and row[0].text == "┃" and row[4].text in ("terminal", "read_file")]
+        calls = [row for row in flushed if len(row) > 4 and row[0].style.gutter and row[4].text in ("terminal", "read_file")]
         self.assertEqual([mark(row).style for row in calls], [THEME.ok, THEME.error])  # settled, never a frame of a pulse
 
     def test_a_take_in_the_middle_of_a_pulse_writes_no_frame_of_it(self) -> None:
@@ -182,7 +183,7 @@ class PulseTests(unittest.TestCase):
         app._render()
         history = app.terminal.screen.history()  # type: ignore[attr-defined]  # scrollback and the screen
         rows = [line for line in history if "terminal" in line and "sleep 9" in line]
-        self.assertEqual([row.split()[1] for row in rows], ["▪"], history)  # the settled mark, not a frame of ○
+        self.assertEqual([row.split()[:2] for row in rows], [["┃", "▪"]], history)  # settled, not a frame of ○
 
 
 class SweepTests(unittest.TestCase):
@@ -207,7 +208,7 @@ class SweepTests(unittest.TestCase):
             rows.append(app._tail(80)[-2])  # the working row, its tip under it
         self.assertEqual(line_text(rows[0])[2:], line_text(rows[1])[2:])  # past the spinner, the same words
         self.assertNotEqual(rows[0][2:], rows[1][2:])  # in a different light
-        self.assertEqual(rows[0][0].style, THEME.running)
+        self.assertEqual(rows[0][0].style, THEME.accent)  # the spinner in the launch look's accent
 
 
 class ReducedMotionTests(unittest.TestCase):
@@ -221,7 +222,7 @@ class ReducedMotionTests(unittest.TestCase):
     def reduced(self) -> tuple[App, Clock]:
         clock = Clock()
         app, _client = make_app(busy=True, clock=clock, environ={"OMH_TUI_REDUCED_MOTION": "1"})
-        app.transcript.status = "Reading the router"
+        app.transcript.activity = "(⌐■_■) reading the router..."  # Hermes' spinner: the verb slot's
         app._on_event(ev("message.start"))
         app._on_event(ev("tool.start", tool_id="t1", name="terminal", context="ls"))
         return app, clock
@@ -231,7 +232,7 @@ class ReducedMotionTests(unittest.TestCase):
         seen = set()
         for _ in range(12):
             clock.now += PULSE_SECONDS / 2
-            *_rest, tool, working, _tip = app._tail(80)
+            *_rest, tool, _gap, working, _tip = app._tail(80)
             seen.add((mark(tool).style, tuple(working)))
         self.assertEqual(len(seen), 1)  # the same rows at every moment (this turn has no start time to count from)
         ((style, working),) = seen
@@ -281,6 +282,8 @@ class SteadyRowsTests(unittest.TestCase):
                 lambda: setattr(app, "model", "another/model"),
                 lambda: setattr(app, "turn_pending", False),  # running -> idle: the tool chip goes
                 lambda: setattr(app, "context_percent", 91.0),
+                lambda: setattr(app, "context_used", 182_000),  # the token counts beside the gauge
+                lambda: setattr(app, "context_max", 200_000),
                 lambda: setattr(app, "effort", "max"),
                 lambda: setattr(app, "slot", open_request("srq-1", "approval", {"command": "ls"})),  # its clock goes
                 lambda: setattr(app, "theme", theme_named("amber")),

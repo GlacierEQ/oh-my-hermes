@@ -10,7 +10,7 @@ rejection (4000) or an unknown method (-32601), which the client treats as
 calls in OPTIONAL_METHODS, where it is a notice and the session goes on. Inbound: the event
 names, fields and values the TUI keys on that the OMH TUI v2 batch added (the
 subagent events, `session.info`'s yolo and effort, `subagent.tail`'s result,
-`session.steer`'s status), read from here by the app and the roster, and every
+`session.redirect`'s and `session.steer`'s status), read from here by the app and the roster, and every
 event type, split into the ones the TUI handles and the ones it reads nothing
 from. An event type the TUI does not handle is ignored; a submitted turn that
 brings no transcript, subagent or error event, and three of types neither set
@@ -25,6 +25,7 @@ Declared against Hermes 6c61c3e27d (2026-10-07).
 from __future__ import annotations
 
 from dataclasses import dataclass
+import unicodedata
 
 DECLARED_AGAINST_HERMES = "6c61c3e27d"
 
@@ -32,15 +33,24 @@ DECLARED_AGAINST_HERMES = "6c61c3e27d"
 PARAM_REJECTED = 4000  # Pydantic `extra="forbid"`: a key this Hermes does not know
 METHOD_NOT_FOUND = -32601  # also the client's own answer to a request it does not support
 NOT_MINE = 4018  # `slash.exec` refusing a command that `command.dispatch` owns
+REDIRECT_UNSUPPORTED = 4010  # `session.redirect` to an agent without active-turn redirect: it may still take a steer
 
 DRIFT_ERROR_CODES = frozenset({PARAM_REJECTED, METHOD_NOT_FOUND})
 # Calls a session does without: on these a drift error is a notice and the session goes on. On every other call
 # made during a session it ends the session (`App._on_response`). An older Hermes (0250c8bcae: SkillsReloadParams
 # takes no field) rejects `skills.reload {session_id}` with 4000, which must not cost the person their session.
-# `config.get` is answered after the first frame and only sets the busy mode, which has a default (queue).
+# `config.get` is answered after the first frame and only sets the configured effort and Vim mode, which have defaults.
 # `session.list` is asked unprompted at the start of a fresh session, only to name the last one, and
-# `model.options` only fills `/model`'s picker, while `/model <name>` still switches.
-OPTIONAL_METHODS = frozenset({"commands.catalog", "config.get", "model.options", "session.list", "skills.reload"})
+# `model.options` only fills `/model`'s picker and reads Hermes' configured default model, while
+# `/model <name>` still switches. `image.render` only draws a preview under the prompt: a Hermes without it answers
+# METHOD_NOT_FOUND, the TUI keeps the label row, and the session goes on. `session.title` and `session.delete` only
+# rename or delete a row of the session picker: a Hermes without them says so on the row. `session.transcript` only
+# reads a picker row Hermes lists as not resumable (another runtime holds it open): a Hermes without it says so in a
+# notice, and no stock Hermes lists such a row.
+OPTIONAL_METHODS = frozenset({
+    "commands.catalog", "config.get", "image.render", "model.options", "session.delete", "session.list",
+    "session.title", "session.transcript", "skills.reload",
+})
 
 # Methods the TUI calls, with the only keys it ever sends. Sending a key outside
 # this map is a bug: a Hermes that does not know it rejects the whole call.
@@ -52,23 +62,42 @@ CLIENT_METHODS: dict[str, frozenset[str]] = {
     "skills.reload": frozenset({"session_id"}),
     "complete.path": frozenset({"word", "session_id"}),
     "session.create": frozenset({"cols", "cwd"}),
-    "session.resume": frozenset({"session_id", "cols"}),
+    # `lazy`: the subagent session view's read of a child session on Hermes' stdio entry (`_resume_lazy`): its
+    # history and an agent-less watch session the child's mirrored events arrive on. Sent only with a child session
+    # id and only over the stdio entry; the gateway child answers it on a shared gateway (which refuses the key) with
+    # LAZY_WATCH_UNSUPPORTED, so the view reads that child with `session.transcript` instead.
+    "session.resume": frozenset({"session_id", "cols", "lazy"}),
     "session.close": frozenset({"session_id"}),
     "session.interrupt": frozenset({"session_id"}),
-    # Typed text into the running turn; see STEER_STATUSES for the answer. A refusal (`rejected`, or an error)
-    # puts the text in the TUI's queue while a turn runs, and sends it as a prompt only when the session is idle.
+    # Typed text into the running turn, sent now; see STEER_STATUSES for the answer. A refusal (`rejected`, or an
+    # error) puts the text in the TUI's queue while a turn runs, and sends it as a prompt only when the session is
+    # idle. `session.redirect` is what the send-now key sends; `session.steer` is `/steer`'s, and the send-now key's
+    # where the agent answers REDIRECT_UNSUPPORTED or a redirect is `rejected` while its turn still runs.
+    "session.redirect": frozenset({"session_id", "text"}),
     "session.steer": frozenset({"session_id", "text"}),
-    # See CONFIG_SET_VALUES: `scope` is deliberately not declared.
-    "config.set": frozenset({"key", "value", "session_id"}),
-    "session.list": frozenset({"limit"}),
-    # Bare `/model`: the providers and models Hermes offers this session, for the picker. The pick goes back as
-    # Hermes' own `/model <name> --provider <slug> --session` through `slash.exec`.
-    "model.options": frozenset({"session_id"}),
+    # See CONFIG_SET_VALUES: `scope` is deliberately not declared. `confirm_expensive_model` goes only with a model,
+    # once the person picked "switch anyway" after Hermes answered `confirm_required`.
+    "config.set": frozenset({"key", "value", "session_id", "confirm_expensive_model"}),
+    # `title`: an exact-title lookup, which `/sessions <title>` asks after a shared gateway refused the title as an id;
+    # a gateway that does not know it answers with its normal listing, which the TUI scans the same way.
+    # `page`: an opaque continuation returned by the shared-gateway child. Only that child sends Hermes'
+    # `scope`, `picker`, and `cursor` parameters (`gateway_attach._list`). The stdio entry never returns `next_page`.
+    "session.list": frozenset({"limit", "title", "page"}),
+    # The session picker's Ctrl+R and second Ctrl+D, on the person's keys only (docs/OMH-TUI-BOUNDARY.md). The
+    # stdio entry renames a session by its live id and deletes a stored one it does not hold open; attached to a
+    # shared gateway the gateway child sends either as the owner's revision-fenced `session.mutate`.
+    "session.title": frozenset({"session_id", "title"}),
+    "session.delete": frozenset({"session_id"}),
+    # Bare `/model`: the providers and models Hermes offers this session, for the picker (`refresh` for
+    # `/model --refresh`: Hermes asks the providers again). The pick goes back as `config.set model`. Asked
+    # without a session, the answer's `model` and `provider` are the profile's configured default.
+    "model.options": frozenset({"session_id", "refresh"}),
     # Read-only: the last 16 KB of one child's live transcript, for the agent log view. See `call_problem`.
     "subagent.tail": frozenset({"session_id", "subagent_id"}),
-    # The two actions on one subagent, each on the person's keypress in the agent list (AGENTS.md): `x` once a
-    # second `x` confirms, and `s` with text the person then types and sends. Hermes answers `found` (false when
-    # the child had already finished) and, for a steer, `status` (STEER_QUEUED or STEER_REJECTED).
+    # The two actions on one subagent, each on the person's keypress in the agent list
+    # (docs/OMH-TUI-BOUNDARY.md): `x` once a second `x` confirms, and `s` with text the person then types and
+    # sends. Hermes answers `found` (false when the child had already finished) and, for a steer, `status`
+    # (STEER_QUEUED or STEER_REJECTED).
     "subagent.interrupt": frozenset({"session_id", "subagent_id"}),
     "subagent.steer": frozenset({"session_id", "subagent_id", "text"}),
     # A rewind (Esc Esc, /rewind) adds both truncation keys; see `call_problem`. Hermes refuses a truncation
@@ -76,14 +105,29 @@ CLIENT_METHODS: dict[str, frozenset[str]] = {
     "prompt.submit": frozenset({"session_id", "text", "queued", "truncate_before_row_id", "confirm_truncate"}),
     # The durable display transcript with row ids: what the rewind picker lists and redraws from.
     "session.history": frozenset({"session_id"}),
-    # Attachments: the gateway resolves and queues the file; the TUI sends a path, never bytes.
+    # Read-only history of a session no runtime holds open (`owner_runtime: "other"`, `resumable: false`): the
+    # newest messages, which the picker shows in a pager instead of resuming the session. It writes nothing.
+    # With `subagent_id` (the parent's session id in `session_id`), a shared gateway's read of that child's rows
+    # for the subagent session view, polled forward from the last answer's `next_cursor` in `cursor`; see
+    # `call_problem`. Hermes' stdio entry has no `session.transcript` (METHOD_NOT_FOUND).
+    "session.transcript": frozenset({"session_id", "order", "limit", "subagent_id", "cursor"}),
+    # Attachments: the gateway resolves and stages the file the TUI names by its path; the TUI then reads the bytes
+    # of the file Hermes staged and has it let go of it (`image.detach`), until a prompt stages them again below.
     "image.attach": frozenset({"session_id", "path"}),
+    # The bytes the TUI keeps for an image token, staged for the one prompt that goes with it (Hermes writes its own
+    # file and answers its path, which `image.detach` then names).
+    "image.attach_bytes": frozenset({"session_id", "filename", "content_base64"}),
     "image.detach": frozenset({"session_id", "path"}),
+    # Read-only inline preview of an image Hermes staged for the person (Hermes' `image.render`, `ImageRenderParams`
+    # in `tui_gateway/contracts/config_free_tier_control.py`, added in Hermes d4ac2edd5d). The gateway caps it at
+    # 64 columns by 16 rows and applies `display.inline_images`.
+    "image.render": frozenset({"path", "cols", "rows", "graphics", "terminal"}),
     "clipboard.paste": frozenset({"session_id"}),
     "input.detect_drop": frozenset({"session_id", "text"}),
     "slash.exec": frozenset({"command", "session_id"}),
-    # The person's own `!command` (AGENTS.md: nothing else goes this way). Hermes runs it with a 30 s limit,
-    # refuses dangerous and hardline commands (4005), keeps it out of the model's context, and redacts the output.
+    # The person's own `!command` (docs/OMH-TUI-BOUNDARY.md: nothing else goes this way). Hermes runs it with a
+    # 30 s limit, refuses dangerous and hardline commands (4005), keeps it out of the model's context, and redacts
+    # the output.
     "shell.exec": frozenset({"command"}),
     "command.dispatch": frozenset({"name", "arg", "session_id"}),
 }
@@ -103,6 +147,56 @@ CONFIG_SET_VALUES: dict[str, frozenset[str]] = {
     "reasoning": frozenset(REASONING_LEVELS),
 }
 CONFIG_SET_SESSION_SCOPE = "session"  # what a yolo answer's `scope` must say
+# `config.set model` switches the session's model, as Ink's `/model` does; over a shared gateway the attach
+# adapter sends it as the owner's `session.mutate`. Its value is only ever `model_switch_value`'s: a model and
+# a provider slug, each one plain word, then `--session` unless the person typed `/model <name>` without it.
+# Hermes reads `--global` as "every new session's default" and `--once` as "the next turn only", and no value
+# the TUI sends can carry either. Without `--session` Hermes' stdio entry applies its own rule
+# (`resolve_persist_behavior`: `model.persist_switch_by_default`), as for its own typed `/model`.
+CONFIG_SET_MODEL = "model"
+MODEL_PROVIDER_FLAG = "--provider"
+MODEL_SESSION_FLAG = "--session"
+
+
+def plain_word(value: object) -> str:
+    """`value` when it is one plain word a command line carries as one argument; "" otherwise.
+
+    It may not start with a dash of any kind (Unicode category Pd, `-` and the en and em dashes among them):
+    Hermes splits `/model`'s arguments on whitespace and reads a token that starts with `--`, or with one of
+    the dashes U+2012 to U+2015 before a flag word, as a flag.
+    """
+    if not isinstance(value, str) or not value or unicodedata.category(value[0]) == "Pd":
+        return ""
+    return value if all(char.isprintable() and not char.isspace() for char in value) else ""
+
+
+def model_switch_value(model: object, provider: object = "", session: bool = True) -> str:
+    """What `config.set model` takes to switch to `model` on `provider`: this session only with `session`.
+
+    Without it, Hermes' own rule decides whether the switch also persists, as
+    for `/model <name>` typed without `--session`. "" when the model, or a
+    provider that is given, is not one plain word.
+    """
+    name, slug = plain_word(model), plain_word(provider)
+    if not name or (provider and not slug):
+        return ""
+    words = [name, MODEL_PROVIDER_FLAG, slug] if slug else [name]
+    return " ".join([*words, MODEL_SESSION_FLAG] if session else words)
+
+
+def model_switch_parts(value: object) -> tuple[str, str] | None:
+    """The model and provider of a value `model_switch_value` made; None for any other value."""
+    words = value.split(" ") if isinstance(value, str) else []
+    session = bool(words) and words[-1] == MODEL_SESSION_FLAG
+    named = words[:-1] if session else words
+    if len(named) == 1:
+        parts = (named[0], "")
+    elif len(named) == 3 and named[1] == MODEL_PROVIDER_FLAG:
+        parts = (named[0], named[2])
+    else:
+        return None
+    built = model_switch_value(*parts, session=session)
+    return parts if built and built == value else None
 
 # Events whose envelope `session_id` is not the live session are dropped, except
 # these: they belong to the gateway, not to a session.
@@ -129,7 +223,11 @@ SUBAGENT_EVENTS = (
 APP_EVENTS = (
     "request.cancel", "approval.cancelled", "session.info", "session.usage", "connection.request", "error",
     "notification.show", "notification.clear", "session.title", "todo.updated", "review.summary",
-    "session.control.update",
+    "session.control.update", "background.complete", "btw.complete",
+    # Newer than 6c61c3e27d: `skills.changed` (a skill root moved; Ink refetches the catalog) and
+    # `session.replay_gap` (`gateway/session_events.py`, sent raw: the gateway dropped this viewer's subscription for
+    # falling behind and sends nothing more for the session until it resumes; Ink resumes it).
+    "skills.changed", "session.replay_gap",
 )
 TRANSCRIPT_EVENTS = (
     "message.start", "message.delta", "message.interim", "message.complete", "thinking.delta", "reasoning.delta",
@@ -140,8 +238,8 @@ HANDLED_EVENTS = frozenset((*APP_EVENTS, *TRANSCRIPT_EVENTS, *SUBAGENT_EVENTS))
 # The rest of the 77 event types Hermes 6c61c3e27d registers (`tui_gateway.contracts.registry.EVENTS`). The event
 # loop reads nothing from these; `gateway.ready` is read once, by the client at startup (`gateway.READY_EVENT`).
 UNREAD_EVENTS = frozenset({
-    "agent.terminal.output", "background.complete", "billing.step_up.verification", "bot_relay.outbox.pending",
-    "browser.controller.cancel", "browser.controller.command", "browser.progress", "btw.complete",
+    "agent.terminal.output", "billing.step_up.verification", "bot_relay.outbox.pending",
+    "browser.controller.cancel", "browser.controller.command", "browser.progress",
     "connection.update", "cron.changed", "display.install.done", "display.install.log", "display.lease",
     "display.status", "free_tier.challenge", "gateway.ready", "layout.apply", "message.reaction",
     "moa.aggregating", "notice",
@@ -162,16 +260,23 @@ UNREAD_EVENTS = frozenset({
 # `tool.complete` name the tool it reached, under the bridge call's own id.
 TOOL_CALL_BRIDGE = "tool_call"
 
-# Three kinds of output the gateway already writes to this client (`server._emit`), shown as Hermes' Ink TUI shows
+# The kinds of output the gateway already writes to this client (`server._emit`), shown as Hermes' Ink TUI shows
 # them (`ui-tui/src/app/createGatewayEventHandler.ts`); showing them sends nothing back.
 # `review.summary` (`contracts/events.py` ReviewSummaryPayload, `server.py` background_review_callback): `text`, what
 # the background review of the last turn saved to memory or skills, already worded by Hermes; a transcript line.
 REVIEW_SUMMARY_TEXT = "text"
+# `background.complete` / `btw.complete` (SideAgentCompletePayload, `gateway/session_tui_side.py`): the answer of a
+# `/bg` or `/btw` side agent, `text` (`error: <reason>` when it failed), its `task_id`, and for /btw the `question`.
+SIDE_ANSWER_EVENTS = frozenset({"background.complete", "btw.complete"})
+SIDE_ANSWER_TEXT = "text"
+SIDE_ANSWER_TASK = "task_id"
+SIDE_ANSWER_QUESTION = "question"
 # `session.control.update` (SessionControlUpdatePayload, `methods_session_control._publish_session_control_snapshot`):
 # `control` holds `goal`, `contracts/config_free_tier_control.py` GoalSnapshot or None. A goal row shows while its
 # `status` is one of GOAL_SHOWN_STATUSES (`ui-tui/src/app/goalStatus.ts::goalLine`), from `title`, `turns_used`,
 # `max_turns`, `paused_reason` and `wait_barrier` (`type` "until" with `until_at` epoch seconds, or "session" / "pid"
-# with `target`; both with `reason`).
+# with `target`; both with `reason`). When a shown goal turns `done`, its `created_at` (set at `/goal`) and
+# `updated_at` (Hermes' `last_turn_at`, the end of the judged turn), both epoch seconds, give its whole wall clock.
 SESSION_CONTROL = "control"
 CONTROL_GOAL = "goal"
 GOAL_TITLE = "title"
@@ -180,8 +285,11 @@ GOAL_TURNS_USED = "turns_used"
 GOAL_MAX_TURNS = "max_turns"
 GOAL_PAUSED_REASON = "paused_reason"
 GOAL_WAIT_BARRIER = "wait_barrier"
+GOAL_CREATED_AT = "created_at"
+GOAL_UPDATED_AT = "updated_at"
 GOAL_ACTIVE = "active"
 GOAL_PAUSED = "paused"
+GOAL_DONE = "done"
 GOAL_SHOWN_STATUSES = frozenset({GOAL_ACTIVE, GOAL_PAUSED})
 BARRIER_TYPE = "type"
 BARRIER_UNTIL = "until"
@@ -205,6 +313,9 @@ MOA_PHASE_AGGREGATOR = "aggregator"
 # `yolo` (bool) is this session's approvals off, `reasoning_effort` (str, "" when unset) its effort.
 SESSION_INFO_YOLO = "yolo"
 SESSION_INFO_REASONING_EFFORT = "reasoning_effort"
+# The level the session's route actually sends for that effort (`_session_info`'s `reasoning_effort_wire`, Hermes'
+# entry clamp: `ultra` sends `max` on a Claude or OpenAI-compatible route); "" for thinking off or an older Hermes.
+SESSION_INFO_REASONING_EFFORT_WIRE = "reasoning_effort_wire"
 # `config.get {key: "full"}` answers `{"config": _load_cfg()}` (`methods_config.py` `_CONFIG_GETTERS`): the user's
 # config.yaml as Hermes reads it. The effort lives at `agent.reasoning_effort` (str, `false`, or an `{enabled,
 # effort}` mapping), and `agent.reasoning_overrides` maps model names to their own (`resolve_reasoning_config`).
@@ -235,13 +346,37 @@ TAIL_AVAILABLE = "available"
 TAIL_TEXT = "text"
 TAIL_TRUNCATED = "truncated"
 
-# `session.steer`'s `status` (`contracts/sessions.py` `CorrectionStatus`; `redirected` is `session.redirect`'s
-# only). `queued` means the running turn took the text, or, while Hermes compresses the context, that Hermes
-# queued it as the next prompt (`tui_gateway/methods_session_interrupt.py`); the answer is the same for both.
-# `rejected` means the session is idle, or the agent refused it.
+# `session.transcript`'s result (`contracts/canonical_stored_reads.py` `StoredTranscriptResult`), read for a picker
+# row Hermes lists as not resumable: `rows` oldest first, each a display row (`role`, `text`); `next_cursor` is
+# non-null while older rows remain (order `latest`). A row too large for a page keeps only the head of its text and
+# carries `truncated`; the result itself has no such field.
+TRANSCRIPT_ROWS = "rows"
+# With `subagent_id` (`gateway/session_transcript_subagent.py`): `reset` true means the rows replace what the view
+# holds; `running` whether the child still runs; `available` false while it has no stored transcript.
+TRANSCRIPT_RESET = "reset"
+TRANSCRIPT_RUNNING = "running"
+TRANSCRIPT_AVAILABLE = "available"
+# The refusal the gateway child answers a `session.resume` with `lazy` on a shared gateway (whose resume refuses the
+# key, and whose plain resume would mount the child read-only, empty while it runs): code RESUME_LAZY_REFUSED and
+# this text as its message. The view falls back on it to `session.transcript`.
+RESUME_LAZY_REFUSED = 4001
+LAZY_WATCH_UNSUPPORTED = "lazy watch unsupported on the shared gateway"
+TRANSCRIPT_NEXT_CURSOR = "next_cursor"
+TRANSCRIPT_ROW_TRUNCATED = "truncated"
+
+# `session.redirect`'s and `session.steer`'s `status` (`contracts/sessions.py` `CorrectionStatus`;
+# `tui_gateway/methods_session_interrupt.py`, `agent/interrupt_control.py`). `redirected` is `session.redirect`'s
+# only: during a model request Hermes cancelled that request and retries it with the text as a user message, and
+# during a tool batch it holds the text for that batch's results, so the turn has it now either way. `queued` from
+# `session.steer` means the running turn holds the text until a tool batch ends or the next model call (when the
+# model is writing its final answer, until after the turn, as the next prompt); from either, while the turn is
+# still being built or Hermes compresses the context, it means Hermes queued the text as its next prompt (a stop
+# clears that queue). `rejected` means the session is idle, the model's answer completed first, or the agent
+# refused it.
 STEER_QUEUED = "queued"
+STEER_REDIRECTED = "redirected"
 STEER_REJECTED = "rejected"
-STEER_STATUSES = frozenset({STEER_QUEUED, "redirected", STEER_REJECTED})
+STEER_STATUSES = frozenset({STEER_QUEUED, STEER_REDIRECTED, STEER_REJECTED})
 
 # Environment the TUI removes before spawning the gateway. The sidecar URL makes
 # the gateway tee every event to a socket; the gateway URL is the launcher's
@@ -315,19 +450,39 @@ def call_problem(method: str, params: dict[str, object]) -> str:
     An undeclared key; a `prompt.submit` that truncates without both an int
     `truncate_before_row_id` and `confirm_truncate: true` (a rewind names the
     row the person picked and says so); a `config.set` that Hermes would apply
-    beyond one session (a key or a value outside `CONFIG_SET_VALUES`, or no session id);
+    beyond one session (a key or a value outside `CONFIG_SET_VALUES`, a model value
+    `model_switch_value` did not make, or no session id);
     or a `subagent.tail`, `subagent.interrupt` or `subagent.steer` that does
-    not name both a session and a subagent (a steer, its text too).
+    not name both a session and a subagent (a steer, its text too);
+    a `session.resume` whose `lazy` is not true or names no session; or a
+    `session.transcript` that sends a `cursor` without a `subagent_id`, or
+    a blank `subagent_id`.
     Hermes answers a tail without a subagent id as a rejected parameter
     (4000), which the client reads as drift and ends the session over.
     """
     undeclared = undeclared_params(method, params)
     if undeclared:
         return f"{method} does not declare {', '.join(undeclared)} in the gateway contract"
+    if method == "session.list" and "page" in params:
+        page = params["page"]
+        if not isinstance(page, str) or not page or len(params) != 1:
+            return "session.list page must be a nonempty token sent on its own"
     if method == "prompt.submit" and ("truncate_before_row_id" in params or "confirm_truncate" in params):
         row_id = params.get("truncate_before_row_id")
         if not isinstance(row_id, int) or isinstance(row_id, bool) or params.get("confirm_truncate") is not True:
             return "prompt.submit truncates only with an int truncate_before_row_id and confirm_truncate true"
+        return ""
+    if method == "session.resume" and "lazy" in params:
+        session_id = params.get("session_id")
+        if params["lazy"] is not True or not (isinstance(session_id, str) and session_id.strip()):
+            return "session.resume sends lazy only as true, with the child session id"
+        return ""
+    if method == "session.transcript" and ("subagent_id" in params or "cursor" in params):
+        subagent_id, cursor = params.get("subagent_id"), params.get("cursor", "")
+        if not (isinstance(subagent_id, str) and subagent_id.strip()):
+            return "session.transcript sends a cursor only with the subagent_id it reads"
+        if not isinstance(cursor, str):
+            return "session.transcript takes the cursor as the string the last answer named"
         return ""
     if method == "shell.exec":
         command = params.get("command")
@@ -340,9 +495,14 @@ def call_problem(method: str, params: dict[str, object]) -> str:
         return ""
     key, value, session_id = params.get("key"), params.get("value"), params.get("session_id")
     allowed = CONFIG_SET_VALUES.get(key) if isinstance(key, str) else None
-    if allowed is None:
+    if "confirm_expensive_model" in params and (key != CONFIG_SET_MODEL or params["confirm_expensive_model"] is not True):
+        return "config.set sends confirm_expensive_model only as true, and only with a model"
+    if key == CONFIG_SET_MODEL:
+        if model_switch_parts(value) is None:
+            return f"config.set model takes only a model_switch_value, not {value!r}"
+    elif allowed is None:
         return f"config.set does not declare the key {key!r} in the gateway contract"
-    if not isinstance(value, str) or value not in allowed:
+    elif not isinstance(value, str) or value not in allowed:
         return f"config.set does not declare the value {value!r} for {key} in the gateway contract"
     if not isinstance(session_id, str) or not session_id:
         return f"config.set {key} needs a session id: without one Hermes writes beyond the session"

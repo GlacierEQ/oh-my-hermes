@@ -25,6 +25,7 @@ from _platform_support import requires_hermes_host, requires_posix, requires_sym
 load_local_package()
 
 from _legacy_display import brand_legacy_home, seed_legacy_skins, seed_legacy_widget
+from omh.commands import chat as _chat_module
 from omh.commands import setup as _setup_module
 from omh.config_adapter import external_dirs
 from omh.paths import resolve_paths
@@ -41,6 +42,7 @@ from omh.install.plugin_pack import (
 from omh.plugin_bundle.omh.tools import evidence_tool
 from omh.plugin_bundle.omh.metadata import PROVIDED_HOOKS, PROVIDED_TOOLS, TOOL_FILE_STEMS
 from omh.release_smoke_core import CommandResult
+from omh.version import __version__
 from _module_patch import patch_modules
 
 
@@ -503,7 +505,10 @@ class PluginDistributionTests(unittest.TestCase):
             )
 
             self.assertFalse(observation["observed"])
-            self.assertEqual(observation["reason"], "hermes_not_installed")
+            # A4 names the precise reason for an explicit interpreter that
+            # does not exist; genuine absence (no override, launcher or legacy
+            # venv) still reports hermes_not_installed.
+            self.assertEqual(observation["reason"], "hermes_python_override_missing")
 
     def test_real_loader_observation_uses_isolated_home(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -587,7 +592,7 @@ class PluginDistributionTests(unittest.TestCase):
     def test_hermes_code_root_falls_back_to_root_tree_for_a_profile_home(self) -> None:
         with TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HERMES_PYTHON": ""}):
             root = Path(tmp) / ".hermes"
-            profile = root / "profiles" / "miku"
+            profile = root / "profiles" / "mbot"
             profile.mkdir(parents=True)
             root_tree = _write_fake_hermes_code_tree(root / "hermes-agent", version="0.21.5")
 
@@ -1141,6 +1146,10 @@ print(json.dumps(observed, ensure_ascii=False))
             self.assertEqual(
                 plugin["registered_tools"],
                 [
+                    "lsp_definition",
+                    "lsp_diagnostics",
+                    "lsp_references",
+                    "lsp_rename",
                     "omh_agent_board",
                     "omh_capabilities",
                     "omh_context",
@@ -1154,6 +1163,7 @@ print(json.dumps(observed, ensure_ascii=False))
                     "omh_jev_ask",
                     "omh_loop",
                     "omh_memory",
+                    "omh_omher_terminal",
                     "omh_probe",
                     "omh_recommend",
                     "omh_resume",
@@ -1172,7 +1182,9 @@ print(json.dumps(observed, ensure_ascii=False))
                 [
                     "on_session_end",
                     "on_session_start",
+                    "post_api_request",
                     "post_tool_call",
+                    "pre_gateway_dispatch",
                     "pre_llm_call",
                     "pre_tool_call",
                     "pre_verify",
@@ -1949,6 +1961,51 @@ class PluginReinstallSafetyTests(unittest.TestCase):
                     self.assertEqual(extra.read_bytes(), b"user-owned content\n")
                     extra.unlink()
 
+    def _age_manifest(self) -> str:
+        manifest_path = self.target / PLUGIN_MANAGED_MANIFEST
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["installed_at"] = "2026-10-30T02:00:00Z"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        return manifest["installed_at"]
+
+    def test_an_unchanged_bundle_is_neither_rewritten_nor_restamped(self) -> None:
+        # Every update used to rewrite the bundle and restamp `installed_at`,
+        # so the gateway restart hint fired after updates that changed nothing.
+        installed_at = self._age_manifest()
+        before = (self.target / "__init__.py").stat()
+        result = install_plugin_bundle(self.paths)
+        self.assertFalse(result["changed"])
+        self.assertFalse(result["bundle_files_changed"])
+        manifest = json.loads((self.target / PLUGIN_MANAGED_MANIFEST).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["installed_at"], installed_at)
+        self.assertEqual((self.target / "__init__.py").stat().st_ino, before.st_ino)
+
+    def test_a_moved_package_site_rewrites_only_the_manifest(self) -> None:
+        installed_at = self._age_manifest()
+        before = (self.target / "__init__.py").stat()
+        site = {"path": str(self.root / "generations" / "next" / "venv" / "site-packages"), "version": __version__}
+        with mock.patch("omh.install.plugin_pack.package_site_record", return_value=site):
+            result = install_plugin_bundle(self.paths)
+            current = inspect_plugin_bundle(self.paths)["plugin_manifest_current"]
+        self.assertTrue(result["changed"])
+        self.assertFalse(result["bundle_files_changed"])
+        manifest = json.loads((self.target / PLUGIN_MANAGED_MANIFEST).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["package_site"], site)
+        self.assertEqual(manifest["installed_at"], installed_at)
+        self.assertEqual((self.target / "__init__.py").stat().st_ino, before.st_ino)
+        self.assertTrue(current)
+
+    def test_a_manifest_rewrite_a_crash_left_behind_does_not_block_an_update(self) -> None:
+        # A `package_site` move rewrites the manifest in place through
+        # `atomic_write_json`; a crash mid-write leaves its staging file.
+        leftover = self.target / f".{PLUGIN_MANAGED_MANIFEST}.4242-0123456789abcdef.tmp"
+        leftover.write_text("{", encoding="utf-8")
+        install_plugin_bundle(self.paths)
+        lookalike = self.target / "notes.tmp"
+        lookalike.write_text("user data", encoding="utf-8")
+        with self.assertRaisesRegex(PluginPackError, "notes.tmp"):
+            install_plugin_bundle(self.paths)
+
     def test_a_new_bundled_path_is_not_owned_by_the_old_manifest(self) -> None:
         manifest_path = self.target / PLUGIN_MANAGED_MANIFEST
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -2054,6 +2111,56 @@ class PluginReinstallSafetyTests(unittest.TestCase):
                 self.assertIsInstance(cache_name, str)
                 self.assertTrue(Path(cache_name).is_file())
                 self.assertTrue(install_plugin_bundle(self.paths)["register_smoke"])
+
+    def _pytest_cache(self, module: str = "__init__", version: str = "9.2.0") -> Path:
+        """A cache named and written the way pytest's assertion rewriting does: a checked-hash pyc under its own tag."""
+        import py_compile
+
+        plain = Path(py_compile.compile(
+            str(self.target / f"{module}.py"), doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.CHECKED_HASH,
+        ))
+        cache = plain.with_name(f"{module}.{sys.implementation.cache_tag}-pytest-{version}.pyc")
+        plain.replace(cache)
+        return cache
+
+    def test_pytest_rewritten_bytecode_does_not_block_reinstall(self) -> None:
+        # The bundle ships `test_expectation_check.py`, a name pytest's rewriting matches, so a pytest run that
+        # imports the installed plugin leaves `<module>.<tag>-pytest-<version>.pyc` beside it.
+        for version in ("9.2.0", "10.0.0.dev3+g1a2b3c4"):
+            with self.subTest(version=version):
+                cache = self._pytest_cache("test_expectation_check", version)
+                self.assertTrue(cache.is_file())
+                result = install_plugin_bundle(self.paths)
+                self.assertFalse(result["changed"])
+                self.assertTrue(result["register_smoke"])
+                cache.unlink()
+
+    def test_pytest_named_counterfeits_are_preserved(self) -> None:
+        cache = self._pytest_cache()
+        valid = cache.read_bytes()
+        version = int.from_bytes(importlib.util.MAGIC_NUMBER[:2], "little")
+        cases = {
+            # The name alone owns nothing: the bytes still have to be one code object.
+            cache.name: valid + b"private trailing data",
+            # A foreign magic under this interpreter's own tag, pytest suffix or not.
+            f"__init__.{sys.implementation.cache_tag}-pytest-9.2.1.pyc":
+                (version - 1).to_bytes(2, "little") + b"\r\n" + b"\0" * 12 + b"private user data",
+            # Valid bytecode, but for a source the bundle does not ship.
+            f"private.{sys.implementation.cache_tag}-pytest-9.2.0.pyc": valid,
+            # Dotted names that are not pytest's: a version that is no version, a dot inside the interpreter tag.
+            f"__init__.{sys.implementation.cache_tag}-pytest-a.b.c.pyc": valid,
+            "__init__.c.python-pytest-9.2.0.pyc": valid,
+        }
+        cache.unlink()
+        for name, payload in cases.items():
+            with self.subTest(name=name):
+                counterfeit = self.target / "__pycache__" / name
+                counterfeit.write_bytes(payload)
+                with self.assertRaisesRegex(PluginPackError, "unmanaged plugin entries"):
+                    install_plugin_bundle(self.paths)
+                self.assertEqual(counterfeit.read_bytes(), payload)
+                counterfeit.unlink()
 
     def test_first_install_refuses_competing_catalog_tree_arriving_during_staging(self) -> None:
         from omh.install import plugin_pack as plugin_pack_module
@@ -2173,7 +2280,19 @@ class PluginReinstallSafetyTests(unittest.TestCase):
         self.assertFalse((self.target / PLUGIN_MANAGED_MANIFEST).exists())
         self.assertEqual({entry.name for entry in self.target.parent.iterdir()}, {"omh", ".install-metadata.json"})
 
+    def _bundle_change_pending(self) -> None:
+        # An unchanged bundle is no longer staged at all, so the staging guards
+        # below need a refresh that really writes: a managed file the new
+        # bundle no longer ships.
+        obsolete = self.target / "obsolete.py"
+        obsolete.write_bytes(b"# previously shipped\n")
+        manifest_path = self.target / PLUGIN_MANAGED_MANIFEST
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["files"].append({"path": obsolete.name, "sha256": hashlib.sha256(obsolete.read_bytes()).hexdigest()})
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
     def test_addition_during_staging_is_restored_without_replacing_bundle(self) -> None:
+        self._bundle_change_pending()
         from omh.install import plugin_pack as plugin_pack_module
 
         original_copy = plugin_pack_module._copy_resource_tree
@@ -2194,6 +2313,7 @@ class PluginReinstallSafetyTests(unittest.TestCase):
         self.assertEqual({entry.name for entry in self.target.parent.iterdir()}, {"omh"})
 
     def test_managed_edit_during_staging_is_restored_without_replacing_bundle(self) -> None:
+        self._bundle_change_pending()
         from omh.install import plugin_pack as plugin_pack_module
 
         original_copy = plugin_pack_module._copy_resource_tree
@@ -2236,6 +2356,7 @@ class PluginReinstallSafetyTests(unittest.TestCase):
                     )
 
     def test_failed_rollback_keeps_original_in_private_transaction(self) -> None:
+        self._bundle_change_pending()
         original = (self.target / PLUGIN_MANAGED_MANIFEST).read_bytes()
         real_rename = Path.rename
         backups = []
@@ -2479,11 +2600,12 @@ class SymlinkedPluginDirectoryTests(unittest.TestCase):
             self.assertEqual(os.readlink(stale), str(root / ".hermes" / "gone"))
             self.assertTrue((bundle / "memory_provider.py").is_file())
 
-    def test_a_dangling_plugin_link_is_kept_without_force(self) -> None:
-        # `Path.exists` follows the link, so a dangling one reads as absent.
-        # Without the link-aware ownership guard the replacement path runs on
-        # a link OMH cannot prove it wrote, and the operator's pointer is gone
-        # with a clean exit code. It has to be kept and named instead.
+    def test_a_dangling_plugin_link_is_repaired_without_force_and_named(self) -> None:
+        # `Path.exists` follows the link, so a dangling one reads as absent;
+        # the guard still sees it. A link whose target is gone holds nothing
+        # anyone owns, so update replaces it without --force (2026-11-04: four
+        # such links refused every update and rolled it back). The pointer is
+        # not dropped silently: the result names where it pointed.
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             base = ["--omh-home", str(root / ".omh"), "--hermes-home", str(root / ".hermes")]
@@ -2495,15 +2617,43 @@ class SymlinkedPluginDirectoryTests(unittest.TestCase):
             self.assertFalse(bundle.exists())
 
             status, stdout, stderr = run_cli(base + ["update"])
-            self.assertEqual(status, 1, stderr)
+            self.assertEqual(status, 0, stderr)
             payload = json.loads(stdout)
-            self.assertEqual(payload["status"], "partial")
-            self.assertEqual(payload["failures"][0]["phase"], "registration")
-            self.assertIn("registration failed", payload["failures"][0]["error"])
+            self.assertEqual(payload["status"], "ok")
+            self.assertFalse(bundle.is_symlink())
+            self.assertTrue((bundle / PLUGIN_MANAGED_MANIFEST).is_file())
+            self.assertNotIn("use --force to replace it", stdout + stderr)
+
+    def test_a_dangling_link_is_named_without_the_windows_extended_prefix(self) -> None:
+        # Windows CI read the link back as `\\?\C:\...`; the repair line names
+        # the path a person would type.
+        from omh.install import plugin_pack
+
+        with TemporaryDirectory() as tmp:
+            link = Path(tmp) / "omh"
+            link.symlink_to(Path(tmp) / "gone", target_is_directory=True)
+            for raw, shown in (
+                ("\\\\?\\C:\\gone\\omh", "C:\\gone\\omh"),
+                ("\\\\?\\UNC\\srv\\share\\omh", "\\\\srv\\share\\omh"),
+                ("/home/me/gone/omh", "/home/me/gone/omh"),
+            ):
+                with self.subTest(raw=raw), mock.patch.object(plugin_pack.os, "readlink", return_value=raw):
+                    self.assertEqual(plugin_pack._dangling_link_target(link), shown)
+
+    def test_a_link_to_a_live_unmanaged_tree_is_still_kept_without_force(self) -> None:
+        # Only a dangling link is repaired; a link to files OMH did not write
+        # may hold someone's plugin and still needs --force.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            omh_home, hermes_home = root / ".omh", root / ".hermes"
+            status, _, stderr = run_cli(["--omh-home", str(omh_home), "--hermes-home", str(hermes_home), "setup"])
+            self.assertEqual(status, 0, stderr)
+            bundle, shared = self._link_bundle_to_shared(root)
+            (shared / PLUGIN_MANAGED_MANIFEST).unlink()
+            with self.assertRaisesRegex(PluginPackError, "use --force to replace it"):
+                install_plugin_bundle(resolve_paths(omh_home, hermes_home))
             self.assertTrue(bundle.is_symlink())
-            self.assertFalse(shared.exists())
-            self.assertEqual(os.readlink(bundle), str(shared))
-            self.assertIn("use --force to replace it", stdout + stderr)
+            self.assertTrue(shared.is_dir())
 
     def test_a_dangling_plugin_link_is_replaced_with_force(self) -> None:
         # The other half of that guard, and the reason the replacement asks
@@ -2767,10 +2917,12 @@ class HermesProfileSyncTests(unittest.TestCase):
     def _profile(self, root: Path, name: str) -> Path:
         profile = root / ".hermes" / "profiles" / name
         profile.mkdir(parents=True, exist_ok=True)
+        # A real named profile has host identity; an empty shell is ignored.
+        (profile / "SOUL.md").write_text("Profile identity\n", encoding="utf-8")
         return profile
 
     @contextmanager
-    def _managed_install(self, current: Path):
+    def _managed_install(self, current: Path, *, pack: Path | None = None):
         """What a managed command install looks like to the setup module.
 
         Only the probes a test process cannot answer truthfully are stubbed
@@ -2784,27 +2936,26 @@ class HermesProfileSyncTests(unittest.TestCase):
         home pass (the first fix did exactly that). The self-update plan is
         pinned off because a managed runtime is exactly what would otherwise
         send `omh update` into the staged command package transaction, which
-        is not what these tests exercise.
+        is not what these tests exercise. `pack` is the running generation's
+        own pack when it is not the pointer itself, as on a real install,
+        where the pointer is `<root>/current/skills` and the pack
+        `<root>/generations/<id>/skills`. `omh chat --auto-apply-target-change`
+        reads the pointer and the verdict through its own bindings, so they
+        are stubbed there too.
         """
+        runtime = {"managed": True, "reason": "", "python": sys.executable, "venv_dir": str(current.parent)}
         with (
             mock.patch.object(
                 _setup_module, "managed_current_workflow_pack_dir", return_value=current
             ),
+            mock.patch.object(_chat_module, "managed_current_workflow_pack_dir", return_value=current),
+            mock.patch.object(_chat_module, "managed_command_runtime", return_value=runtime),
             mock.patch.object(
                 sys.modules[resolve_paths.__module__],
                 "managed_workflow_pack_dir",
-                return_value=current,
+                return_value=pack or current,
             ),
-            mock.patch.object(
-                _setup_module,
-                "_managed_command_runtime",
-                return_value={
-                    "managed": True,
-                    "reason": "",
-                    "python": sys.executable,
-                    "venv_dir": str(current.parent),
-                },
-            ),
+            mock.patch.object(_setup_module, "_managed_command_runtime", return_value=runtime),
             mock.patch.object(
                 _setup_module,
                 "_command_package_self_update_plan",
@@ -3080,6 +3231,234 @@ class HermesProfileSyncTests(unittest.TestCase):
                 [own_dir, generation.as_posix()],
             )
 
+    def _generation_layout(self, root: Path) -> tuple[Path, Path, Path, Path]:
+        """The managed command root: the shared pointer and three generations' packs, one gone."""
+        managed = (root / "managed").resolve()
+        pointer = managed / "current" / "skills"
+        pointer.mkdir(parents=True)
+        first, second = (managed / "generations" / name / "skills" for name in ("20261025", "20261027"))
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        return pointer, first, second, managed / "generations" / "20260925" / "skills"
+
+    def test_setup_registers_the_pointer_and_never_the_running_generation(self) -> None:
+        # The targets step after the registration used to append
+        # `paths.skills_dir`, which on a managed command is the running
+        # generation's own pack. Beside the pointer that is the same files
+        # only until the next update moves the pointer; from then on every
+        # OMH skill resolves to two files and Hermes lists none of them.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._profile(root, "kami")
+            pointer, first, _second, _gone = self._generation_layout(root)
+
+            with self._managed_install(pointer, pack=first):
+                status, stdout, stderr = run_cli(self._base(root) + ["setup", "--json"], output_json=False)
+
+            self.assertEqual((status, stderr), (0, ""))
+            self.assertFalse(json.loads(stdout)["steps"]["targets"]["config_changed"])
+            for config in (root / ".hermes" / "config.yaml", root / ".hermes" / "profiles" / "kami" / "config.yaml"):
+                self.assertEqual(external_dirs(config.read_text(encoding="utf-8")), [pointer.as_posix()], config)
+
+    def test_update_retires_every_generation_pack_beside_the_pointer(self) -> None:
+        # The shape a home carries after the old targets step ran across two
+        # updates: the pointer, the generation it pointed at then (still on
+        # disk), and one already garbage-collected. The next update from a
+        # newer generation leaves the pointer alone, in the primary home and
+        # in every bot profile, and keeps the directory the person added.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._profile(root, "kami")
+            pointer, first, second, gone = self._generation_layout(root)
+            with self._managed_install(pointer, pack=first):
+                status, _, stderr = run_cli(self._base(root) + ["setup"], output_json=False)
+            self.assertEqual(status, 0, stderr)
+            own_dir = (root / "my-skills").resolve().as_posix()
+            stale = [gone.as_posix(), f"{first.as_posix()}/"]
+            configs = (root / ".hermes" / "config.yaml", root / ".hermes" / "profiles" / "kami" / "config.yaml")
+            for config in configs:
+                listed = "".join(f"    - {entry}\n" for entry in (own_dir, pointer.as_posix(), *stale))
+                config.write_text(
+                    config.read_text(encoding="utf-8").replace(f"    - {pointer.as_posix()}\n", listed),
+                    encoding="utf-8",
+                    newline="",
+                )
+                self.assertEqual(external_dirs(config.read_text(encoding="utf-8")), [own_dir, pointer.as_posix(), *stale])
+
+            with self._managed_install(pointer, pack=second):
+                status, stdout, stderr = run_cli(self._base(root) + ["update"], output_json=False)
+
+            self.assertEqual(status, 0, stderr)
+            for config in configs:
+                self.assertEqual(external_dirs(config.read_text(encoding="utf-8")), [own_dir, pointer.as_posix()], config)
+            self.assertIn("Bot profile kami: registration migrated from", stdout)
+            # The post-check re-reads every home and finds nothing to name.
+            self.assertNotIn("OMH-managed skills directories", stdout)
+
+    def test_chat_target_auto_apply_registers_the_pointer_too(self) -> None:
+        # The second writer of the same registration: `omh chat ...
+        # --auto-apply-target-change` registers the skills directory in the
+        # Hermes home the event names, and used `paths.skills_dir` as well.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pointer, first, _second, _gone = self._generation_layout(root)
+            other_home = root / ".hermes-b"
+            event = root / "event.json"
+            event.write_text(
+                json.dumps(
+                    {
+                        "message": {"id": "m1", "content": "status", "channel": "c1"},
+                        "agent": {"id": "agent-b"},
+                        "runtime": {"hermes_home": str(other_home), "agent_count": 2},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self._managed_install(pointer, pack=first):
+                status, stdout, stderr = run_cli(
+                    self._base(root)
+                    + ["chat", "interact", "--source", "discord", "--event-json", str(event), "--auto-apply-target-change"]
+                )
+
+            self.assertEqual((status, stderr), (0, ""))
+            self.assertEqual(json.loads(stdout)["target_notice"]["action"], "target_change_applied")
+            self.assertEqual(
+                external_dirs((other_home / "config.yaml").read_text(encoding="utf-8")), [pointer.as_posix()]
+            )
+
+    def test_a_primary_home_naming_only_an_older_generation_is_registered_not_opted_out(self) -> None:
+        # The primary twin of the profile case below: both homes read one
+        # predicate, so a primary left on an older generation's pack is moved
+        # to the pointer instead of being read as the deliberate opt-out --
+        # which kept the pack until it was garbage-collected and Hermes then
+        # listed no OMH skill at all.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pointer, first, second, _gone = self._generation_layout(root)
+            with self._managed_install(pointer, pack=first):
+                status, _, stderr = run_cli(self._base(root) + ["setup"], output_json=False)
+            self.assertEqual(status, 0, stderr)
+            config = root / ".hermes" / "config.yaml"
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(pointer.as_posix(), first.as_posix()),
+                encoding="utf-8",
+                newline="",
+            )
+            self.assertEqual(external_dirs(config.read_text(encoding="utf-8")), [first.as_posix()])
+
+            with self._managed_install(pointer, pack=second):
+                status, stdout, stderr = run_cli(self._base(root) + ["update"], output_json=False)
+
+            self.assertEqual(status, 0, stderr)
+            self.assertEqual(external_dirs(config.read_text(encoding="utf-8")), [pointer.as_posix()])
+            self.assertIn(f"Hermes registration migrated from {first.as_posix()} to {pointer.as_posix()}.", stdout)
+
+    def test_an_unmanaged_command_leaves_a_profile_on_an_older_generation_alone(self) -> None:
+        # Only the command that retires a generation's pack counts it as a
+        # registration. An unmanaged command would add its own path beside
+        # the pack, so the profile keeps its one loadable directory instead.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile = self._profile(root, "kami")
+            status, _, stderr = run_cli(self._base(root) + ["setup"])
+            self.assertEqual(status, 0, stderr)
+            pointer, first, _second, _gone = self._generation_layout(root)
+            own_path = (root / ".omh" / "skills").resolve().as_posix()
+            config = profile / "config.yaml"
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(own_path, first.as_posix()),
+                encoding="utf-8",
+                newline="",
+            )
+            before = config.read_text(encoding="utf-8")
+            self.assertEqual(external_dirs(before), [first.as_posix()])
+
+            with mock.patch.object(_setup_module, "managed_current_workflow_pack_dir", return_value=pointer):
+                self.assertFalse(_setup_module._managed_command_runtime()["managed"])
+                status, stdout, stderr = run_cli(self._base(root) + ["update"], output_json=False)
+
+            self.assertEqual(status, 0, stderr)
+            self.assertIn("Bot profiles: kami (left unregistered)", stdout)
+            self.assertEqual(config.read_text(encoding="utf-8"), before)
+
+    def test_a_profile_naming_only_an_older_generation_is_registered_not_opted_out(self) -> None:
+        # A generation's pack is an OMH-managed directory like the other
+        # two: a profile left on one is moved to the pointer, not frozen as
+        # the deliberate opt-out. Unregistering takes it out as well.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            profile = self._profile(root, "kami")
+            pointer, first, second, _gone = self._generation_layout(root)
+            with self._managed_install(pointer, pack=first):
+                status, _, stderr = run_cli(self._base(root) + ["setup"], output_json=False)
+            self.assertEqual(status, 0, stderr)
+            config = profile / "config.yaml"
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(pointer.as_posix(), first.as_posix()),
+                encoding="utf-8",
+                newline="",
+            )
+
+            with self._managed_install(pointer, pack=second):
+                status, stdout, stderr = run_cli(self._base(root) + ["update"], output_json=False)
+
+            self.assertEqual(status, 0, stderr)
+            self.assertIn("Bot profiles: kami (refreshed)", stdout)
+            self.assertEqual(external_dirs(config.read_text(encoding="utf-8")), [pointer.as_posix()])
+
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    f"    - {pointer.as_posix()}\n", f"    - {pointer.as_posix()}\n    - {first.as_posix()}\n"
+                ),
+                encoding="utf-8",
+                newline="",
+            )
+            with self._managed_install(pointer, pack=second):
+                status, _, stderr = run_cli(
+                    ["--omh-home", str(root / ".omh"), "--hermes-home", str(profile), "uninstall", "--registration-only"]
+                )
+            self.assertEqual(status, 0, stderr)
+            self.assertEqual(external_dirs(config.read_text(encoding="utf-8")), [])
+
+    def test_a_profile_entry_is_read_from_the_profile_s_own_home(self) -> None:
+        # Each profile names its older directory relative to its own home:
+        # `kami` an older generation's pack, `nori` the pre-pointer copy.
+        # Read from the primary's home or the cwd they name nothing, so the
+        # registered predicate, the migration and the post-check must all
+        # read them from the profile; both end on the pointer alone.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            kami = self._profile(root, "kami")
+            nori = self._profile(root, "nori")
+            pointer, first, second, _gone = self._generation_layout(root)
+            older_copy = root / ".omh" / "skills"
+            older_copy.mkdir(parents=True, exist_ok=True)
+            with self._managed_install(pointer, pack=first):
+                status, _, stderr = run_cli(self._base(root) + ["setup"], output_json=False)
+            self.assertEqual(status, 0, stderr)
+            for profile, older in ((kami, first), (nori, older_copy)):
+                # From the resolved paths on both sides: `relpath` across the
+                # macOS `/var` alias would climb out of the wrong prefix.
+                relative = Path(os.path.relpath(older.resolve(), profile.resolve())).as_posix()
+                (profile / "config.yaml").write_text(
+                    (profile / "config.yaml").read_text(encoding="utf-8").replace(pointer.as_posix(), relative),
+                    encoding="utf-8",
+                    newline="",
+                )
+                self.assertEqual(external_dirs((profile / "config.yaml").read_text(encoding="utf-8")), [relative])
+
+            with self._managed_install(pointer, pack=second):
+                status, stdout, stderr = run_cli(self._base(root) + ["update"], output_json=False)
+
+            self.assertEqual(status, 0, stderr)
+            self.assertIn("kami (refreshed)", stdout)
+            self.assertIn("nori (refreshed)", stdout)
+            for profile in (kami, nori):
+                self.assertEqual(
+                    external_dirs((profile / "config.yaml").read_text(encoding="utf-8")), [pointer.as_posix()], profile
+                )
+            self.assertNotIn("OMH-managed skills directories", stdout)
+
     @requires_symlinks
     def test_an_older_entry_spelled_through_a_link_is_retired_too(self) -> None:
         # Retirement matches by real path, the way Hermes resolves entries
@@ -3154,7 +3533,7 @@ class HermesProfileSyncTests(unittest.TestCase):
         # removal reads the same set. Removing today's path alone left the
         # older entry in place, so the opt-out never took: the profile kept
         # its plugin directory AND a live registration, and the next update
-        # refreshed it again. This is the miku shape — the one install this
+        # refreshed it again. This is the mbot shape — the one install this
         # whole change targets — so the opt-out has to be reachable on it.
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3350,6 +3729,61 @@ class HermesProfileSyncTests(unittest.TestCase):
             # surface; it does not any more, so there is nothing to judge.
             self.assertNotIn("OMH TUI:", stdout)
 
+    def test_bench_profiles_linked_to_deleted_worktrees_are_repaired_by_update(self) -> None:
+        # The 2026-11-04 shape: bench profiles whose `plugins/omh` was a link
+        # into a worktree that was later deleted. Each refused the update, the
+        # profile failures rolled the staged update back, and the restore
+        # failed on the same links on every later run.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worktrees = root / "oh-my-hermes-worktrees"
+            gone = {
+                "dapbench": worktrees / "dap-nav" / "src" / "plugin_bundle" / "omh",
+                "dapbenchp": worktrees / "dap-nav" / "src" / "plugin_bundle" / "omh",
+                "lspbench": worktrees / "lsp-nav" / "src" / "plugin_bundle" / "omh",
+                "lspbenchp": worktrees / "lsp-nav" / "src" / "plugin_bundle" / "omh",
+            }
+            for name in (*gone, "kami"):
+                self._profile(root, name)
+            status, _, stderr = run_cli(self._base(root) + ["setup"])
+            self.assertEqual(status, 0, stderr)
+            for name, target in gone.items():
+                plugin = root / ".hermes" / "profiles" / name / "plugins" / "omh"
+                shutil.rmtree(plugin)
+                plugin.symlink_to(target, target_is_directory=True)
+                self.assertFalse(plugin.exists())
+
+            status, stdout, stderr = run_cli(self._base(root) + ["update"], output_json=False)
+
+            self.assertEqual(status, 0, stdout + stderr)
+            self.assertNotIn("exists without an OMH plugin manifest", stdout + stderr)
+            self.assertNotIn("(failed)", stdout)
+            for name, target in gone.items():
+                with self.subTest(profile=name):
+                    plugin = root / ".hermes" / "profiles" / name / "plugins" / "omh"
+                    self.assertFalse(plugin.is_symlink())
+                    self.assertTrue((plugin / PLUGIN_MANAGED_MANIFEST).is_file())
+                    self.assertIn(
+                        f"Repaired bot profile {name}: its plugins/omh linked to {target}, which no longer exists; "
+                        "it now holds the released OMH plugin bundle.",
+                        stdout,
+                    )
+
+    def test_a_profile_dangling_link_repair_is_recorded_in_json(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self._profile(root, "dapbench")
+            run_cli(self._base(root) + ["setup"])
+            plugin = root / ".hermes" / "profiles" / "dapbench" / "plugins" / "omh"
+            shutil.rmtree(plugin)
+            target = root / "deleted-worktree" / "src" / "plugin_bundle" / "omh"
+            plugin.symlink_to(target, target_is_directory=True)
+            status, stdout, stderr = run_cli(self._base(root) + ["update", "--json"], output_json=False)
+            self.assertEqual(status, 0, stderr)
+            rows = {row["profile"]: row for row in json.loads(stdout)["hermes_profiles"]}
+            self.assertEqual(rows["dapbench"]["replaced_dangling_link"], str(target))
+            self.assertNotEqual(rows["dapbench"]["status"], "failed")
+
     def test_a_home_without_profiles_reports_no_profile_rows(self) -> None:
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -3373,6 +3807,8 @@ class HermesProfileUninstallTests(unittest.TestCase):
     def _profile(self, root: Path, name: str) -> Path:
         profile = root / ".hermes" / "profiles" / name
         profile.mkdir(parents=True, exist_ok=True)
+        # A real named profile has host identity; an empty shell is ignored.
+        (profile / "SOUL.md").write_text("Profile identity\n", encoding="utf-8")
         return profile
 
     def _skills_dir(self, root: Path) -> str:

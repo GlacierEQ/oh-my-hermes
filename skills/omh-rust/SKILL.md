@@ -15,51 +15,18 @@ metadata:
 
 # Rust
 
-This is a Hermes-native `rust` workflow skill.
+Required: the crate, module, or function being changed, whether the change touches `unsafe`, raw pointers, FFI, `MaybeUninit`, or a lock-free primitive, the crate's edition, MSRV, and async runtime when relevant, existing error type and public API stability constraints, the gate commands the repository already runs, observed compiler, clippy, test, and Miri/sanitizer evidence for completion claims. Output: rust_change_contract/v1, ownership_shape/v1, error_and_api_contract/v1, rust_gate_list/v1, ub_escalation_verdict/v1, ub_discipline_checklist/v1 when the escalation triggers, observed_rust_gate_evidence/v1 when observed.
 
 ## Why This Exists
 
 `rust` closes OMH's zero-coverage Rust domain and makes the escalation from ordinary Rust work to undefined-behavior discipline a deterministic routing rule rather than something a model is trusted to notice.
 
-## Do Not Use When
-
-- The request is a server, API, or schema design that happens to mention a Rust stack; use `omh-backend` for the contract and name Rust as the stack.
-- The request is debugging a stripped or source-less native binary; use `omh-native-debugging`.
-- The request is a general code review of finished Rust; use `omh-code-review`.
-- The request is a Rust vocabulary or concept question with no change to prepare; answer it directly.
-
-## Examples
-
-Good example:
-
-- Prompt: Rewrite this parser in Rust and fix the borrow checker errors.
-- Expected behavior: Prepare rust_change_contract/v1 with the escalation verdict, ownership_shape/v1 for the parser's borrows, error_and_api_contract/v1, and rust_gate_list/v1.
-- Why: The request is a Rust change whose difficulty is ownership shape, which is exactly what the contract has to settle before code.
-
-Bad example:
-
-- Prompt: It compiles and the unsafe block looks fine, so call the FFI wrapper safe.
-- Expected behavior: Escalate on the `unsafe`/FFI trigger, mark Miri and sanitizer evidence as not_observed, and name them as blocking items.
-- Why: Compilation proves nothing about the invariant an `unsafe` block asserts, and the escalation is not optional.
-
-## Completion Checklist
-
-- The escalation verdict is stated with the trigger that decided it.
-- The ownership shape names owners, borrows across boundaries, and every deliberate clone.
-- The error type, its conversion boundary, and every surviving `unwrap`/`expect`/`panic!` are named.
-- The gate list names the exact commands the executor must run and pass.
-- An escalated change carries the Miri, sanitizer, and concurrency-testing requirements as blocking items.
-- Compiler, clippy, test, Miri, sanitizer, and loom results stay observed-only.
-
-## Recovery Notes
-
-- If the crate cannot be inspected, escalate by default and say the verdict is conservative rather than measured.
-- If the toolchain cannot run Miri or a sanitizer for the escalated change, keep the change blocked and name the smallest substitute proof instead of downgrading the verdict.
+Contract: `references/full-contract.md` (examples, sibling boundaries, full artifact details).
 
 ## Workflow Lane
 
-- Current lane: **Coding handoff** (`idea-to-deploy`, `llm-app-dev`, `cto-loop`, `deploy-and-monitor`, `code-review`, `build-failure-triage`, `verification-gate`, `security-safety-review`, `+28 more`) - coding owners, handoffs, review, CI, and merge evidence.
-- If intent belongs to another lane, hand back to `oh-my-hermes` or name the adjacent workflow.
+- Current lane: **Coding handoff** - coding owners, handoffs, review, CI, and merge evidence.
+- If intent belongs to another lane, hand back to `omh-routing` or name the adjacent workflow.
 - Shared product, routing, compatibility, and evidence rules: `skill_view(name='omh-routing', file_path='references/skill-common-rail.md')`.
 
 ## When to Use
@@ -79,7 +46,7 @@ Reasoning demand: `standard`
 Quality bar:
 
 - Run the escalation check before anything else and state the verdict; a change whose `unsafe`/FFI status is unknown is escalated by default.
-- Load `references/rust-discipline.md` for the ownership, error, and API rules, and name the gate commands from it rather than assuming `cargo build` is the whole bar.
+- Load `references/rust-discipline.md` for the ownership, error, API, binary-interface, and dependency rules, and name the gate commands from it rather than assuming `cargo build` is the whole bar.
 - When the escalation triggers, load `references/ub-escalation.md` and carry its Miri, sanitizer, and loom-style concurrency requirements into the handoff as blocking items.
 - Name the ownership decision behind every clone, `Arc`, interior-mutability wrapper, and lifetime annotation the change introduces.
 - Name the error type and its conversion boundary; a surviving `unwrap` needs a written reason, not silence.
@@ -89,43 +56,28 @@ Handoff policy:
 
 Keep the ownership shape, error-type choice, API surface, gate list, and the UB escalation verdict in Hermes. Record compilation, clippy output, test results, Miri runs, sanitizer runs, and loom runs only from executor or wrapper observed evidence.
 
-Required inputs:
-
-- the crate, module, or function being changed
-- whether the change touches `unsafe`, raw pointers, FFI, `MaybeUninit`, or a lock-free primitive
-- the crate's edition, MSRV, and async runtime when relevant
-- existing error type and public API stability constraints
-- the gate commands the repository already runs
-- observed compiler, clippy, test, and Miri/sanitizer evidence for completion claims
-
-Expected outputs:
-
-- rust_change_contract/v1
-- ownership_shape/v1
-- error_and_api_contract/v1
-- rust_gate_list/v1
-- ub_escalation_verdict/v1
-- ub_discipline_checklist/v1 when the escalation triggers
-- observed_rust_gate_evidence/v1 when observed
-
-Artifact expectations:
-
-- rust_change_contract/v1 names the crate, the change, and the escalation verdict on its first line
-- ownership_shape/v1 states who owns each value, which borrows cross a function or await boundary, and where a clone is deliberate rather than a borrow-checker surrender
-- error_and_api_contract/v1 names the error type, its conversion boundary, and every `unwrap`, `expect`, or `panic!` that survives with its justification
-- rust_gate_list/v1 lists the exact commands the executor must run and pass
-- ub_escalation_verdict/v1 is `escalated` or `not_escalated` with the trigger that decided it
-- ub_discipline_checklist/v1 adds the Miri, sanitizer, and loom-style concurrency requirements when escalated
-- compiler, clippy, test, Miri, sanitizer, and loom results only when observed
-
 Safety rules:
 
 - Do not claim compilation, clippy cleanliness, passing tests, a Miri run, a sanitizer run, or a loom run from a prepared Rust contract.
-- The UB escalation is deterministic, not a judgment call: if the change touches `unsafe`, `*mut`/`*const`, FFI or `extern`, `MaybeUninit`, `unsafe impl Send`/`Sync`, `transmute`, or a hand-written lock-free primitive, escalate.
+- The UB escalation is deterministic, not a judgment call: if the change touches `unsafe`, `*mut`/`*const`, FFI or `extern`, `MaybeUninit`, `unsafe impl Send`/`Sync`, `transmute`, a hand-written lock-free primitive, or non-test code in a module whose existing `unsafe` depends on it (fields, constructors, `Drop`, visibility), escalate.
 - When escalated, a change is not ready for handoff until the UB checklist names the Miri, sanitizer, and concurrency-testing requirement for it.
 - Never present `unsafe` as safe because it compiles: the compiler does not check the invariant an `unsafe` block asserts.
 - Do not silence a borrow-checker error with a clone, `Rc<RefCell<_>>`, or `unsafe` without naming the ownership decision that made it necessary.
 - Do not run cargo, Miri, sanitizers, or any toolchain from OMH core.
+
+## Completion Checklist
+
+- The escalation verdict is stated with the trigger that decided it.
+- The ownership shape names owners, borrows across boundaries, and every deliberate clone.
+- The error type, its conversion boundary, and every surviving `unwrap`/`expect`/`panic!` are named.
+- The gate list names the exact commands the executor must run and pass, covering every target, the feature extremes, doc tests, and the declared MSRV.
+- An escalated change carries the Miri, sanitizer, and concurrency-testing requirements as blocking items.
+- Compiler, clippy, test, Miri, sanitizer, and loom results stay observed-only.
+
+## Recovery Notes
+
+- If the crate cannot be inspected, escalate by default and say the verdict is conservative rather than measured.
+- If the toolchain cannot run Miri or a sanitizer for the escalated change, keep the change blocked and name the smallest substitute proof instead of downgrading the verdict.
 
 ## Runtime Evidence
 
@@ -139,7 +91,7 @@ Record observed delegation results; otherwise return `not_available` or `not_obs
 Prepared OMH routing is not execution, review, CI, merge-readiness, or merge evidence.
 - Treat wrapper memory/context summaries as advisory local context, not proof of opaque Hermes memory reads or changes.
 Preserve workflow intent and stop conditions; verify before claiming completion.
-Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only; OMH's record terms (surface, lane, wrapper, handoff, evidence boundary, not_observed) stay in records and tool calls, never in the sentence the user reads unless they ask about one; and when a real unresolved user decision or a useful briefing discussion remains, offer one specific, content-linked question. Completed work needs no question; omit unrelated non-action footers and generic offers to continue.
+Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only. When the requested output is delivered, put any open points inside the result and end with no question or offer; only when the person asked to choose or decide and that choice is still theirs, end with one specific question about it, not a list, a generic offer, or a footer; the shared rail's Reply Language And Host Voice and Turn Ending sections hold the full rule.
 
 Use Hermes-native subagent/delegation features when available: native subagents -> Hermes delegation when available, otherwise sequential lanes.
 

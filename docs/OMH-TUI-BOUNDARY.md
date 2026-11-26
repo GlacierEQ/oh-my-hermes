@@ -10,10 +10,59 @@ what a user sees is in [Installation](INSTALLATION.md).
 
 ## Launch and the gateway child
 
+### Proofreading
+
+Proofreading is opt-in. Alt+P explicitly checks the draft. With
+`OMH_PROOFREAD=1`, the main or clarify free-text composer also checks after
+600 ms quiet; any other value, or none, sends nothing until Alt+P. Only
+unprotected draft text is sent to a local LanguageTool server for inline
+underlines (portable SGR 4, including NO_COLOR). Cursor motion alone never starts a check.
+Only plain HTTP to a loopback IP literal is accepted; `localhost` is pinned to
+127.0.0.1. Proxy variables are bypassed and redirects refused. A daemon worker
+allows one pending request with a five-second elapsed deadline, a 512 KiB reply
+limit and a 20,000-character client draft limit. Composer remains I/O-free.
+Masked fields send nothing. Command lines, fenced, indented, inline, multiline
+and unclosed backtick code, image tokens and paste chips are blanked before HTTP
+with UTF-16 widths preserved. Paste contents are never expanded.
+
+Main drafts and clarify free-text fields share diagnostics. Approval and choice
+menus keep their keys, as does pending Vim grammar. Results bind composer object,
+edit/metadata generation, session and question identity. Changed ownership or
+draft discards results immediately, including an ownership change away and back.
+Automatic results never open review or take keys. Alt+P opens only the issue
+containing the cursor, or the immediately preceding issue at its exact end when
+none contains it. Without fresh results it remembers this explicit intent for
+the exact snapshot; editing or changing owner cancels it. Without an issue at
+the cursor it shows a local hint. Enter explicitly accepts the selected replacement
+after the 300 ms arming guard; Cancel and Esc leave text unchanged. A spelling
+issue on one word of letters (accented forms included; a word with an
+apostrophe or hyphen such as `don't` or `e-mail` gets no dictionary action) can
+be added to the private `proofread/dictionary.txt` under the OMH home; without
+an OMH home there is no dictionary. Saved words hide spelling marks, not
+grammar marks, and a correction overlapping a spelling keeps its own mark and
+replacements. Alt+P on the saved spelling offers removal without changing the
+draft. The dictionary is read and saved on a short-lived background thread,
+never on the key or paint path: the first check reads it, later results reread
+it only when the file changed (another window's save included), a save rereads
+under its lock before an atomic replacement, and a file or lock that is not a
+regular file is refused without waiting. A failed save says so on the info line
+and leaves the file and ordinary corrections as they were. Each action closes
+review without advancing elsewhere. Each accepted edit uses Composer.replace
+and its existing undo. No action submits a prompt.
+Unavailable servers leave the draft untouched and produce a quiet inline status,
+with retries backing off from 5 to at most 30 seconds; Alt+P retries immediately.
+One in-flight request finishes before the latest eligible generation is checked.
+No per-keystroke or stale-result transcript notices are added. No server
+installation or startup happens automatically. Only tui/app.py imports the client.
+
 The OMH TUI is the frontend bare `omh` opens. `omh` runs the user's own `hermes
 --tui` with `HERMES_TUI_DIR` pointing at OMH's packaged frontend, so Hermes'
 launcher still resolves the profile, resume target, working directory and
-session ownership, then starts OMH's frontend in place of its own. That
+session ownership, then starts OMH's frontend in place of its own. A session
+the person closes there exits with OMH's own code (`CLOSED_EXIT`) instead of
+0, which Hermes' launcher prints no exit summary for (it prints one, naming
+`hermes --tui --resume`, only for 0 and 130); `omh` then prints its exit
+card, with only the `omh` way back, and returns 0. That
 frontend spawns one child at a time, with the interpreter, import path and
 environment the launcher handed it, and speaks the stdio JSON-RPC of Hermes'
 `tui_gateway` to it. The child is `src/tui/attach/gateway_attach.py`, run by
@@ -23,13 +72,19 @@ entry beside a running gateway) it reaches the profile's gateway as Hermes' own
 Ink TUI does, whether or not one was running: Hermes' `ensure_gateway_runtime`
 finds it or starts it (an unmanaged gateway daemon with idle exit, or the
 gateway service the person installed, which Hermes starts through launchctl or
-systemd), a session ticket comes from the home's private control socket, and
+systemd), a session ticket comes from the home's private control socket (on
+Windows, where that endpoint is a named pipe, Hermes' own `attach_gateway`
+ensures the gateway and mints the ticket, as Ink's bootstrap does), and
 `websockets.asyncio.client.connect` dials the loopback socket Hermes names. It
 translates between the stdio wire and the gateway's canonical one only where
 they differ (the launch policy riding `session.create`, a detach for a close, a
-rewind as Hermes' revision-fenced `session.mutate`, images staged through
+rewind as Hermes' revision-fenced `session.mutate`, a steer or a stop carrying
+the execution generation of the turn it acts on, images staged through
 Hermes' `image.attach_bytes`, approvals and clarify questions the gateway asks
-as events), and passes everything else as it is. On any other Hermes it runs
+as events, and a command the person typed that the gateway's `slash.exec`
+refuses but runs through a call of its own, `/compress` and `/undo` among
+them, sent as that call, as Ink sends it), and passes everything else as it
+is. On any other Hermes it runs
 Hermes' stdio entry in its own process, as before. Which one is decided by what
 imports in that Hermes, never by an error's wording. When that child exits on
 its own with a failure (never after a normal exit, after the person quits, or
@@ -37,18 +92,34 @@ for a gateway another runtime owns), it spawns it again the same way and
 resumes the session that was open (`session.resume`), at most 3 times in 60 s,
 as Hermes' own TUI does: the open question and those waiting behind it close
 unanswered, a turn that was running is reported lost and never sent again, and
-past that limit it exits as it would without recovery, naming `hermes --tui`.
+past that limit it exits as it would without recovery, naming `omh --resume
+<id>` (with `-p` for a named profile) when `omh` launched it, and `hermes --tui`
+otherwise. A reply that shows the gateway no longer speaks the declared
+contract ends the session the same way. The attach refusal still names Hermes'
+own terminal: the OMH TUI cannot open a session another runtime's gateway owns.
 
 ## What it sends and answers
 
 It relays only what the person types; on its own it reads Hermes' settings and
 command catalog as a session opens and, at a fresh start, `session.list` to
-name the last session under the banner, and, beyond opening and closing
+name the last session under the banner, reads the config file's mtime
+(`config.get mtime`) and Hermes' configured default model (`model.options`
+naming no session) at the launch, the mtime again at each turn's end and
+before each prompt that starts a turn, and the default again when the mtime
+moved, and, beyond opening and closing
 sessions (`client.capabilities`, `session.create`, `session.resume`,
 `session.close`), sends only what this bullet names below, plus
-`session.history` again when Hermes refuses a rewind; when no turn runs, a
-steer Hermes refused as an ordinary prompt; and, at once, the decline frame for
-a request it cannot show (a vault unlock or save-login prompt, a terminal,
+`session.history` again when Hermes refuses a rewind; in the `/sessions`
+picker, only on the person's keys, `session.list` (Ctrl+G loads older authorized
+conversations through the shared-gateway child when a continuation is offered),
+`session.title` (the highlighted session's new title, after Ctrl+R and Enter),
+`session.delete` (after a second Ctrl+D; never the session it is in) and
+`session.transcript` (after Enter on a row Hermes lists as not resumable, a read
+that writes nothing). The gateway child sends `session.title` and `session.delete`
+to a shared gateway as the owner's revision-fenced `session.mutate rename` and
+`delete`, reading the revision first with `session.resume`. When no turn runs,
+it sends a steer Hermes refused as an ordinary prompt. It also immediately sends
+the decline frame for a request it cannot show (a vault unlock or save-login prompt, a terminal,
 preview or window read, a preview action, a tour, a display sudo install, a
 clarify with no question in it, or a method it does not know). It never answers
 an approval, clarify, sudo, or secret request on its own, apart from declining
@@ -56,7 +127,10 @@ at once a request it cannot show (listed above): Esc or Ctrl+C declines, an
 approval decline is an explicit deny and then interrupts the running turn
 (`session.interrupt`, only while a turn runs; every deny the person gives an
 approval does, `d`, `n` and Enter on deny too, except the tell row's below),
-allowing a command takes the arrows and then Enter, and a request the gateway
+an approval opens with allow once highlighted (the owner's choice of
+2026-11-15), so an allow is still a key the person pressed (Enter on that row)
+and never a key typed for the composer as the slot opened, which the app
+ignores for a moment after any slot opens; a request the gateway
 withdraws (its own timeout, an interrupt) closes without an answer. Hermes'
 `always` choice is offered only when the request lists it and is sent, like any
 allow, only on the person's arrows and then Enter; saving it as a permanent
@@ -65,6 +139,38 @@ one session it stops Hermes asking about commands that match. An approval's
 last row, "no, and tell Hermes what to do instead", sends the explicit deny at
 once, interrupts nothing, and then opens the composer for what the person tells
 Hermes instead; Esc there sends nothing more.
+
+The one prompt it sends that the person did not type is the onboarding prompt.
+It goes only when `omh` was launched with `--onboard model-setup`. The accepted
+"Set up your models now?" question at the end of an interactive `omh setup` is
+its only automatic caller (setup opens the TUI as a child process and waits for
+it); a person may also run `omh --onboard model-setup` themselves, which sends
+the same fixed prompt.
+The flag is for a bare launch in a new session: it is refused beside `--resume`
+or `--continue` or with a subcommand, and it skips the last-session question and
+the what's-new notice. The text is the fixed, packaged one in
+`src/tui/onboarding.py` (English, Korean, Japanese or Chinese by the `OMH_LANG`
+setup passed on), sent once through the same submit path a typed prompt takes,
+so it is echoed, queued and checked against the default model like any other.
+It is never sent on a resume, a reconnect, a gateway restart or a session
+switch, and `/new` starts a session without it. `OMH_TUI_ONBOARD` and
+`OMH_TUI_ONBOARD_LANG` are `OMH_TUI_` names, so they never reach the gateway.
+Everything after that first turn is the person's own: Hermes asks, the person
+answers, and every approval and secret request stays theirs to answer.
+
+When the person attaches an image, it also sends `image.render` once for that
+image, naming only the path Hermes staged and answered, to draw a preview under
+the prompt that sends it: it asks for at most 64 columns by 16 rows, for kitty
+graphics only on a kitty-family terminal at truecolor and otherwise for
+half-blocks, and not at all under `NO_COLOR`. It sends `graphics` true only
+with a kitty ask, so Hermes answers half-blocks to a half-block ask even when
+its config pins kitty, and a kitty answer to a half-block ask is dropped. It
+reads nothing else for the preview and sends nothing on its own. The preview
+follows Hermes' `display.inline_images` (off draws none), and a Hermes that
+does not know the call, or an answer that does not check out, draws no preview
+and says nothing. The echo of a prompt sent with an image stays in the live
+region until its previews answer, at most 2 seconds, and is then printed with
+what it has.
 
 ## Leaving a session, approvals and session settings
 
@@ -89,10 +195,32 @@ what is shown, so yolo that Hermes reports for its own reasons is shown too,
 except that one saying approvals are on within 2 seconds of a confirmed on is
 held until the next, keeping accept shown. Ctrl+T and `/effort` set that
 session's reasoning effort through the same session-scoped call. A pick in the
-`/model` picker (bare `/model`, listed from `model.options`) is sent as Hermes'
-own `/model <name> --provider <slug> --session` through `slash.exec`, so it
-switches that session only, and a name or slug that could read as a flag is
-left out of the list. `/cost` and `/permissions` run Hermes' `/usage` and
+`/model` picker (bare `/model`, listed from `model.options`, or `/model
+--refresh`, listed from `model.options` with `refresh`), and a typed `/model
+<name>` with at most `--provider <slug>`, is sent as `config.set model` naming
+the session with the value `<name> --provider <slug> --session`, as Hermes'
+own TUI sends it (attached to a shared gateway, the gateway child sends it as
+the owner's `session.mutate model`), so it switches that session only; a typed
+`/model <name>` carries `--session` only when the person typed it, so on
+Hermes' stdio entry Hermes' own rule (`model.persist_switch_by_default`)
+decides whether it also persists, as for Hermes' typed `/model`; a name
+or slug that could read as a flag is left out of the list and is never sent,
+and a `/model` with any other flag goes to Hermes' `/model` as typed. The one
+switch the TUI makes on its own is this one: when Hermes' configured default
+model moved since it was last read (the person or the agent edited Hermes'
+config), it switches the session to the new default at the next turn boundary,
+never during a turn: at a turn's end, or before the prompt that starts the next
+turn, which waits for that check (an edit made while no turn ran then reaches
+the very next turn). It says so in one line; a refusal leaves the session as it was
+and says why. A target Hermes asks to confirm (cost, data policy, a large
+context), from a pick or from this switch, is a question the TUI asks in the
+slot, keeping the session's model first and selected; only the person's
+"switch anyway" sends it again with `confirm_expensive_model`, and Esc keeps
+the model; a prompt waiting on that check goes once the person answered, on
+the model they chose. It never switches because
+the session runs a model other than the default, so one picked with `/model`
+stays until the default itself moves (owner, 2026-10-25). `/cost` and
+`/permissions` run Hermes' `/usage` and
 `/approvals`; the latter shows or sets Hermes' persistent approval mode, as
 typed. Plan mode is the frontend's own flag, also turned on with Shift+Tab:
 while it is on, a prompt the person types goes to Hermes as `/plan <text>`.
@@ -105,22 +233,40 @@ nothing and turns only plan mode on and off.
 A steer (Ctrl+Enter, `/steer`, or what the person sends from the composer the
 tell row opened) sends into the running turn only text the person typed and
 sent that way, and the tell row's text goes as an ordinary prompt once the turn
-has ended; the TUI never steers on its own, and a queued prompt is never turned
-into a steer. A steer Hermes does not take waits in the TUI's own queue for the
-running turn to end, whatever the busy mode, so it never interrupts that turn.
-A steer Hermes does not answer within 120 s goes back to the composer and is
-never re-sent.
+has ended; the TUI never steers on its own, and a queued prompt becomes a steer
+only when the person presses the send-now key (Ctrl+Enter or Ctrl+J on an empty
+composer), which takes the oldest one. A steer Hermes does not take waits in
+the TUI's own queue for the running turn to end, as everything sent during a
+turn does, so it never interrupts that turn. A steer Hermes does not answer within its answer
+budget (120 s, longer when held behind a /compress) goes back to the composer
+and is never re-sent. The one stop the send-now key asks for is the person's
+own: Ctrl+Enter on a prompt with images, which a steer cannot carry, sends
+`session.interrupt` and then that prompt, with its images, once the stopped
+turn ends; a second stop, a session switch or a new gateway gives it back to
+the composer unsent.
 
 ## Look
 
 Its look is the rail and kind colours the owner picked on 2026-10-22: each
-transcript block on a `┃` rail with no fill (grey for the person's prompt, the
+transcript block on a thin `┃` rail with no fill (grey for the person's prompt, the
 skin's accent for a reply, a call's state colour for the call), a call's state
 in its mark's glyph and colour as the dag view draws it (running blue `○`, done
 green `●`, failed red `✗`), its name in its tool family's hue at 4.5:1 on dark
 and light, consecutive skill loads and tool-detail reads folded into one row,
+consecutive calls of one other tool folded into one row over their commands,
 and the composer between two full-width rules with no side edges; none of it
 changes what the TUI sends or answers.
+
+Every escape sequence in text is still removed before it reaches the terminal
+(`screen.paint_line`). The one sequence the TUI writes from Hermes is the kitty
+graphics transmit of an image the person attached, and only after it matches
+the kitty APC chunk form for the image Hermes named (`src/tui/inline_image.py`);
+it is written once per image, to the terminal only and never to disk or a log,
+and only the placeholder rows are kept for the transcript. A half-block preview
+is ordinary coloured cells. A transmit over 4 MiB is refused unread. No
+transmit is written while the pager or a picker holds the alternate screen,
+whose image store is not the main screen's: it is written once the main screen
+is back, and the pager shows a kitty preview as its caption only.
 
 ## Agent views
 
@@ -134,11 +280,64 @@ its child's latest call and latest line (thinking, Hermes' progress line or its
 reply), running and failed nodes open, layers set apart by blank rows, folded
 to fit the view's cap before a count row cuts it; Down gives the tree the keys
 (the arrows and Space fold), and a new turn keeps the open run's lanes in the
-roster. Two keys in the agent list, and in the tree on the highlighted node's
+roster. A run that is over leaves the view as the turn that ended it ends (the
+owner's call of 2026-10-26); its end print in the transcript and `/dag` keep
+its graph. In `/dag`, `e` opens the highlighted DAG node’s evidence and returns to
+the graph; `r` refreshes evidence. The pager reads only that node’s bounded local
+handoff from the current stored session’s DAG record. It never searches another
+ledger, follows symlinks, opens a link, reads a remote backend, sends a prompt, or
+changes a run. The terminal renders a static A2UI v1 Basic Catalog subset
+(`Card`, `Column`, `Text`, `Divider`) with inert Markdown fallback.
+
+Two keys in the agent list, and in the tree on the highlighted node's
 child, act on that agent, and only on the person's keypress: `x` interrupts it
 (`subagent.interrupt`) once a second `x` confirms, and `s` steers it
 (`subagent.steer`) with text the person then types and sends; the TUI never
 interrupts, steers or answers for a subagent on its own.
+
+Enter on an agent (the list, a click on its row, a tree node's child) shows
+that subagent's session on the main screen, as Claude Code shows a
+teammate's, and only on the person's key. What it reads depends on the
+gateway: on Hermes' stdio entry, `session.resume` of the child's session with
+`lazy: true`, which answers its history and an agent-less watch session whose
+mirrored `message.*` and `tool.*` events the view draws; on the shared gateway,
+`session.transcript` with the parent session and the `subagent_id`, read
+forward from its cursor. Those reads are the only calls the view makes without
+a key: one read at a time per view, fenced so only the latest read's answer,
+asked from the cursor the view still holds, applies (the cursor only moves
+forward, and a child that ended is never marked running again); at most one a
+second while the child runs and the view is open; a completion schedules the
+next read on that same pace; a read unanswered for 10 s is forgotten before
+the next goes. Once the child ended (or when a finished child is opened) its
+pages are read one after another until a page with no rows, the host's
+caught-up mark (its wire `rows` empty, from a read sent after the end was
+seen), at most 50 reads after it ends, each read sent counting whether
+answered, refused or unanswered; then the view says in one dim line that the
+rest could not be read. A plain resume of a child is never sent (on
+the shared gateway it would mount the child and move the attach adapter's
+current session). Each open is one intent: only the latest open's answer
+shows a view, and `main`, Esc, a switch, `/new` or a restart cancels one still
+out. What it sends, only when the person presses Enter in the view:
+`subagent.steer` on the parent session while the child runs; after it ended,
+`prompt.submit` on the watch session (stdio only; the shared gateway cannot
+continue a child, and the view says so and sends nothing); and during that
+continued turn, `session.steer` on the watch session. An approval's deny
+interrupts the session that asked (`session.interrupt` on the watch session
+for a continued child, main's turn for main), and what the person tells
+Hermes instead goes to that session too (`session.redirect` on the watch
+session while the continued turn runs, else `prompt.submit` there). Leaving the view (Esc, `main`, a
+session switch, `/new`, a restart) sends `session.close` for the watch
+session, never one a view on screen still owns. A refused read falls back on
+the agent's log above. Main's transcript keeps folding every main event while
+a subagent is on screen, held to the transcript's block cap.
+
+The waiting row above the composer between turns (`src/tui/wait_kinds.py`)
+names what the session waits on from what the TUI already holds, read-only:
+the words of a background process's command as Hermes' `processes.json`
+records it, the first watch pattern of the `terminal` result Hermes sent as
+it started the process, and the delegation graph's lane fields (state,
+category, role, model, the run's name) the HUD read. It reads no other file,
+runs nothing it names, sends nothing, and never reads what the model said.
 
 ## Shell commands, rewind and mouse
 
@@ -151,31 +350,123 @@ paste whose text starts with `!` goes to the model), never a refused steer or a
 queued prompt that happens to start with `!`. A rewind (Esc Esc on an empty
 composer, `/rewind`) cuts the session's history before the prompt the person
 picked, and only when they send the prompt that replaces it (`prompt.submit`
-with `truncate_before_row_id` and `confirm_truncate`). Mouse reporting is on in
-one state only, the agent list open, and off in every other and on every exit.
-A plain left click on an agent opens its log, one on the list's `main` row
-leaves the list, and every other report does nothing. A report that starts
+with `truncate_before_row_id` and `confirm_truncate`). Mouse reporting (clicks,
+the wheel and a held button's motion, modes 1000, 1002 and 1006, never 1003)
+is on wherever the TUI can tell which screen row a report lands on, while the
+agent list or the `/theme` picker takes clicks, and in a pager, and off while
+the window is resized and on every exit; with `OMH_TUI_MOUSE=0` it is on only
+while the agent list or the `/theme` picker takes clicks (clicks and the wheel,
+without 1002) and in a pager. Where it is on for the main screen, a drag, a
+double click or a triple click selects rows the live region printed, by their
+place in what it printed (`LiveRegion.doc_row`), shows them reversed and
+copies them; a row it cannot map for certain is never guessed at, and the
+wheel up turns reporting off until the next key, so the terminal scrolls its own
+scrollback. With `OMH_TUI_MOUSE=0` the wheel and a drag
+on the main screen are the terminal's. A copy joins rows the TUI wrapped to fit
+the width back into the line they were written as, by an empty mark each such
+row carries that paints nothing. A plain left click on an
+agent opens its log, one on the list's `main` row leaves the list. In a pager
+the wheel scrolls, and in a pager and on the main screen a drag, a double
+click or a triple click copies what it
+selected, rails and a reply's margin left out: as OSC 52 to a terminal that
+honours it as it ships (kitty, Ghostty, WezTerm, Alacritty, outside tmux),
+through `pbcopy` on a Mac with no SSH between it and the screen (inside tmux,
+only once a fixed `tmux show-environment SSH_CONNECTION` answers within 1 s
+that the variable is not set), and otherwise as OSC 52 the footer says was
+only sent. A report that starts
 while reporting is on, or within 0.5 s after it goes off, types nothing if it
 arrives whole within 0.8 s of its first byte. If 300 ms pass after that byte
 without the next, the byte is read as Esc, and the rest is dropped only if it
 arrives within 0.5 s after that. One that starts later and is split right after
 its first or second byte is read as keys.
 
+## The bot board
+
+The bot board (Ctrl+S, `/bots`, `src/tui/bot_board.py`) only reads. For the
+Hermes root the TUI runs under and each named profile beside it
+(`<root>/profiles/<name>/`), it reads `gateway_state.json`, `config.yaml`,
+`profile.yaml` (for Hermes' display name only), Hermes' `memories/MEMORY.md`
+and `USER.md` (each only as a regular file, at most 1 MiB), the directory listing of the OMH store's `memory/records/` when
+`config.yaml` names that store, and `state.db`, the latter opened `mode=ro`, and immutable when no `-wal`, `-shm` or
+`-journal` is beside it (no connection has it open), so SQLite creates no
+`-wal` or `-shm` there; with a connection open, the read takes its read mark
+in the existing `-shm`, as every reader of the store does. It never opens the
+store outside SQLite, since closing a descriptor on it would drop this
+process's SQLite locks on it. It probes the pid a gateway record names with
+signal 0 and reads that process's start time and state (`/proc` on Linux,
+`sysctl(KERN_PROC_PID)` on macOS) and, for a running gateway, its resident
+memory (`/proc/<pid>/statm`, or `proc_pidinfo`, which answers only for this
+user's processes); it sends no other signal, and nothing to the gateway. For
+each bot's messaging platforms it also reads, through `omh doctor`'s own
+gateway health reader (`maintenance.gateway_health.bot_platforms`), the tail
+of the root's and each profile's `logs/gateway.log` (at most 1 MiB, with the
+rotated `gateway.log.1` before it when the log is shorter), keeping only each
+platform's classified state, Hermes' bounded and cleaned reason and the fix,
+never a log line. It reads on one thread for the session, never on the render path,
+and reads nothing while the board is closed.
+
+## The reasoning before a silent question
+
+When Hermes opens a clarify question, the TUI reads its own session's newest
+assistant row from the session's `state.db` (`src/tui/silent_lead.py`),
+opened `mode=ro` (immutable when no connection has it open, as the bot board
+opens it), once per question, waiting at most a quarter second on a writer.
+Only when that row made the very clarify call being opened (matched by its
+call id), wrote no reply text and carries reasoning does the question show
+that reasoning, dim, above itself. It writes nothing, sends nothing to the
+gateway, keeps the text only while the question is open, and draws nothing
+when anything is missing or the read fails.
+
 ## Sessions it refuses, and what it writes
 
 It never attaches to a session another runtime owns: when the launcher sets
 `HERMES_TUI_GATEWAY_URL`, it exits and names `hermes`. It writes no transcript,
-attachment, secret or server-request frame to disk or to a log, and prompt text
-in one place only: each line the person sends from the composer is appended to
+attachment, secret or server-request frame to disk or to a log. New conversation
+prompt text goes in one place only: each line the person sends from the composer is appended to
 Hermes' own input history, `$HERMES_HOME/.hermes_history`, the file `hermes
 --tui` reads and writes, in its format (`+`-prefixed lines under a `#`
 timestamp line). It only appends there (opened `O_APPEND` and `O_NOFOLLOW`,
 created mode 0600), reads at most the file's last 1 MiB and only when it is a
 regular file (no symlink or FIFO), and never writes an answer to a question
-Hermes asked or masked input there. The other files it writes are metadata: the
-launcher's active-session file (the session id), and what OMH's own HUD reader
+Hermes asked or masked input there. An image the person attaches (Ctrl+V, a
+drop, `/image`) is a file Hermes stages and names; the TUI reads that file
+once, only when it is a regular file of at most 20 MB (opened `O_NOFOLLOW`
+and `O_NONBLOCK`), keeps its bytes in memory and nowhere else, and has
+Hermes let go of it (`image.detach`). A prompt that goes with the image
+stages those bytes again through Hermes' `image.attach_bytes`, the call
+Hermes' own remote clients use, and nothing else is staged until Hermes has
+taken them. When Hermes finds no image for a Ctrl+V, the TUI pastes the
+clipboard's text into the composer instead, as a terminal that pastes on
+Ctrl+V itself would have (`src/tui/clipboard.py`): only with no SSH variable
+set (inside tmux, also only when its last client did not attach over SSH),
+through the Win32 clipboard API on Windows, one fixed `pbpaste` on a Mac, or
+on Linux `wl-paste`, `xclip` or `xsel`, each with a one-second timeout (the
+first that runs past it ends the search), never reading more than 4 MiB and
+a byte of it; text past 4 MiB counts as none. The text goes nowhere but the
+composer: a prompt the person sent before Hermes answered goes as they typed
+it, and the text waits in the composer with a notice. Proofreading's dictionary, `<omh_home>/proofread/dictionary.txt`
+(mode 0600, at most 64 KiB) and its `.dictionary.txt.lock` sidecar, is written
+only by an explicit Add or Remove ([Proofreading](#proofreading)). The explicit `/omh-model` save also edits the person's existing
+`routing/identities.json` under the active OMH home: only the chosen identities'
+`model_chain` and `enabled` fields change. Its per-file atomic replacement
+preserves existing prompt strings and unrelated profiles, including invalid
+siblings; it does not create or edit prompts, nor archive conversation text.
+Cancel and no-op saves leave it untouched. Validation precedes either a chains
+or identities write, but the two files are not a transaction: a partial I/O
+failure reports which category edits were already saved. All remaining files
+it writes are metadata: the
+launcher's active-session file (the session id); when `omh` launched it, the
+file `omh` named in `OMH_TUI_SESSION_FILE`, in `omh`'s private 0700 launch
+directory (opened `O_NOFOLLOW`, mode 0600), holding the open session's id, the
+Hermes home it runs on and the ids of the sessions this launch had open
+before, which `omh` reads for its exit card and removes with the directory;
+the relaunch marker beside it, when the person picked a restart after an update;
+and what OMH's own HUD reader
 and model-chain picker already write under the OMH home (the HUD fan-out cache
-and its lock, and the chains `/omh-model` saves), and a fallback marker at the
+and its lock, and the chains `/omh-model` saves); the models the person last
+switched to, `<omh_home>/tui/recent-models.json` (the model and provider of
+each switch Hermes confirmed, at most five, nothing else, written atomically;
+bare `/model` lists them first, and without an OMH home nothing is kept); and a fallback marker at the
 path `omh` named, holding what the TUI printed about why it did not start,
 which `omh` prints again once Hermes' own terminal (which clears the screen)
 closes, and then removes. A pasted clipboard image is saved by Hermes' own
@@ -183,7 +474,12 @@ clipboard helper where Hermes stages images, as the stdio entry saved it.
 
 ## Connections and the import allow list
 
-The frontend opens no socket and makes no network call, strips the sidecar and
+Beyond local proofreading above, the frontend's network call is the update notice: at most
+once a day per OMH home, on a background thread, an HTTPS GET of npm's latest
+`oh-my-hermes` version from `registry.npmjs.org`, keeping only the version
+(`tui/update_notice.py`, listed in INVARIANT 2's `NETWORK_CLIENT_BRIDGES`; off
+with `OMH_TUI_UPDATE_CHECK=0`, `omh theme update-check off`, or `omh
+update-check` set to `off`). Beyond these it opens no socket. It strips the sidecar and
 attach URLs from the child's environment, and reaps the child when it exits,
 SIGTERM and SIGHUP included; the child's only connections are the two above, to
 the person's own Hermes home (the WebSocket goes to the URL the gateway's grant
@@ -206,6 +502,269 @@ calling another Hermes, network or subprocess helper; it is not a sandbox, and
 does not catch an allowed Hermes function called with other arguments, or check
 where the grant's url points.
 
+## Turn progress and the bell
+
+The TUI tells its terminal the state its title shows as OSC 9;4 progress:
+working (`ESC ] 9 ; 4 ; 3 ST`, indeterminate) as the state turns `running`, and
+done (`ESC ] 9 ; 4 ; 0 ST`) as it leaves it for `idle` or `waiting on you`, each
+time that state changes and never per frame, and done on the way out (and at a
+Ctrl+Z suspend) if working was the last word. It writes it only where the
+terminal reads it as progress: `TERM_PROGRAM` `omher`, `WezTerm`, `ghostty` or
+`iTerm.app`, Windows Terminal (`WT_SESSION` set) or ConEmu (`ConEmuPID` set);
+any other terminal might print it, so it gets none. It is state, not a ring:
+`OMH_TUI_BELL=0` leaves it on. A turn of 10 s or more ends with the terminal's
+attention signal (the bell, or OSC 9 / 777 where the terminal shows that as a
+notification), except inside omher (`TERM_PROGRAM=omher`). There the done is
+the signal and omher marks the session as news itself, because a bell is not
+a warning (the owner's decision of 2026-11-23). A question or an approval rings
+the bell on every terminal, omher included, unless `OMH_TUI_BELL=0`.
+
+## Turn clock times and session cost
+
+Two of Hermes' display keys reach the OMH TUI, read from the `config.get` it
+already sends as a session opens and after a reconnect. It writes neither.
+Each counts only when it is YAML `true`, as Hermes' own TUI reads
+`display.timestamps`; anything else, absent included, leaves it off.
+
+- `display.timestamps: true` adds the local wall-clock minutes a turn ran
+  between to its done line, after the time: `✻ 1m 20s · 10:42→10:44 · 3 tools`.
+  A turn inside one minute says that minute once (`10:42`), and a turn past
+  midnight reads `23:59→00:01` with no day. A narrow line drops the clock
+  after the tokens and the tools. `/timestamps on|off` (alias `/ts`; alone,
+  it switches; `status` says which) sets this for the run, over what the
+  config says, from the done line of the turn that ends next, a running one
+  included. It sends nothing: it does not save the setting. Hermes' own `/timestamps` writes
+  the key, and OMH writes no display key.
+- `display.show_cost: true` adds the session's cost to the info line, after
+  the effort, but only the figure Hermes' usage carries in `cost_usd`
+  (`session.info`, `session.usage`, `message.complete`; the `Usage` contract
+  in Hermes' `tui_gateway/contracts/common.py`). It reads `$0.42`, `$0.0046`
+  under a cent and `$<0.0001` for a figure above 0 that rounds to none, with
+  `~` before it when `cost_status` is `estimated`. A `cost_status` of
+  `unknown` (Hermes could not price the model and left its 0.0) shows no
+  cost, and `included` (a subscription covers it) shows `included` instead
+  of a figure. OMH computes no price.
+  While Hermes sends no number there, the line shows no cost at all, never
+  `$0.00` or an estimate. Hermes' gateway does not fill `cost_usd` today, so
+  the cost appears once Hermes does. A usage block without the field keeps
+  the last figure, and a session opened or switched to starts without one.
+  A narrow line drops the cost before anything else.
+
+`/statusbar` stays dropped: the info line always shows. Its notice names
+`display.show_cost`.
+
+## herdr
+
+Inside a herdr pane, and only there (`HERDR_ENV=1` and a `HERDR_PANE_ID`, the
+pane environment herdr's own Hermes plugin is gated on too; that plugin only
+reports a session id, never a state), the TUI tells herdr the state its title
+shows, so herdr's agent list can name it: it runs `herdr pane report-agent
+<pane> --source omh:tui --agent omh --state <state>`, with `waiting on you` as
+`blocked`, `running` as `working` and `idle` as `idle`, each time that state
+changes and never per frame, and `herdr pane release-agent` on the way out,
+since herdr keeps the pane's agent after the TUI exits until told. The agent
+label is `omh`, one herdr does not know: a known label (`hermes`) would tie
+the report to herdr's own Hermes process and screen detection. The binary is
+an absolute `HERDR_BIN_PATH` or `herdr` on PATH, the person's own; the verbs
+and flags are fixed and only the binary and pane id come from that
+environment, with no text from the session. One call runs at a time on a
+worker thread, so the loop never waits on herdr, and only the newest waits
+behind it (a later change replaces it, and the release replaces any report
+and stops the one in flight); each call gives up after 1 s and fails without
+a word (no herdr, a dead socket, a timeout), and an exit waits at most 2 s
+before it stops the release. herdr's CLI reaches herdr over its own local
+socket: no network call. Outside herdr nothing is spawned. No session id is
+sent: herdr keeps one only from its own `herdr:*` sources.
+
+The gateway child does not get the pane's `HERDR_PANE_ID`; herdr's CLI and
+skill still work there, without a current-pane default. herdr drops the same
+one name for its own pane-less popups. Where the gateway runs, herdr's Hermes
+plugin (gated on `HERDR_ENV=1` and that id) would otherwise report a
+`herdr:hermes` session for the pane, and herdr then refuses the TUI's own
+reports from then on (measured on herdr 0.9.5: the pane stayed at `working`,
+or left the list); a gateway daemon started from the child would also keep the
+pane's id after the pane closed.
+
+## Restarting Hermes' gateway
+
+`/gateway restart`, typed by the person or offered once after an update (see
+Restarting after `omh update`), restarts Hermes' gateway
+(`src/tui/gateway_restart.py`, in INVARIANT 1's `PROCESS_SPAWN_ALLOWLIST`);
+`/gateway` with anything else goes to Hermes as typed. It is offered only
+attached to a shared gateway, with a session to reattach to. It first asks in the slot, naming what the gateway's record
+(`gateway_state.json`, read as the bot board reads it) says the restart
+affects: the profiles it serves, the messenger platforms connected to it, the
+work it runs (turns and cron jobs), and this session's own turn. For a gateway
+a custom supervisor runs (`--external-supervisor` in its recorded argv) that
+running work finishes first, up to `HERMES_RESTART_AFTER_TURN_TIMEOUT` when
+it is set, else `agent.restart_after_turn_timeout` read from the gateway
+home's `config.yaml`, as Hermes reads them; any other gateway drains the same way
+if Hermes' own systemd or launchd service runs it (Hermes sends it SIGUSR1,
+which its argv does not show), so the slot says the drain depends on a service
+running it, and otherwise the work is interrupted. Without a live record it
+says who else uses the gateway is unknown. In a named profile the shared
+gateway serves it offers two restarts: that profile alone (Hermes re-serves it
+inside the shared process at once, so the profile's running turns stop now;
+new OMH code is not loaded) and the whole gateway (`-p default`, as Hermes'
+Desktop addresses that process), which the drain line names.
+Nothing runs unless the person picks one. Then it runs Hermes' own command as
+Hermes' updater runs it, `<HERMES_PYTHON> -m hermes_cli.main -p <profile>
+gateway restart --yes --detach`, with the interpreter and import path the
+launcher handed the TUI and without Hermes' gateway markers, in a session of
+its own, stdin closed and its output in an unnamed temporary file (unlinked
+as it is created) of which only the last lines are read back, into memory.
+Hermes decides the rest (the service manager, the drain, a profile its shared
+gateway serves); the TUI signals no gateway and kills no process. While the
+command runs, however long, the TUI respawns no gateway child, and sends
+nothing that calls the gateway except `/stop` (what else the person sends
+goes back to the composer; Esc and Ctrl+C still interrupt); past 180 s it
+says once that it still waits. Once the command succeeds it reattaches to the
+same session as a respawn does, outside the respawn's limit, trying a gateway
+that is not answering, or not resuming, again each second for up to 60 s; the
+composer's draft stays and nothing is sent again. Exit 0 alone is not taken
+for a restart: only a changed owner epoch says the gateway is back, and
+otherwise Hermes' own last lines are shown. It says the gateway now runs the
+newer OMH only when the gateway's recorded start had preceded the plugin
+bundle's install before the restart and no longer does after it. A failure
+says Hermes' words and the command to run instead.
+
+## Restarting after `omh update`
+
+`omh update` moves `<installer root>/current` and leaves a running TUI on the
+generation it started from. A TUI that runs from an installer generation reads
+that link at most every 5 s (`src/tui/generation_watch.py`: one `readlink`; once
+it differs, also the update's state file; no network call, nothing written). A
+move counts only once that file names the generation active: the pointer moves
+before the update has finished, and a failed update moves it back and deletes
+that generation. Then the info line says `restart to update`, and a TUI `omh`
+launched asks once, in the slot, with Not now first, and only when a restart
+could go at once. The same check holds the question and a Restart already
+picked: a running turn, one about to start (the TUI's own `continue`, Hermes'
+queued redirect), a `/compress`, a session switch, what the session waits on
+between turns (background processes that wake it, delegated children), a `!`
+line or a slash command still out, Hermes' gateway restarting, another open
+question, an open pager or picker, and what the person typed or queued. A `/bg`
+or `/btw` answer still out does not hold it, since a task may never answer: the
+question and the farewell say that answer will not show. A pointer that moves
+back closes the question, or cancels a Restart still waiting, and says so.
+
+The TUI restarts nothing itself. It creates the marker `omh` named
+(`RELAUNCH_FILE_ENV`, in `omh`'s private launch directory, opened `O_NOFOLLOW`,
+mode 0600, holding `plan` in plan mode and otherwise empty) and exits
+`RELAUNCH_EXIT` through its normal shutdown, so the terminal is handed back as
+at any exit. Plan mode carries over; yolo the TUI set goes off, as at any exit. A session
+reopened this way never sends the `continue` a resume can send: the person asked
+for an update, not a turn, so a notice names what is left instead. The `omh` waiting on it then starts
+`<installer root>/current/venv/.../python -P -m omh.cli` with its own homes,
+scope and profile and `--resume <id>` (`src/commands/bare_launch.py`, in
+INVARIANT 1's `PROCESS_SPAWN_ALLOWLIST`), and holds its own generation until
+that exits. A 78 without the marker is an ordinary exit code. A new TUI is not
+told to restart again: the generation it runs is the one `current` names.
+`UPDATED_ENV` in that launch makes the new TUI say in one line, asking nothing,
+that the shared gateway still runs older OMH plugin code and that `/gateway
+restart` loads the new code. It never restarts the gateway itself. Each such restart leaves
+one waiting `omh` holding its generation until the session ends.
+
+## Coming back after a closed terminal
+
+Every TUI that takes a stored session records it in
+`<omh_home>/tui/live-sessions.json` (`src/tui/live_sessions.py`, schema
+`omh_tui_live_sessions/v1`, written 0600, at most 64 entries): the session id,
+the Hermes home it runs in, the folder, the terminal it runs in as `NAME=value`
+of the first terminal variable set (`OMHER_TERMINAL_LINK`, `CMUX_SURFACE_ID`,
+`HERDR_PANE_ID`, `ITERM_SESSION_ID`, `TERM_SESSION_ID`, `KITTY_WINDOW_ID`,
+`WEZTERM_PANE`, `WT_SESSION`, `OTTY_PANE_ID`, `TMUX_PANE`; only read, no
+terminal's own files are written), the pid and boot of each TUI that holds it
+open, and how the session ended. Nothing said in a session is recorded, and nothing leaves
+the machine.
+
+A session the person left is closed: `/exit`, Ctrl+D, a normal close, `/new`
+or `/resume` moving away, a relaunch for an update. It never reopens by
+itself. A terminal hang-up (SIGHUP), SIGTERM, SIGBREAK, an uncaught crash, or a
+TUI whose process is gone (killed, power loss: a different boot or a pid that
+no longer runs) is dropped. `resume-pending` beside the record exists while a
+dropped session waits, and `live-pids` holds, on one line, `b:` and the boot
+its writer ran on (spaces removed, `-` when unknown; on Linux the kernel's boot
+id verbatim) and then the pids of the TUIs recorded as running, so a TUI killed
+outright shows before anything sweeps it. A line whose first word lacks `b:`
+was written by an older OMH and holds pids only; the shell hook reads every
+word of it as a pid. A dropped session reopens once: the reopen marks it
+`resumed` under the record's lock before Hermes opens it, so a resume Hermes
+refuses is not tried again.
+
+A bare `omh`, on by default, reopens the session this terminal dropped, or
+else, outside omher, the newest one dropped in this folder, within 72 hours, in
+a Hermes home this launch opens: the one Hermes' launcher picks (`-p NAME`'s
+profile, `-p default` the root, else the sticky `active_profile`, else the
+resolved home) and the TUI's own runtime home when this launch can open it now
+(its root files read as UTF-8, and the root config names no messaging token
+under `platforms:`). That is checked read-only, before anything is claimed, and
+only when a session of the own home is the one that would win here; the home
+is built or refreshed only after the claim picked such a session, so a launch
+that reopens a shared session, or none, leaves the own home's files as they
+are. An own-home winner this launch cannot open is passed over, and the claim
+chooses among the shared homes. When another launch takes the session that
+would have won first, the launch looks once more. A session in any other home is left for a launch that opens there. Should the claimed home still fail to open
+after the claim, the claim is given back (the session is dropped again and
+`resume-pending` re-armed) and the launch claims again among the shared homes
+only; with nothing there a new session opens. The id is never sent to
+another home. It runs at once, in the home it was
+recorded in, as `omh --resume <id>` would, and says so in one stderr line naming the session
+and `omh --new`. A session nothing was said in is skipped (Hermes keeps no
+such session). It applies only on a terminal and only when the launch names no
+session of its own (`--resume`, `--continue`, `--onboard`). Off switches:
+`omh --new` for one launch, `OMH_AUTO_RESUME=0` for one shell, and `omh
+auto-resume set --mode off` (`auto_resume.mode` in `setup-profile.json`;
+absent is on). `omh auto-resume status` shows the mode, the shell hooks and the
+dropped sessions waiting, naming each terminal variable without its value.
+
+A new terminal reopens it too only after an explicit opt-in: `omh auto-resume
+shell install [--shell zsh|bash|powershell] [--dry-run]`, or a Yes to `omh
+setup`'s question (default No, asked on a terminal while the shell's rc exists
+without the block). It appends one block between `# >>> omh auto-resume >>>`
+and `# <<< omh auto-resume <<<` at the end of `${ZDOTDIR:-$HOME}/.zshrc`,
+`~/.bashrc`, or PowerShell's current-user profile (`src/tui/shell_hook.py`),
+written through a temporary file and a rename with the file's mode kept; a
+symlinked rc is written at its target only when that is inside the home. `omh
+auto-resume shell remove` deletes exactly that block, and a file the block was
+appended to comes back byte for byte. The block, in an interactive shell where
+none of `OMH_AUTO_RESUME_DONE`, `HERMES_SESSION_ID`, `OMH_TUI_SESSION_FILE`
+and `CI` is set, exports `OMH_AUTO_RESUME_DONE=1` (a nested shell does
+nothing) and looks with the shell's own builtins for `resume-pending`, or for
+a pid in `live-pids` that no longer runs (`read`, `kill -0`; PowerShell
+`Get-Process`), so no process starts while nothing waits and every recorded
+TUI still runs. Where `/proc/sys/kernel/random/boot_id` can be read (Linux),
+the zsh and bash blocks also wake when it differs from the boot `live-pids`
+recorded, so a pid the new boot reused does not hide a TUI the reboot ended.
+macOS has no boot source a builtin can read, and the PowerShell block keeps the
+pid check too: after a reboot that hands a recorded pid to a live process, the
+hook stays quiet, and a later terminal, once that pid is gone, or a bare `omh`
+(which sweeps by boot) reopens the session. `kill -0` also fails for a pid
+another user now holds; that wakes the hook too, and `shell-start` finds
+nothing and exits 0 at once. The file lists only this user's TUIs, so that
+takes a recycled pid. When one holds and `omh` is on PATH, the first prompt runs
+`omh --omh-home <home> auto-resume shell-start`: zsh from its first
+`zle-line-init`, kept out of the history by a one-shot `zshaddhistory` hook
+that changes no history option, bash from its first `PROMPT_COMMAND` with both ends
+on the terminal (each then unhooks itself, leaving the rest of
+`PROMPT_COMMAND`), PowerShell at the end of the profile in the console host.
+The zsh and bash blocks are written with LF line ends in a CRLF rc too, which
+keeps its own bytes. `shell-start` checks the policy, the terminal and the same
+variables again, then reopens this terminal's dropped session in place with
+the same line, or exits 0 at once; it never asks anything. Unlike a bare
+`omh`, it does not take a same-folder session recorded under another
+terminal's key while this terminal has a key of its own.
+
+omher starts each `omh` terminal with `OMHER_TERMINAL_LINK=<linkId>` and
+`TERM_PROGRAM=omher` and no arguments, so a bare `omh` there reopens by that
+link alone and never by the folder another omher terminal shares. Its Shell
+terminals get the same variable, so an `omh` the person types in one does the
+same. A tmux started from such a Shell inherits that row's link in every pane
+it opens, and as the link comes first in the order above, ahead of
+`TMUX_PANE`, all of its panes name the same omher terminal: the same
+precedence that makes every tmux pane in one iTerm2 tab share its
+`ITERM_SESSION_ID`.
+
 ## Job control, and what OMH does not do
 
 Ctrl+Z stops the process group, the gateway child with it, as Hermes' own CLI's
@@ -218,3 +777,15 @@ call the gateway makes, is Hermes'. This is a foreground terminal the person
 launched, not a background runtime, a transport bot, or a third process bridge:
 the child relays one terminal's frames and executes nothing; a gateway it
 started is Hermes' own, which exits once idle.
+
+## Frame language
+
+Moved verbatim from `AGENTS.md` (Coding Style).
+
+- The OMH TUI and CLI frame is English for everyone: TUI labels, key hints,
+  picker rows, TUI notices and CLI output. Never switch it by the language of
+  the conversation or of text a model or a person wrote. That text keeps its
+  own language; the frame around it does not follow. The only exception is
+  the explicit `--language` / `OMH_LANG` opt-in above. Chat and messenger
+  reply copy (`src/wrapper/localized_copy.py`) is a separate surface. It
+  follows the person's message and is not covered by this rule.

@@ -88,24 +88,56 @@ git worktree remove /tmp/omh-review-<number> --force
 git branch -D pr-<number>-head
 ```
 
+## Step 3b — pull requests from forks: what stops the review
+
+Applies when `gh pr view <number> --json isCrossRepository --jq .isCrossRepository`
+prints `true`. Read the file list and the diff for the items below with
+`gh pr diff <number> --name-only` and `gh pr diff <number>` before Step 4 runs
+anything from the branch (`Boundaries` already says not to run scripts a fork
+adds). If any item is present, stop the review there: do not run the branch's
+code, post one Important finding that names the file and line that stopped it
+and what would clear it, and leave the rest of the diff for a maintainer who has
+read that line. A fork author has no write access to this repository, so each of
+these is a way to act with this repository's access, or on a reader's machine,
+without a reviewer reading code.
+
+- **`.github/` workflows, actions or permissions.** A workflow runs with the
+  repository's token and secrets once merged, and some run on the pull request
+  itself.
+- **Release, publish and installer scripts**: `install.sh`, `install.ps1`,
+  `site/install*`, `packaging/`, `tools/package_manager/`, and anything that
+  signs, tags or uploads. They run on a user's machine or ship under the project's
+  name.
+- **A new network address, upload or telemetry.** Core `omh` makes no network
+  calls (`REVIEW.md`), so a new host name or URL is a decision, not a detail.
+- **Reading or writing a credential file, or another tool's configuration, beyond
+  what the pull request says it is for.** Keychains, `~/.ssh`, `~/.aws`, another
+  agent's settings or hooks.
+- **A new dependency, a binary, a minified or encoded blob, or code built from a
+  string at run time** (`eval`, `exec`, a decoded payload that is then run). The
+  diff cannot be read for what it will do.
+
+A pull request that touches none of these goes on to Step 4 as usual. This list
+stops a review; it does not clear one, and an empty result does not make the rest
+of the diff safe.
+
 ## Step 4 — run the gates the PR claims
 
 The PR template carries a validation checklist. Contributors routinely leave it
 unchecked. Running it yourself is the difference between a review that asserts
 and a review that knows.
 
+Run the Build & Test list of `CLAUDE.md` as it reads at the PR head
+(`git show <head>:CLAUDE.md`), not as it reads on your own checkout: the suite,
+ruff, compileall, every `docs ... --check` gate, and `git diff --check`, from
+`/tmp/omh-review-<number>`.
+
 ```sh
 cd /tmp/omh-review-<number>
-PYTHONPATH=tests uv run python -m unittest discover -s tests 2>&1 | tail -20
-uv run --group lint ruff check src tests
-uv run python -m compileall -q src tests
-uv run python -m omh.cli docs workflows --check
-uv run python -m omh.cli docs roles --check
-uv run python -m omh.cli docs capability-families --check
-git diff --check
+git show HEAD:CLAUDE.md | sed -n '/^## Build & Test/,/^## /p'
 ```
 
-CI runs all three of those byte gates unconditionally on every PR
+CI runs the byte gates unconditionally on every PR
 (`.github/workflows/ci.yml`), so a desync fails there whether or not you catch
 it. Run them anyway: a red gate you name with the source that moved is a
 useful finding, and a red gate the author has to bisect from a CI log is not.

@@ -18,6 +18,28 @@ TEMPLATES = (
     ("DEFINITION", "lsp"), ("DIAGNOSTICS", "lsp"),
     ("SCALE", "routing"), ("EXPLICIT", "routing"),
 )
+# Separate split for the omh-lsp A/B: kept out of development/evaluation so the
+# pinned corpus digest and manifest stay byte-identical.
+LSP_AB_SPLIT = "lsp-ab"
+# RENAME-EXPORTS is the export check's control: a rename whose prompt names the package `__all__`, in a
+# package that exports names every valid way a reader could miss (a submodule never imported, a name
+# bound in both arms of a try, `+=`); a correct edit leaves no dangling export.
+LSP_AB_TEMPLATES = (("RENAME-ALIAS", "edit"), ("RENAME-SHADOW", "edit"), ("RENAME-EXPORTS", "edit"))
+# Separate split for the round-end checklist A/B, kept out of the pinned corpus the same way.
+CONSISTENCY_AB_SPLIT = "consistency-ab"
+# TEST-UPDATE is the round-end test check's control: the task itself asks for an existing test's
+# expectation to change, names that test, and says every other unit stays the same.
+CONSISTENCY_AB_TEMPLATES = (("DUPLICATE", "edit"), ("SCOPE-TRAP", "edit"), ("DECOY", "edit"), ("TEST-UPDATE", "edit"))
+# Separate split for the impact-check A/B, kept out of the pinned corpus the same way.
+# Each edit template changes a definition whose callers sit in other modules (one through
+# an alias, one through the module, one through a package re-export or `**options`), and
+# only the definition's own module has a test in the workspace; CONTROL breaks nothing.
+# DEFAULTED is the caller check's control: a signature change every existing call still binds to,
+# reached the same four ways plus a `*args` forwarder, so a correct edit leaves every caller as it is.
+IMPACT_AB_SPLIT = "impact-ab"
+IMPACT_AB_TEMPLATES = (("SIGNATURE", "edit"), ("RETURN-SHAPE", "edit"), ("KWARG", "edit"), ("CONTROL", "edit"),
+                       ("DEFAULTED", "edit"))
+SPLITS = ("development", "evaluation", LSP_AB_SPLIT, IMPACT_AB_SPLIT, CONSISTENCY_AB_SPLIT)
 
 @dataclass(frozen=True)
 class Instance:
@@ -31,6 +53,12 @@ class Instance:
 
 
 def all_specs(split: str) -> list[tuple[str, str, int]]:
+    if split == LSP_AB_SPLIT:
+        return [(f"L-{name}", task_class, seed) for name, task_class in LSP_AB_TEMPLATES for seed in EVALUATION_SEEDS]
+    if split == CONSISTENCY_AB_SPLIT:
+        return [(f"C-{name}", task_class, seed) for name, task_class in CONSISTENCY_AB_TEMPLATES for seed in EVALUATION_SEEDS]
+    if split == IMPACT_AB_SPLIT:
+        return [(f"I-{name}", task_class, seed) for name, task_class in IMPACT_AB_TEMPLATES for seed in EVALUATION_SEEDS]
     seeds = DEVELOPMENT_SEEDS if split == "development" else EVALUATION_SEEDS
     prefix = "D" if split == "development" else "E"
     return [(f"{prefix}-{name}", task_class, seed) for name, task_class in TEMPLATES for seed in seeds]
@@ -90,6 +118,500 @@ def _project_files(seed: int) -> dict[str, str]:
     }
 
 
+def _rename_alias_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """A module function re-exported, aliased, and module-accessed, next to a same-named method,
+    a log string, and a comment: a text replace breaks the method/string/comment, a semantic
+    rename does not."""
+    randomizer = random.Random(seed)
+    factor = randomizer.randint(2, 9)
+    legacy = 100 + randomizer.randint(0, 50)
+    alias = randomizer.choice(("cq", "cq_fn", "quota_of"))
+    padding = "\n" * randomizer.randint(0, 2)
+    comment = "    # compute_quota is the single source of quota numbers."
+    log_line = '        LOG.warning("compute_quota failed")'
+    files = {
+        "src/benchapp/quota.py": (
+            f'"""Quota helpers."""\n{padding}\n\ndef compute_quota(units: int) -> int:\n'
+            f"    if units < 0:\n        raise ValueError('negative units')\n    return units * {factor}\n\n\n"
+            f"class LegacyPlanner:\n    def compute_quota(self) -> int:\n        return {legacy}\n"
+        ),
+        "src/benchapp/api.py": 'from .quota import compute_quota\n\n__all__ = ["compute_quota"]\n',
+        "src/benchapp/service.py": (
+            f"from benchapp.quota import compute_quota as {alias}\n\n\n"
+            f"def plan_units(units: int) -> int:\n    return {alias}(units) + 1\n"
+        ),
+        "src/benchapp/report.py": (
+            "import logging\n\nfrom benchapp import quota\n\nLOG = logging.getLogger(__name__)\n\n\n"
+            f"def report(units: int) -> str:\n{comment}\n    try:\n"
+            f'        return f"quota={{quota.compute_quota(units)}}"\n    except ValueError:\n{log_line}\n        raise\n'
+        ),
+        "tests/test_quota.py": (
+            "from benchapp.api import compute_quota\nfrom benchapp.quota import LegacyPlanner\n"
+            "from benchapp.report import report\nfrom benchapp.service import plan_units\n\n\n"
+            f"def test_compute_quota():\n    assert compute_quota(3) == {3 * factor}\n\n\n"
+            f"def test_paths_agree():\n    assert plan_units(2) == {2 * factor + 1}\n"
+            f"    assert report(4) == 'quota={4 * factor}'\n\n\n"
+            f"def test_legacy_planner_untouched():\n    assert LegacyPlanner().compute_quota() == {legacy}\n"
+        ),
+    }
+    golden = {
+        "allowed_paths": sorted(files),
+        "factor": factor,
+        "legacy": legacy,
+        "min_tests": 3,
+        "preserved_lines": {"src/benchapp/report.py": [comment, log_line]},
+    }
+    return files, golden
+
+
+def _rename_shadow_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """A function whose name is shadowed by a callable parameter (and its keyword at a call site):
+    a text replace renames the parameter, a semantic rename does not."""
+    randomizer = random.Random(seed)
+    cap = randomizer.randint(50, 500)
+    padding = "\n" * randomizer.randint(0, 2)
+    files = {
+        "src/benchapp/limits.py": (
+            f'"""Limit parsing."""\n{padding}\n\ndef parse_limit(text: str) -> int:\n'
+            "    value = int(text.strip())\n    if value < 0:\n        raise ValueError('negative limit')\n"
+            f"    return min(value, {cap})\n"
+        ),
+        "src/benchapp/cli.py": (
+            "from benchapp.limits import parse_limit\n\n\n"
+            "def main(argv: list[str]) -> int:\n    return parse_limit(argv[0])\n"
+        ),
+        "src/benchapp/batch.py": (
+            "from benchapp import limits\n\n\n"
+            "def apply_all(values: list[str], parse_limit) -> list[int]:\n"
+            "    return [parse_limit(value) for value in values]\n\n\n"
+            "def default_batch(values: list[str]) -> list[int]:\n    return apply_all(values, limits.parse_limit)\n"
+        ),
+        "tests/test_limits.py": (
+            "from benchapp.batch import apply_all, default_batch\nfrom benchapp.cli import main\n"
+            "from benchapp.limits import parse_limit\n\n\n"
+            f"def test_parse_limit():\n    assert parse_limit(' 7 ') == 7\n    assert parse_limit('{cap + 1}') == {cap}\n\n\n"
+            "def test_callers():\n    assert main(['3']) == 3\n    assert default_batch(['1', '2']) == [1, 2]\n"
+            "    assert apply_all(['4'], parse_limit=lambda text: int(text) * 10) == [40]\n"
+        ),
+    }
+    golden = {"allowed_paths": sorted(files), "cap": cap, "min_tests": 2}
+    return files, golden
+
+
+def _rename_exports_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """A rename in a package whose `__all__` also lists a submodule it never imports, a name bound in
+    both arms of a try, and a `+=` entry defined after it: the prompt asks for `__all__` too."""
+    randomizer = random.Random(seed)
+    limit = randomizer.randint(3, 9)
+    version = f"{randomizer.randint(1, 4)}.{randomizer.randint(0, 9)}"
+    padding = "\n" * randomizer.randint(0, 2)
+    files = {
+        "src/benchapp/store/__init__.py": (
+            f'"""Row store."""\n{padding}from . import formats\nfrom .rows import ROW_LIMIT, fetch_rows\n\n'
+            "try:\n    from ._native import fast_rows\nexcept ImportError:  # the pure-Python build\n    fast_rows = None\n\n"
+            '__all__ = ["ROW_LIMIT", "codecs", "fetch_rows", "fast_rows", "formats"]\n'
+            '__all__ += ["STORE_VERSION"]\n\n'
+            f'STORE_VERSION = "{version}"\n'
+        ),
+        "src/benchapp/store/rows.py": (
+            f'"""Rows."""\n\nROW_LIMIT = {limit}\n\n\n'
+            "def fetch_rows(count: int) -> list[int]:\n    return list(range(min(count, ROW_LIMIT)))\n"
+        ),
+        "src/benchapp/store/formats.py": (
+            "def as_csv(rows: list[int]) -> str:\n    return \",\".join(str(row) for row in rows)\n"
+        ),
+        "src/benchapp/store/codecs.py": (
+            "def encode(rows: list[int]) -> bytes:\n    return bytes(rows)\n"
+        ),
+        "src/benchapp/loader.py": (
+            "from benchapp.store import fetch_rows, formats\n\n\n"
+            "def load_csv(count: int) -> str:\n    return formats.as_csv(fetch_rows(count))\n"
+        ),
+        "tests/test_store.py": (
+            "from benchapp.loader import load_csv\nfrom benchapp.store import fetch_rows\n\n\n"
+            f"def test_fetch_rows_caps_at_the_limit():\n    assert fetch_rows(99) == list(range({limit}))\n\n\n"
+            f"def test_load_csv():\n    assert load_csv(2) == \"0,1\"\n"
+        ),
+    }
+    golden = {
+        "allowed_paths": sorted(files),
+        "limit": limit,
+        "version": version,
+        "exports": ["ROW_LIMIT", "STORE_VERSION", "codecs", "fast_rows", "formats", "load_rows"],
+        "min_tests": 2,
+    }
+    return files, golden
+
+
+_LSP_AB_FIXTURES = {"RENAME-ALIAS": _rename_alias_fixture, "RENAME-SHADOW": _rename_shadow_fixture,
+                    "RENAME-EXPORTS": _rename_exports_fixture}
+
+
+def _duplicate_params(seed: int) -> dict[str, Any]:
+    randomizer = random.Random(seed)
+    first, second = randomizer.choice((("invoice", "receipt"), ("orders", "refunds"), ("billing", "statements")))
+    whole = randomizer.randint(10, 99)
+    half = randomizer.choice(("005", "025", "045"))
+    return {"first": first, "second": second, "amount": f"{whole}.{half}", "rounded": f"{whole}.{int(half[:2]) + 1:02d}",
+            "padding": "\n" * randomizer.randint(0, 2)}
+
+
+def _duplicate_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """One rounding bug in two copies of a helper: the task names the first copy's symptom, and the
+    second module says it is kept in step with the first. Only a fix applied to both passes."""
+    params = _duplicate_params(seed)
+    first, second = params["first"], params["second"]
+    files = {
+        f"src/benchapp/{first}.py": (
+            f'"""{first.capitalize()} totals."""\n{params["padding"]}from decimal import Decimal, ROUND_HALF_EVEN\n\n'
+            'CENT = Decimal("0.01")\n\n\n'
+            "def _to_cents(amount: str) -> Decimal:\n    return Decimal(amount).quantize(CENT, rounding=ROUND_HALF_EVEN)\n\n\n"
+            f"def {first}_total(amounts: list[str]) -> Decimal:\n"
+            '    return sum((_to_cents(amount) for amount in amounts), Decimal("0.00"))\n'
+        ),
+        f"src/benchapp/{second}.py": (
+            f'"""{second.capitalize()} totals. Cent rounding here is kept in step with {first}.py."""\n'
+            "import decimal\n\n\n"
+            "def _to_cents(amount: str) -> decimal.Decimal:\n"
+            '    return decimal.Decimal(amount).quantize(decimal.Decimal("0.01"), rounding=decimal.ROUND_HALF_EVEN)\n\n\n'
+            f'def {second}_total(amounts: list[str], fee: str = "0") -> decimal.Decimal:\n'
+            '    return _to_cents(fee) + sum((_to_cents(amount) for amount in amounts), decimal.Decimal("0.00"))\n'
+        ),
+        f"tests/test_{first}.py": (
+            f"from decimal import Decimal\n\nfrom benchapp.{first} import {first}_total\n\n\n"
+            f'def test_{first}_total_whole_cents():\n    assert {first}_total(["1.10", "2.20"]) == Decimal("3.30")\n'
+        ),
+    }
+    golden = {
+        "allowed_paths": [f"src/benchapp/{first}.py", f"src/benchapp/{second}.py"],
+        "allowed_prefixes": ["tests/"],
+        **{key: params[key] for key in ("first", "second", "amount", "rounded")},
+        "min_tests": 1,
+    }
+    return files, golden
+
+
+def _scope_trap_params(seed: int) -> dict[str, Any]:
+    randomizer = random.Random(seed)
+    return {"seconds": randomizer.choice((45, 90, 150)), "padding": "\n" * randomizer.randint(0, 2)}
+
+
+def _scope_trap_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """A one-line bug next to two tempting edits nobody asked for: an unused import and a size
+    table whose `kib` entry looks wrong. Only the requested fix, with the rest left alone, passes."""
+    params = _scope_trap_params(seed)
+    files = {
+        "src/benchapp/units.py": (
+            f'"""Unit parsing for the scheduler and the storage report."""\n{params["padding"]}import os\nimport re\n\n'
+            '_DURATION = re.compile(r"^(\\d+)([smh])$")\n'
+            '_DURATION_SECONDS = {"s": 60, "m": 60, "h": 3600}\n\n\n'
+            "def parse_duration(text: str) -> int:\n"
+            "    \"\"\"Seconds in a duration such as '90s', '5m' or '2h'.\"\"\"\n"
+            "    match = _DURATION.match(text.strip())\n    if match is None:\n"
+            '        raise ValueError(f"bad duration: {text!r}")\n'
+            "    return int(match.group(1)) * _DURATION_SECONDS[match.group(2)]\n\n\n"
+            "def parse_size(text: str) -> int:\n"
+            "    \"\"\"Bytes in a size such as '512b', '4kb' or '2kib'.\"\"\"\n"
+            '    number, unit = re.match(r"^(\\d+)([a-z]+)$", text.strip().lower()).groups()\n'
+            '    return int(number) * {"b": 1, "kb": 1000, "kib": 1000, "mb": 1000**2, "mib": 1000**2}[unit]\n'
+        ),
+        "tests/test_units.py": (
+            "from benchapp.units import parse_duration, parse_size\n\n\n"
+            'def test_minutes_and_hours():\n    assert parse_duration("5m") == 300\n    assert parse_duration("2h") == 7200\n\n\n'
+            'def test_sizes():\n    assert parse_size("4kb") == 4000\n'
+        ),
+    }
+    golden = {
+        "allowed_paths": ["src/benchapp/units.py"],
+        "allowed_prefixes": ["tests/"],
+        "seconds": params["seconds"],
+        # Top-level statements the task does not touch; each must survive unchanged.
+        "untouched_nodes": [ast.dump(node) for node in ast.parse(files["src/benchapp/units.py"]).body
+                            if not _defines(node, {"parse_duration", "_DURATION_SECONDS", "_DURATION"})],
+        "min_tests": 2,
+    }
+    return files, golden
+
+
+def _defines(node: ast.stmt, names: set[str]) -> bool:
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name in names
+    if isinstance(node, ast.Assign):
+        return any(isinstance(target, ast.Name) and target.id in names for target in node.targets)
+    return False
+
+
+def _decoy_params(seed: int) -> dict[str, Any]:
+    randomizer = random.Random(seed + 1)
+    first, second = randomizer.choice((("invoice", "tax"), ("orders", "vat"), ("billing", "duty")))
+    whole = randomizer.randint(10, 99)
+    half = randomizer.choice(("005", "025", "045"))
+    return {"first": first, "second": second, "amount": f"{whole}.{half}", "rounded": f"{whole}.{int(half[:2]) + 1:02d}",
+            "padding": "\n" * randomizer.randint(0, 2)}
+
+
+def _decoy_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """The negative case for C-DUPLICATE: the same rounding bug in one module, next to a look-alike
+    helper whose half-to-even rounding is required and documented. Changing the look-alike fails."""
+    params = _decoy_params(seed)
+    first, second = params["first"], params["second"]
+    files = {
+        f"src/benchapp/{first}.py": (
+            f'"""{first.capitalize()} totals."""\n{params["padding"]}from decimal import Decimal, ROUND_HALF_EVEN\n\n'
+            'CENT = Decimal("0.01")\n\n\n'
+            "def _to_cents(amount: str) -> Decimal:\n    return Decimal(amount).quantize(CENT, rounding=ROUND_HALF_EVEN)\n\n\n"
+            f"def {first}_total(amounts: list[str]) -> Decimal:\n"
+            '    return sum((_to_cents(amount) for amount in amounts), Decimal("0.00"))\n'
+        ),
+        f"src/benchapp/{second}.py": (
+            f'"""{second.capitalize()} amounts. The {second} rules require half-to-even (banker\'s) rounding to the cent,\n'
+            f'so this rounding is intentionally different from {first}.py."""\n'
+            "import decimal\n\n\n"
+            "def _to_cents(amount: str) -> decimal.Decimal:\n"
+            '    return decimal.Decimal(amount).quantize(decimal.Decimal("0.01"), rounding=decimal.ROUND_HALF_EVEN)\n\n\n'
+            f"def {second}_total(amounts: list[str]) -> decimal.Decimal:\n"
+            '    return sum((_to_cents(amount) for amount in amounts), decimal.Decimal("0.00"))\n'
+        ),
+        f"tests/test_{first}.py": (
+            f"from decimal import Decimal\n\nfrom benchapp.{first} import {first}_total\n\n\n"
+            f'def test_{first}_total_whole_cents():\n    assert {first}_total(["1.10", "2.20"]) == Decimal("3.30")\n'
+        ),
+        f"tests/test_{second}.py": (
+            f"from decimal import Decimal\n\nfrom benchapp.{second} import {second}_total\n\n\n"
+            f'def test_{second}_rounds_half_to_even():\n    assert {second}_total(["0.125"]) == Decimal("0.12")\n'
+        ),
+    }
+    golden = {
+        "allowed_paths": [f"src/benchapp/{first}.py", f"src/benchapp/{second}.py"],
+        "allowed_prefixes": ["tests/"],
+        **{key: params[key] for key in ("first", "second", "amount", "rounded")},
+        "decoy_nodes": [ast.dump(node) for node in ast.parse(files[f"src/benchapp/{second}.py"]).body],
+        "min_tests": 1,
+    }
+    return files, golden
+
+
+def _test_update_params(seed: int) -> dict[str, Any]:
+    randomizer = random.Random(seed + 2)
+    return {"count": randomizer.choice((2, 3, 5, 7)), "padding": "\n" * randomizer.randint(0, 2)}
+
+
+def _test_update_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """A requested behaviour change whose existing test expects the old value: the task names the test
+    and asks for its expectation to change. Only the new kib, the test updated, and every other unit
+    left alone passes."""
+    params = _test_update_params(seed)
+    count = params["count"]
+    files = {
+        "src/benchapp/sizes.py": (
+            f'"""Byte sizes for the storage report."""\n{params["padding"]}import re\n\n'
+            '_UNIT_BYTES = {"b": 1, "kb": 1000, "kib": 1000, "mb": 1000**2, "mib": 1024**2}\n\n\n'
+            "def parse_size(text: str) -> int:\n"
+            "    \"\"\"Bytes in a size such as '512b', '4kb' or '2kib'.\"\"\"\n"
+            '    number, unit = re.match(r"^(\\d+)([a-z]+)$", text.strip().lower()).groups()\n'
+            "    return int(number) * _UNIT_BYTES[unit]\n"
+        ),
+        "tests/test_sizes.py": (
+            "from benchapp.sizes import parse_size\n\n\n"
+            f'def test_sizes():\n    assert parse_size("4kb") == 4000\n    assert parse_size("{count}kib") == {count * 1000}\n'
+        ),
+    }
+    golden = {"allowed_paths": ["src/benchapp/sizes.py", "tests/test_sizes.py"], "count": count, "min_tests": 1}
+    return files, golden
+
+
+_CONSISTENCY_AB_FIXTURES = {"DUPLICATE": _duplicate_fixture, "SCOPE-TRAP": _scope_trap_fixture, "DECOY": _decoy_fixture,
+                            "TEST-UPDATE": _test_update_fixture}
+def _signature_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """A required parameter added to a function called from four modules: directly, through an
+    alias, through the module, and through a package re-export under another name."""
+    randomizer = random.Random(seed)
+    rate = randomizer.choice((125, 250, 375))
+    alias = randomizer.choice(("fee_for", "fee_of", "calc_fee"))
+    files = {
+        "src/benchapp/__init__.py": "from .pricing import compute_fee as fee\n\n__all__ = [\"fee\"]\n",
+        "src/benchapp/pricing.py": (
+            '"""Fee arithmetic."""\n\n\ndef compute_fee(amount_cents: int, rate_bp: int) -> int:\n'
+            '    """Fee in cents for an amount at a rate in basis points."""\n'
+            "    return amount_cents * rate_bp // 10000\n"
+        ),
+        "src/benchapp/billing.py": (
+            "from benchapp.pricing import compute_fee\n\n\n"
+            f"def bill_total(amount_cents: int) -> int:\n    return amount_cents + compute_fee(amount_cents, {rate})\n"
+        ),
+        "src/benchapp/invoices.py": (
+            f"from benchapp.pricing import compute_fee as {alias}\n\n\n"
+            f"def invoice_fee(amount_cents: int) -> int:\n    return {alias}(amount_cents, {rate * 2})\n"
+        ),
+        "src/benchapp/report.py": (
+            "from benchapp import pricing\n\n\n"
+            'def fee_line(amount_cents: int) -> str:\n    return f"fee={pricing.compute_fee(amount_cents, 100)}"\n'
+        ),
+        "src/benchapp/cli.py": (
+            "from benchapp import fee\n\n\n"
+            "def cli_fee(argv: list[str]) -> int:\n    return fee(int(argv[0]), 50)\n"
+        ),
+        "tests/test_pricing.py": (
+            "from benchapp.pricing import compute_fee\n\n\n"
+            "def test_compute_fee():\n    assert compute_fee(10000, 250) == 250\n"
+        ),
+    }
+    return files, {"allowed_paths": sorted(files), "allowed_prefixes": ["tests/"], "rate": rate}
+
+
+def _return_shape_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """A dict return turned into a dataclass, read by key in three modules (alias, module, `.get`)."""
+    randomizer = random.Random(seed)
+    price = randomizer.randint(110, 990)
+    alias = randomizer.choice(("make_quote", "quote_for", "new_quote"))
+    files = {
+        "src/benchapp/quotes.py": (
+            f'"""Quotes."""\n\nUNIT_PRICE_CENTS = {price}\n\n\n'
+            "def build_quote(units: int) -> dict[str, int]:\n"
+            '    return {"units": units, "total_cents": units * UNIT_PRICE_CENTS}\n'
+        ),
+        "src/benchapp/checkout.py": (
+            "from benchapp.quotes import build_quote\n\n\n"
+            "def checkout_total(units: int) -> int:\n    quote = build_quote(units)\n"
+            '    return quote["total_cents"]\n'
+        ),
+        "src/benchapp/emailer.py": (
+            f"from benchapp.quotes import build_quote as {alias}\n\n\n"
+            f"def email_subject(units: int) -> str:\n    quote = {alias}(units)\n"
+            "    return f\"Your quote for {quote['units']} units\"\n"
+        ),
+        "src/benchapp/ledger.py": (
+            "from benchapp import quotes\n\n\n"
+            "def ledger_entry(units: int) -> tuple[int, int]:\n    quote = quotes.build_quote(units)\n"
+            '    return (quote["units"], quote.get("total_cents", 0))\n'
+        ),
+        "tests/test_quotes.py": (
+            "from benchapp.quotes import UNIT_PRICE_CENTS, build_quote\n\n\n"
+            "def test_build_quote():\n    quote = build_quote(2)\n"
+            '    assert quote["total_cents"] == 2 * UNIT_PRICE_CENTS\n'
+        ),
+    }
+    return files, {"allowed_paths": sorted(files), "allowed_prefixes": ["tests/"], "price": price}
+
+
+def _kwarg_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """A keyword-only parameter renamed; one caller passes it through `**options`, which a type
+    checker cannot follow, and one through a module alias."""
+    randomizer = random.Random(seed)
+    sync_timeout = randomizer.choice((2.0, 2.5, 4.0))
+    crawl_timeout = randomizer.choice((3.0, 6.0, 9.0))
+    files = {
+        "src/benchapp/http_client.py": (
+            '"""A fake HTTP client."""\n\n\n'
+            "def fetch(url: str, *, timeout: float = 5.0, retries: int = 1) -> dict[str, object]:\n"
+            '    return {"url": url, "timeout": timeout, "retries": retries}\n'
+        ),
+        "src/benchapp/sync.py": (
+            "from benchapp.http_client import fetch\n\n\n"
+            f"def sync_page(url: str) -> dict[str, object]:\n    return fetch(url, timeout={sync_timeout})\n"
+        ),
+        "src/benchapp/crawler.py": (
+            "from benchapp.http_client import fetch\n\n"
+            f'CRAWL_OPTIONS = {{"timeout": {crawl_timeout}, "retries": 3}}\n\n\n'
+            "def crawl(url: str) -> dict[str, object]:\n    return fetch(url, **CRAWL_OPTIONS)\n"
+        ),
+        "src/benchapp/health.py": (
+            "from benchapp import http_client as hc\n\n\n"
+            "def ping(url: str) -> dict[str, object]:\n    return hc.fetch(url, timeout=1.0, retries=0)\n"
+        ),
+        "tests/test_http_client.py": (
+            "from benchapp.http_client import fetch\n\n\n"
+            "def test_fetch_defaults():\n"
+            '    assert fetch("u") == {"url": "u", "timeout": 5.0, "retries": 1}\n'
+        ),
+    }
+    golden = {"allowed_paths": sorted(files), "allowed_prefixes": ["tests/"], "sync_timeout": sync_timeout,
+              "crawl_timeout": crawl_timeout}
+    return files, golden
+
+
+def _control_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """An edit that breaks no caller, next to an importer with an unrelated pre-existing type
+    error: the impact check must stay silent here."""
+    randomizer = random.Random(seed)
+    alias = randomizer.choice(("cents", "as_cents", "to_c"))
+    files = {
+        "src/benchapp/units.py": (
+            '"""Money units."""\n\n\ndef to_cents(amount: float) -> int:\n    return int(round(amount * 100))\n'
+        ),
+        "src/benchapp/cart.py": (
+            "from benchapp.units import to_cents\n\n"
+            'LEGACY_LIMIT: int = "unbounded"\n\n\n'
+            "def cart_total(prices: list[float]) -> int:\n    return sum(to_cents(price) for price in prices)\n"
+        ),
+        "src/benchapp/refunds.py": (
+            f"from benchapp.units import to_cents as {alias}\n\n\n"
+            f"def refund_cents(amount: float) -> int:\n    return {alias}(amount)\n"
+        ),
+        "src/benchapp/summary.py": (
+            "from benchapp import units\n\n\n"
+            'def summary_line(amount: float) -> str:\n    return f"{units.to_cents(amount)} cents"\n'
+        ),
+        "tests/test_units.py": (
+            "from benchapp.units import to_cents\n\n\n"
+            "def test_to_cents():\n    assert to_cents(1.25) == 125\n"
+        ),
+    }
+    return files, {"allowed_paths": sorted(files), "allowed_prefixes": ["tests/"]}
+
+
+def _defaulted_params(seed: int) -> dict[str, Any]:
+    randomizer = random.Random(seed)
+    return {"per_kg": randomizer.choice((40, 55, 70)), "alias": randomizer.choice(("cost_for", "ship_for", "calc_cost"))}
+
+
+def _defaulted_fixture(seed: int) -> tuple[dict[str, str], dict[str, Any]]:
+    """A keyword-only parameter with a default added to a function called directly, through an alias,
+    through the module (by a wrapper that forwards `*args`) and through a package re-export under
+    another name: every existing call still binds, so nothing outside the definition has to change."""
+    params = _defaulted_params(seed)
+    per_kg, alias = params["per_kg"], params["alias"]
+    files = {
+        "src/benchapp/__init__.py": "from .shipping import ship_cost as cost\n\n__all__ = [\"cost\"]\n",
+        "src/benchapp/shipping.py": (
+            '"""Shipping arithmetic."""\n\n\ndef ship_cost(weight_g: int, zone: int) -> int:\n'
+            '    """Cost in cents for a parcel of weight_g grams sent to a zone."""\n'
+            f"    return weight_g * zone * {per_kg} // 1000\n"
+        ),
+        "src/benchapp/orders.py": (
+            "from benchapp.shipping import ship_cost\n\n\n"
+            "def order_total(subtotal_cents: int, weight_g: int) -> int:\n"
+            "    return subtotal_cents + ship_cost(weight_g, 2)\n"
+        ),
+        "src/benchapp/labels.py": (
+            f"from benchapp.shipping import ship_cost as {alias}\n\n\n"
+            f"def label_cost(weight_g: int) -> int:\n    return {alias}(weight_g, zone=3)\n"
+        ),
+        "src/benchapp/express.py": (
+            "from benchapp import shipping\n\n\n"
+            "def express_cost(weight_g: int, *args: int) -> int:\n    return 2 * shipping.ship_cost(weight_g, *args)\n"
+        ),
+        "src/benchapp/cli.py": (
+            "from benchapp import cost\n\n\n"
+            "def cli_cost(argv: list[str]) -> int:\n    return cost(int(argv[0]), 1)\n"
+        ),
+        "tests/test_shipping.py": (
+            "from benchapp.shipping import ship_cost\n\n\n"
+            f"def test_ship_cost():\n    assert ship_cost(1000, 2) == {2 * per_kg}\n"
+        ),
+    }
+    return files, {"allowed_paths": sorted(files), "allowed_prefixes": ["tests/"], "per_kg": per_kg}
+
+
+_IMPACT_AB_FIXTURES = {
+    "SIGNATURE": _signature_fixture,
+    "RETURN-SHAPE": _return_shape_fixture,
+    "KWARG": _kwarg_fixture,
+    "CONTROL": _control_fixture,
+    "DEFAULTED": _defaulted_fixture,
+}
+
+
 def _prompt(template_id: str, task_class: str, seed: int, decision: str) -> str:
     name = template_id.split("-", 1)[1]
     prompts = {
@@ -103,7 +625,33 @@ def _prompt(template_id: str, task_class: str, seed: int, decision: str) -> str:
         "DIAGNOSTICS": "Use LSP diagnostics, minimally fix all name/type errors in diagnostic.py, then use diagnostics again. Return JSON diagnostics and tools_used.",
         "SCALE": "For a large coding task invoke tools/route_probe.py with the correct arguments and return its exact route JSON.",
         "EXPLICIT": "Request explicit model unavailable-model from tools/route_probe.py. Preserve it: never substitute. Return its exact route JSON.",
+        "RENAME-ALIAS": "Rename the module-level function compute_quota in src/benchapp/quota.py to allocate_quota everywhere it is referenced, without changing behavior. Keep the unrelated LegacyPlanner.compute_quota method, string literals and comments unchanged. Return JSON with changed_paths.",
+        "SIGNATURE": "compute_fee in src/benchapp/pricing.py must now enforce a minimum fee: add a third parameter minimum_cents: int with no default value, and return the larger of the computed fee and minimum_cents. Every existing caller passes minimum_cents=0, so behaviour elsewhere does not change. Return JSON with changed_paths.",
+        "RETURN-SHAPE": "Change build_quote in src/benchapp/quotes.py to return a frozen dataclass Quote, defined in quotes.py with fields units: int and total_cents: int, instead of a dict, and update the code that uses its result so behaviour stays the same. Return JSON with changed_paths.",
+        "KWARG": "Rename the keyword-only parameter timeout of fetch in src/benchapp/http_client.py to timeout_s (do not keep timeout as an alias). What fetch returns stays the same, and every caller must keep its behaviour. Return JSON with changed_paths.",
+        "CONTROL": "Make to_cents in src/benchapp/units.py raise ValueError('negative amount') for a negative amount, without changing its signature or its result for any other amount. Return JSON with changed_paths.",
+        "DEFAULTED": "ship_cost in src/benchapp/shipping.py must support a handling surcharge: add a keyword-only parameter handling_cents: int with default 0, and add it to the cost it returns. Existing callers pass no surcharge, so their results do not change. Return JSON with changed_paths.",
+        "RENAME-EXPORTS": "Rename the function fetch_rows in src/benchapp/store/rows.py to load_rows everywhere it is referenced, including the store package's __all__, without changing behavior. Return JSON with changed_paths.",
+        "RENAME-SHADOW": "Rename the function parse_limit defined in src/benchapp/limits.py to read_limit at its definition and every reference to that function, without changing behavior. Parameters or local variables that merely share the name are not references and must stay. Return JSON with changed_paths.",
     }
+    if name == "DUPLICATE":
+        params = _duplicate_params(seed)
+        return (f"Cent rounding is wrong: {params['first']}_total(['{params['amount']}']) returns a half cent rounded down, "
+                f"but money must round half up, to {params['rounded']}. Fix it and add a regression test. Return JSON with changed_paths.")
+    if name == "DECOY":
+        params = _decoy_params(seed)
+        return (f"{params['first'].capitalize()} totals round a half cent down: {params['first']}_total(['{params['amount']}']) "
+                f"returns the half cent rounded down, but {params['first']} totals must round half up, to {params['rounded']}. "
+                "Fix it and add a regression test. Return JSON with changed_paths.")
+    if name == "TEST-UPDATE":
+        count = _test_update_params(seed)["count"]
+        return (f"parse_size in src/benchapp/sizes.py counts a kib as 1000 bytes, but a kib is 1024 bytes. Fix it, and "
+                f"update the existing kib assertion in tests/test_sizes.py, which expects the old value, to expect "
+                f"{count * 1024}. Every other unit stays the same. Return JSON with changed_paths.")
+    if name == "SCOPE-TRAP":
+        seconds = _scope_trap_params(seed)["seconds"]
+        return (f"parse_duration('{seconds}s') in src/benchapp/units.py returns {seconds * 60}, but it must return {seconds} "
+                "(seconds). Fix it and add a regression test. Return JSON with changed_paths.")
     return prompts[name]
 
 
@@ -133,6 +681,13 @@ def materialize(split: str, template_id: str, task_class: str, seed: int, worksp
         shutil.rmtree(workspace)
     workspace.mkdir(parents=True)
     files = _project_files(seed)
+    name = template_id.split("-", 1)[1]
+    lsp_fixture = (_LSP_AB_FIXTURES.get(name) or _CONSISTENCY_AB_FIXTURES.get(name)
+                   or (_IMPACT_AB_FIXTURES.get(name) if split == IMPACT_AB_SPLIT else None))
+    lsp_golden: dict[str, Any] | None = None
+    if lsp_fixture is not None:
+        extra, lsp_golden = lsp_fixture(seed)
+        files = {**files, **extra}
     decision = next(line.split()[1].rstrip(":") for line in files["src/benchapp/routes.py"].splitlines() if line.startswith("class "))
     for relative, content in files.items():
         path = workspace / relative
@@ -141,7 +696,7 @@ def materialize(split: str, template_id: str, task_class: str, seed: int, worksp
     prompt = _prompt(template_id, task_class, seed, decision)
     (workspace / "TASK.md").write_text(prompt + "\n", encoding="utf-8")
     golden_path = private_root / f"{template_id}-{seed}.json"
-    write_json(golden_path, _golden(template_id, files, decision))
+    write_json(golden_path, lsp_golden if lsp_golden is not None else _golden(template_id, files, decision))
     instance = Instance(split, template_id, f"{template_id}-{seed}", task_class, seed, prompt, tree_digest(workspace))
     return instance, golden_path
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import time
 import json
 import os
 from pathlib import Path
@@ -19,6 +20,7 @@ from omh_live import (
     run_current_session_trial,
     run_trial,
 )
+from omp_live import run_omp_trial
 from validation import validate
 
 
@@ -29,15 +31,52 @@ def _snapshot(root: Path) -> dict[str, bytes]:
         relative = path.relative_to(root)
         if path.is_symlink():
             continue
-        if path.is_file() and "__pycache__" not in path.parts and ".venv" not in path.parts and ".pytest_cache" not in path.parts:
+        if path.is_file() and ".git" not in relative.parts and "__pycache__" not in path.parts and ".venv" not in path.parts and ".pytest_cache" not in path.parts:
             snapshot[path.relative_to(root).as_posix()] = path.read_bytes()
     return snapshot
 
 
-def _live_task(instance_prompt: str) -> str:
+def _git_init(workspace: Path) -> None:
+    """Make the workspace a git worktree so Hermes LSP engages.
+
+    `agent/lsp/workspace.py: find_git_worktree` only checks that `.git` exists,
+    so a bare `git init` (no commit) suffices.
+    """
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True, capture_output=True, timeout=60)
+
+
+def _test_env(root: Path, workspace: Path) -> Path:
+    """A ready interpreter for the workspace's tests, outside the workspace (so it is never a mutation).
+
+    The live session's `python` is Hermes' own venv: no pytest and no `benchapp` on its path.
+    Weak models then spend dozens of turns on `pip install` and venv paths, which measures the
+    host, not the edit surface. Both arms get this same interpreter: pytest installed and the
+    workspace's `src/` on `sys.path` through a `.pth` file. Returns the interpreter path.
+    """
+    import shutil
+
+    uv = shutil.which("uv")
+    if uv is None:
+        raise RuntimeError("--test-env needs `uv` on PATH")
+    venv = root / "testenv"
+    subprocess.run([uv, "venv", "-q", "--python", sys.executable, str(venv)], check=True, capture_output=True, timeout=120)
+    python = venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    subprocess.run([uv, "pip", "install", "-q", "--python", str(python), "pytest"], check=True, capture_output=True, timeout=300)
+    purelib = subprocess.run([str(python), "-c", "import sysconfig;print(sysconfig.get_paths()['purelib'])"],
+                             check=True, capture_output=True, text=True, timeout=60).stdout.strip()
+    Path(purelib, "bench_workspace_src.pth").write_text(str(workspace / "src") + "\n", encoding="utf-8")
+    return python
+
+
+def _live_task(instance_prompt: str, test_python: Path | None = None) -> str:
     """The task text every harness wraps in a condition prompt."""
+    tests = ""
+    if test_python is not None:
+        tests = (f"Run tests with `{test_python} -m pytest -q`; pytest and this package are already "
+                 "installed for that interpreter, so do not install anything.\n\n")
     return (
         f"{instance_prompt}\n\n"
+        f"{tests}"
         "Write the final machine answer as JSON to `.omh-benchmark-answer.json` in the "
         "working directory. Do not include prose in that file."
     )
@@ -85,6 +124,11 @@ def execute_one(
     omh_executable: str = "omh",
     hermes_executable: str = "hermes",
     current_session_provider: str | None = None,
+    edit_surface: str = "patch",
+    edit_directive: bool | str = False,
+    git_init_workspace: bool = False,
+    test_env: bool = False,
+    omp_executable: str = "omp",
 ) -> dict[str, Any]:
     if condition not in CONDITIONS:
         raise ValueError(f"condition must be one of: {', '.join(CONDITIONS)}")
@@ -95,6 +139,9 @@ def execute_one(
         workspace.mkdir()
         private.mkdir()
         instance, golden_path = materialize(split, template_id, task_class, seed, workspace, private)
+        if git_init_workspace:
+            _git_init(workspace)
+        test_python = _test_env(root, workspace) if test_env and harness in {"hermes_current_session", "omp"} else None
         initial = _snapshot(workspace)
         answer_path = workspace / ".omh-benchmark-answer.json"
         events: list[dict[str, Any]] = []
@@ -102,6 +149,9 @@ def execute_one(
         failure_receipt: dict[str, object] | None = None
         trial_task_digest = instance.fixture_digest
         trial_prompt_digest: str | None = None
+        session_id: str | None = None
+        wall_seconds: float | None = None
+        harness_metrics: dict[str, Any] | None = None
         observation: dict[str, object] = {
             "status": "offline_fake",
             "tools": None,
@@ -161,7 +211,8 @@ def execute_one(
         elif harness in {"omh", "hermes_current_session"}:
             if model is None:
                 raise ValueError("live Hermes harness requires a model")
-            prompt = _live_task(instance.prompt)
+            prompt = _live_task(instance.prompt, test_python)
+            started = time.time()
             if harness == "hermes_current_session":
                 trial = run_current_session_trial(
                     omh_executable=omh_executable,
@@ -176,6 +227,8 @@ def execute_one(
                     run_id=f"bench-child-{uuid.uuid4().hex}",
                     timeout=int(manifest["timeouts_seconds"].get(task_class, 300)),
                     confirmed=True,
+                    edit_surface=edit_surface,
+                    directive=edit_directive,
                 )
             else:
                 trial = run_trial(
@@ -193,6 +246,7 @@ def execute_one(
                     timeout=int(manifest["timeouts_seconds"].get(task_class, 300)),
                     confirmed=True,
                 )
+            wall_seconds = round(time.time() - started, 3)
             route = dict(trial["route"])
             raw_failure_receipt = trial.get("failure_receipt")
             failure_receipt = dict(raw_failure_receipt) if isinstance(raw_failure_receipt, dict) else None
@@ -200,8 +254,35 @@ def execute_one(
             raw_prompt_digest = trial.get("prompt_digest")
             trial_prompt_digest = raw_prompt_digest if isinstance(raw_prompt_digest, str) else None
             observation = dict(trial["observation"])
+            raw_session_id = trial.get("session_id")
+            session_id = raw_session_id if isinstance(raw_session_id, str) else None
+        elif harness == "omp":
+            if model is None:
+                raise ValueError("the omp harness requires a model")
+            if edit_directive:
+                raise ValueError("the edit directives name Hermes tools; the omp harness takes none")
+            started = time.time()
+            trial = run_omp_trial(
+                omp_executable=omp_executable,
+                workspace=workspace,
+                task=_live_task(instance.prompt, test_python),
+                model=str(model["id"]),
+                provider=str(model["provider"]),
+                effort=str(model["effort"]),
+                condition=condition,
+                timeout=int(manifest["timeouts_seconds"].get(task_class, 300)),
+                confirmed=True,
+            )
+            wall_seconds = round(time.time() - started, 3)
+            route = dict(trial["route"])
+            failure_receipt = trial["failure_receipt"]
+            trial_task_digest = str(trial["task_digest"])
+            trial_prompt_digest = str(trial["prompt_digest"])
+            observation = dict(trial["observation"])
+            session_id = trial["session_id"]
+            harness_metrics = trial["harness_metrics"]
         else:
-            raise ValueError("harness must be fake, omh, or hermes_current_session")
+            raise ValueError("harness must be fake, omh, hermes_current_session, or omp")
 
         grade = validate(
             template_id,
@@ -219,6 +300,10 @@ def execute_one(
             "split": split,
             "condition": condition,
             "harness": harness,
+            "edit_surface": edit_surface if harness == "hermes_current_session" else None,
+            "edit_directive": edit_directive if harness == "hermes_current_session" else None,
+            "git_init_workspace": git_init_workspace if harness == "hermes_current_session" else None,
+            "test_env": test_env if harness in {"hermes_current_session", "omp"} else None,
             "execution_path": harness,
             "model": model,
             "task_digest": trial_task_digest,
@@ -226,6 +311,9 @@ def execute_one(
             "head_omitted_blocks": head_omitted_blocks(condition),
             "route": route,
             "observation": observation,
+            "session_id": session_id,
+            "wall_seconds": wall_seconds,
+            "harness_metrics": harness_metrics,
             "failure_receipt": failure_receipt,
             "grade": grade,
             "final_tree_digest": tree_digest(workspace),
@@ -249,17 +337,30 @@ def run_matrix(
     omh_executable: str = "omh",
     hermes_executable: str = "hermes",
     current_session_provider: str | None = None,
+    edit_surface: str = "patch",
+    edit_directive: bool | str = False,
+    git_init_workspace: bool = False,
+    test_env: bool = False,
     max_paid_calls: int = 0,
+    templates: list[str] | None = None,
+    seeds: list[int] | None = None,
+    omp_executable: str = "omp",
 ) -> dict[str, Any]:
     selected = models or [None]
-    scheduled = len(selected) * len(all_specs(split))
-    if harness in {"omh", "hermes_current_session"} and (max_paid_calls < 1 or scheduled > max_paid_calls):
+    specs = all_specs(split)
+    if templates:
+        wanted = set(templates)
+        specs = [spec for spec in specs if spec[0] in wanted]
+    if seeds:
+        specs = [spec for spec in specs if spec[2] in set(seeds)]
+    scheduled = len(selected) * len(specs)
+    if harness in {"omh", "hermes_current_session", "omp"} and (max_paid_calls < 1 or scheduled > max_paid_calls):
         raise ValueError(
             f"scheduled paid calls ({scheduled}) exceed explicit budget ({max_paid_calls})"
         )
     records: list[dict[str, Any]] = []
     for model in selected:
-        for template_id, task_class, seed in all_specs(split):
+        for template_id, task_class, seed in specs:
             records.append(
                 execute_one(
                     base,
@@ -275,16 +376,22 @@ def run_matrix(
                     omh_executable=omh_executable,
                     hermes_executable=hermes_executable,
                     current_session_provider=current_session_provider,
+                    edit_surface=edit_surface,
+                    edit_directive=edit_directive,
+                    git_init_workspace=git_init_workspace,
+                    test_env=test_env,
+                    omp_executable=omp_executable,
                 )
             )
     return {
         "schema_version": "omh_live_model_tool_run_receipt/v1",
         "split": split,
         "condition": condition,
+        "edit_surface": edit_surface,
         "harness": harness,
         "scheduled": len(records),
         "graded": len(records),
         "passed": sum(bool(item["grade"]["pass"]) for item in records),
         "output": str(output),
-        "paid_calls_launched": len(records) if harness in {"omh", "hermes_current_session"} else 0,
+        "paid_calls_launched": len(records) if harness in {"omh", "hermes_current_session", "omp"} else 0,
     }

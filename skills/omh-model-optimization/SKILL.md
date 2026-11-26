@@ -1,6 +1,6 @@
 ---
 name: "omh-model-optimization"
-description: "[omh] Onboarding a newly released model generation: when a model family ships a new generation or changes its serving contract, walk the recognition, research, calibration, routing, and measurement process that keeps model handling honest and current. Use when the user says: model-optimization, model optimization, optimize for model, onboard new model, calibrate new model, new model calibration, model calibration."
+description: "[omh] Onboarding a newly released model generation: when a model family ships a new generation or changes its serving contract, walk the recognition, research, calibration, routing, and measurement process that keeps model handling honest and current. Use when the user says: model-optimization, onboard new model, calibrate new model, new model calibration, model calibration."
 license: MIT
 author: "oh-my-hermes maintainers"
 metadata:
@@ -10,62 +10,30 @@ metadata:
     phase: model-onboarding
     role: tracker
     quality_tier: evidence-gated
-    related_skills: [omh-model-setup, ulw-perf]
+    related_skills: [omh-model-setup, ulw-perf, omh-model-compression, omh-inference-serving, omh-model-finetuning]
 ---
 
 # Model Optimization
 
-This is a Hermes-native `model-optimization` workflow skill.
+Required: the model id(s) as served, and the provider or gateway serving them, recognition probe output for each id, official release/contract documentation, with community harness findings labeled separately. Output: recognition and calibration coverage verdict for the family, trait-to-counter calibration draft (or a no-change verdict with reasons), routing/pricing placement plan naming config surfaces vs repo changes, measurement plan naming the benchmark pair or the reason none can run yet.
 
 ## Why This Exists
 
 `model-optimization` exists so a new model release triggers one repeatable, evidence-ordered process instead of ad-hoc edits: recognition proves what the router sees, official-first research separates contracts from folklore, trait-to-counter keeps calibrations concrete, and the measurement close keeps them honest.
 
-## Do Not Use When
-
-- The user wants their own machine's model routing configured or providers connected; use `omh-model-setup`.
-- The goal is measurable performance of an application or system, not model handling; use `ulw-perf`.
-- The user wants benchmark-superiority or provider-readiness claims without measurements.
-
-## Examples
-
-Good example:
-
-- Prompt: GLM 5.3 and 5.3 Flash just shipped; check what we should optimize for them.
-- Expected behavior: Probe recognition for both ids, verify family coverage, research the official thinking/tool contract plus community harness handling with labeled sources, draft version-aware trait-to-counter calibration, propose chain placement distinguishing the Flash sibling from the highspeed tier, and name the benchmark pair as the measurement close.
-- Why: A new generation of a known family needs the whole process, not just a chain edit.
-
-Bad example:
-
-- Prompt: Just say the new model is the best and route everything to it.
-- Expected behavior: Refuse the superiority claim, run the process, and place routing only with owner-approved config or repo changes backed by labeled sources.
-- Why: Unmeasured superiority claims and blanket rerouting are exactly what the process exists to prevent.
-
-## Completion Checklist
-
-- Recognition probe output exists for every new id, and the family label is the expected one.
-- Every research finding is labeled official, official-client, observed, or community with its source kept.
-- The calibration draft counters named traits and marks version-specific rules as such.
-- Routing and pricing changes name their surface (operator config vs repo change) and their approval state.
-- The measurement plan names the benchmark pair, or the recorded reason none can run, and the worse-measured-calibration rule is stated.
-
-## Recovery Notes
-
-- If official docs and community reports conflict, ship the official contract and record the community finding as an unconfirmed counter-signal.
-- If the model cannot be measured (no served route, no credentials), ship the calibration with its research provenance and record the measurement as the named follow-up.
-- If a later measurement shows the calibration worse than baseline, revise or remove it in the same change that reports the number.
+Contract: `references/full-contract.md` (examples, sibling boundaries, full artifact details).
 
 ## Workflow Lane
 
-- Current lane: **Research and company ops** (`product-docs`, `source-finder`, `web-research`, `research`, `model-optimization`, `inference-serving`, `model-finetuning`, `research-brief`, `+26 more`) - research, signals, ops, and briefings.
-- If intent belongs to another lane, hand back to `oh-my-hermes` or name the adjacent workflow.
+- Current lane: **Research and company ops** - research, signals, ops, and briefings.
+- If intent belongs to another lane, hand back to `omh-routing` or name the adjacent workflow.
 - Shared product, routing, compatibility, and evidence rules: `skill_view(name='omh-routing', file_path='references/skill-common-rail.md')`.
 
 ## When to Use
 
 Use when a model or family is new to OMH, shipped a new generation, or changed its serving contract, and the operator wants recognition, calibration, routing, pricing, and docs checked and strengthened for it through the fixed onboarding process.
 
-    Strong routing signals: `model-optimization`, `model optimization`, `optimize for model`, `onboard new model`, `calibrate new model`, `new model calibration`, `model calibration`
+    Strong routing signals: `model-optimization`, `onboard new model`, `calibrate new model`, `new model calibration`, `model calibration`
 
 ## Catalog Metadata
 
@@ -89,27 +57,24 @@ Handoff policy:
 
 Keep recognition probes, research synthesis, calibration drafting, and the process checklist in Hermes. Machine-local routing placement is a config edit the operator approves; repository changes (prefix table rows, calibration text, shipped chain defaults, docs) are coding work for the selected executor lane. A drafted calibration or prepared route is prepared_not_observed, never execution or benchmark evidence.
 
-Required inputs:
-
-- the model id(s) as served, and the provider or gateway serving them
-- recognition probe output for each id
-- official release/contract documentation, with community harness findings labeled separately
-
-Expected outputs:
-
-- recognition and calibration coverage verdict for the family
-- trait-to-counter calibration draft (or a no-change verdict with reasons)
-- routing/pricing placement plan naming config surfaces vs repo changes
-- measurement plan naming the benchmark pair or the reason none can run yet
-
-Artifact expectations:
-
-- metadata-only runtime record when a wrapper or shell is available
-
 Safety rules:
 
 - Do not imply hidden Hermes runtime behavior.
 - Use the smallest verification that can prove the claim.
+
+## Completion Checklist
+
+- Recognition probe output exists for every new id, and the family label is the expected one.
+- Every research finding is labeled official, official-client, observed, or community with its source kept.
+- The calibration draft counters named traits and marks version-specific rules as such.
+- Routing and pricing changes name their surface (operator config vs repo change) and their approval state.
+- The measurement plan names the benchmark pair, or the recorded reason none can run, and the worse-measured-calibration rule is stated.
+
+## Recovery Notes
+
+- If official docs and community reports conflict, ship the official contract and record the community finding as an unconfirmed counter-signal.
+- If the model cannot be measured (no served route, no credentials), ship the calibration with its research provenance and record the measurement as the named follow-up.
+- If a later measurement shows the calibration worse than baseline, revise or remove it in the same change that reports the number.
 
 ## Runtime Evidence
 
@@ -123,7 +88,7 @@ Record observed delegation results; otherwise return `not_available` or `not_obs
 Prepared OMH routing is not execution, review, CI, merge-readiness, or merge evidence.
 - Treat wrapper memory/context summaries as advisory local context, not proof of opaque Hermes memory reads or changes.
 Preserve workflow intent and stop conditions; verify before claiming completion.
-Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only; OMH's record terms (surface, lane, wrapper, handoff, evidence boundary, not_observed) stay in records and tool calls, never in the sentence the user reads unless they ask about one; and when a real unresolved user decision or a useful briefing discussion remains, offer one specific, content-linked question. Completed work needs no question; omit unrelated non-action footers and generic offers to continue.
+Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only. When the requested output is delivered, put any open points inside the result and end with no question or offer; only when the person asked to choose or decide and that choice is still theirs, end with one specific question about it, not a list, a generic offer, or a footer; the shared rail's Reply Language And Host Voice and Turn Ending sections hold the full rule.
 
 Use Hermes-native subagent/delegation features when available: native subagents -> Hermes delegation when available, otherwise sequential lanes.
 

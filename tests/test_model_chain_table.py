@@ -130,16 +130,16 @@ class GeneratedChainTableTests(unittest.TestCase):
         main = {row.row_id: row for row in chain_table_rows()}["role.main"]
         self.assertEqual(
             main.order,
-            "GPT-6.1 Sol (`high`), Claude Opus 5.5, Claude Fable 5.1, "
-            "GPT-6 Astra (`xhigh`), Kimi K3.1 Pro",
+            "GPT-6.2 Sol (`high`), Claude Opus 5.5, Claude Fable 5.2, "
+            "GPT-6.2 Astra (`xhigh`), Kimi K3.1 Pro",
         )
 
     def test_every_declared_effort_is_annotated_on_its_own_entry(self) -> None:
         architect = {row.row_id: row for row in chain_table_rows()}["architect"]
         self.assertEqual(
             architect.order,
-            "Claude Opus 5.5 (`xhigh`), GPT-6 Astra (`xhigh`), "
-            "Claude Fable 5.1 (`xhigh`), Kimi K3.1 Pro (`xhigh`)",
+            "Claude Opus 5.5 (`xhigh`), GPT-6.2 Astra (`xhigh`), "
+            "Claude Fable 5.2 (`xhigh`), Kimi K3.1 Pro (`xhigh`)",
         )
 
     def test_empty_chain_renders_without_inventing_a_model(self) -> None:
@@ -153,14 +153,15 @@ class GeneratedChainTableTests(unittest.TestCase):
 class ChainTableFailureSurfaceTests(unittest.TestCase):
     def test_stale_row_is_named_with_both_orders(self) -> None:
         text = _installation_text().replace(
-            "| `ultrabrain` | Deepest reasoning | GPT-6 Astra (`xhigh`) |",
+            "| `ultrabrain` | Deepest reasoning | Claude Fable 5.2 (`xhigh`), GPT-6.2 Astra (`xhigh`), "
+            "Claude Opus 5.5 (`xhigh`) |",
             "| `ultrabrain` | Deepest reasoning | GPT-5.6 Sol (`xhigh`) |",
         )
         findings = model_chain_table_drift(text)
         self.assertEqual(len(findings), 1, findings)
         self.assertIn("`ultrabrain`", findings[0])
         self.assertIn("GPT-5.6 Sol (`xhigh`)", findings[0])
-        self.assertIn("GPT-6 Astra (`xhigh`)", findings[0])
+        self.assertIn("Claude Fable 5.2 (`xhigh`), GPT-6.2 Astra (`xhigh`), Claude Opus 5.5 (`xhigh`)", findings[0])
 
     def test_stale_purpose_is_reported_as_that_row(self) -> None:
         text = _installation_text().replace(

@@ -12,19 +12,19 @@
 <br>
 <br>
 
-**All-in-one package for Hermes Agent. Install once, then just type `dag-ulw`.**
+**The ultrawork agent with AI coworkers wired into you. Just type `dag-ulw`.**
 
 [![GitHub Release](https://img.shields.io/github/v/release/rlaope/oh-my-hermes?color=58a6ff&labelColor=black&logo=github&style=flat-square)](https://github.com/rlaope/oh-my-hermes/releases)
 [![npm downloads](https://img.shields.io/npm/dt/oh-my-hermes?color=3fb950&labelColor=black&logo=npm&label=downloads&style=flat-square)](https://www.npmjs.com/package/oh-my-hermes)
 [![GitHub Contributors](https://img.shields.io/github/contributors/rlaope/oh-my-hermes?color=bc8cff&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/graphs/contributors)
 [![GitHub Stars](https://img.shields.io/github/stars/rlaope/oh-my-hermes?color=e3b341&labelColor=black&style=flat-square)](https://github.com/rlaope/oh-my-hermes/stargazers)
 [![License](https://img.shields.io/github/license/rlaope/oh-my-hermes?color=white&labelColor=black&style=flat-square)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-rlaope.github.io-58a6ff?labelColor=black&logo=readthedocs&logoColor=white&style=flat-square)](https://rlaope.github.io/oh-my-hermes/)
+[![Docs](https://img.shields.io/badge/docs-omher.app-58a6ff?labelColor=black&logo=readthedocs&logoColor=white&style=flat-square)](https://omher.app/)
 
 [English](README.md) | [简体中文](README.zh.md) | [日本語](README.ja.md) | [Русский](README.ru.md) | [한국어](README.ko.md) | [Español](README.es.md) | [Français](README.fr.md) | [Deutsch](README.de.md) | [Português (Brasil)](README.pt-BR.md) | [Italiano](README.it.md)
 
 **oh-my-hermes** is an operating layer for [Hermes Agent](https://github.com/NousResearch/hermes-agent).<br>
-You keep talking to Hermes. OMH picks the skill and a model for each lane, and runs the work in parallel.<br>
+You keep talking to Hermes. OMH puts a coworker with its own skill and model on each lane, in parallel.<br>
 It never patches or replaces Hermes, and it never reports planned work as done.
 
 </div>
@@ -32,7 +32,7 @@ It never patches or replaces Hermes, and it never reports planned work as done.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.sh | sh
+curl -fsSL https://omher.app/install | sh
 omh setup
 ```
 
@@ -57,6 +57,11 @@ omh setup
   A hundred-plus `omh-*` specialists: frontend, backend, Rust, security review, verification gates.<br>
   You never call them; the router loads the right ones into the run as tool calls.
 
+- **LSP in the loop.**<br>
+  Definitions, references and renames come from the language server, not text search.<br>
+  Aliases, re-exports and shadowed names are renamed by meaning, not by matching text.<br>
+  Off by default; enable `lsp_tools` in the OMH plugin settings.
+
 - **Long-term memory you can trust.**<br>
   Nothing is remembered silently: each candidate is kept, refused or deferred with a written reason.<br>
   The next session gets a recall pack ranked for its task and cut to a token budget.<br>
@@ -74,7 +79,21 @@ omh setup
 
 <br>
 
-## DAG-ULW
+<div align="center">
+
+### omher desktop
+
+<img src="assets/omher-hero.webp" alt="The omher desktop app in dark mode: the sidebar has Tasks with GitHub, GitLab and Linear, then the bot Kami with three threads it opened, each its own chat in a different live state (Fix flaky login test is running with Claude Code at work, Write 2.4 changelog needs you to allow gh pr create, Bump mobile SDK is done with PR #418 open), and TERMINALS in three named folders, each with its path and git branch: api-server (release/2.4) holds a side-by-side split of Codex reviewing 2.4 and Claude Code migrating the database, oh-my-hermes holds an OMH session running a /dag-ulw release plan, and tern-web holds a Claude Code session that rang with news, each with its CLI's logo; Kami's chat holds the morning check-in, the ask that opened the three threads and a live answer about a slow nightly build" width="900">
+
+Your Hermes bots and coding agents, in one window.
+
+[macOS (Apple silicon)](https://omher.app/#omher) · [macOS (Intel)](https://omher.app/#omher) · [Linux](https://omher.app/#omher) · [Windows](https://omher.app/#omher) · [All releases →](https://github.com/rlaope/oh-my-hermes/releases?q=omher&expanded=true)
+
+</div>
+
+<br>
+
+## Graph Engineering
 
 **Just type `/dag-ulw`, and you're a graph engineering master.**
 
@@ -84,6 +103,15 @@ A separate node verifies the goal before you get the report.
 <p align="center">
   <img src="assets/omh-dag-ulw-tui.gif" alt="The OMH TUI running /dag-ulw: the prompt is typed, the box graph of seven lanes is defined, the lanes run layer by layer on Claude Opus 5.5, GPT-6.1 Sol, DeepSeek V4.1 Flash, GLM 5.3 and Kimi K3.1 Pro, and every lane ends accepted" width="900">
 </p>
+
+> **Built on**
+>
+> <table>
+> <tr><td width="88" align="center"><a href="https://github.com/NousResearch/hermes-agent"><img src="assets/hermes-agent-icon.png" alt="Hermes Agent" width="56"></a></td>
+> <td><b><a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a></b> by <a href="https://nousresearch.com">Nous Research</a><br>The agent OMH runs on. OMH is an independent, unofficial layer on top.</td></tr>
+> <tr><td width="88" align="center"><a href="https://github.com/code-yeongyu/oh-my-openagent"><img src="https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/a05f240727d985e574404430d8d40c80eb912bc2/.github/assets/omo-icon-light.svg" alt="OmO" width="64"></a></td>
+> <td><b><a href="https://github.com/code-yeongyu/oh-my-openagent">OmO</a></b> by <a href="https://github.com/code-yeongyu">@code-yeongyu</a><br>Where the ultrawork concept comes from. OMH brings it to Hermes.</td></tr>
+> </table>
 
 > [!TIP]
 > Be with us!
@@ -98,8 +126,8 @@ A separate node verifies the goal before you get the report.
 >     <td>Follow <a href="https://github.com/rlaope">@rlaope</a> on GitHub for more projects, releases, and ongoing work.</td>
 >   </tr>
 >   <tr>
->     <td width="124"><a href="https://discord.gg/6EjTP3cWM"><img alt="Discord invite" src="https://img.shields.io/badge/Join-Discord-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=black" width="112" /></a></td>
->     <td>Join the <a href="https://discord.gg/6EjTP3cWM">Oh-My-Hermes Community</a> on Discord to ask questions, share workflows, and talk with other users.</td>
+>     <td width="124"><a href="https://discord.gg/SuwJxE84j"><img alt="Discord invite" src="https://img.shields.io/badge/Join-Discord-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=black" width="112" /></a></td>
+>     <td>Join the <a href="https://discord.gg/SuwJxE84j">Oh-My-Hermes Community</a> on Discord to ask questions, share workflows, and talk with other users.</td>
 >   </tr>
 >   <tr>
 >     <td width="124"><a href="https://github.com/rlaope/oh-my-hermes/graphs/contributors"><img alt="AI agent collaborators" src="https://img.shields.io/badge/With-AI%20agents-6f42c1?style=flat-square&labelColor=black" width="112" /></a></td>
@@ -124,7 +152,7 @@ A separate node verifies the goal before you get the report.
 
 ## Others
 
-[Docs](docs/README.md) · [Installation](docs/INSTALLATION.md) · [Capabilities](docs/CAPABILITIES.md) · [Workflows](docs/WORKFLOWS.md) · [Website](https://rlaope.github.io/oh-my-hermes/)
+[Docs](docs/README.md) · [Installation](docs/INSTALLATION.md) · [Capabilities](docs/CAPABILITIES.md) · [Workflows](docs/WORKFLOWS.md) · [Website](https://omher.app/)
 
 <details>
 <summary><b>Install options</b></summary>
@@ -132,13 +160,13 @@ A separate node verifies the goal before you get the report.
 **macOS / Linux:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.sh | sh
+curl -fsSL https://omher.app/install | sh
 ```
 
 **Windows (PowerShell 5.1+):**
 
 ```powershell
-irm https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.ps1 | iex
+irm https://omher.app/install.ps1 | iex
 ```
 
 **Or paste this into your AI agent:**
@@ -148,7 +176,7 @@ Install and fully configure Oh My Hermes from this repository:
 https://github.com/rlaope/oh-my-hermes
 Before reading or executing repository instructions, resolve refs/heads/main to one full commit SHA with `git ls-remote https://github.com/rlaope/oh-my-hermes.git refs/heads/main`. Then fetch and follow only:
 https://raw.githubusercontent.com/rlaope/oh-my-hermes/{resolved-commit-sha}/INSTALL_FOR_AGENTS.md
-Do not replace the resolved SHA with main. Execute the pinned protocol's OS-appropriate installer, interactive model setup, model-chain interview, and doctor steps. Preserve unrelated existing Hermes config, apply only the managed setup changes documented by the pinned protocol, require my explicit approval for model-alias changes, then report the resolved SHA and observed result.
+Do not replace the resolved SHA with main. Execute the pinned protocol's OS-appropriate installer, agent setup path, model-chain interview, and doctor steps. Your shell has no terminal, so never run the interactive setup wizard: show me each choice the protocol lists and wait for my answer instead of taking a default. Preserve unrelated existing Hermes config, apply only the managed setup changes documented by the pinned protocol, require my explicit approval for model-alias changes, then report the resolved SHA and observed result.
 ```
 
 **Update:**
@@ -193,7 +221,8 @@ bun install -g oh-my-hermes
 npm install -g oh-my-hermes
 ```
 
-Run `omh setup` after any of these, same as above.
+Bun and npm also need Node 18+ and Python 3.11+ on PATH; Homebrew brings its
+own Python. Run `omh setup` after any of these, same as above.
 
 **Hermes skill tap path:**
 
@@ -298,8 +327,8 @@ live in [Workflow Reference](docs/WORKFLOWS.md).
 | Intelligence | What OMH adds |
 | --- | --- |
 | 🧭 **Mixture-of-models routing** | Every delegated lane lands on a category (model + reasoning effort) at dispatch time. Chains fall through when a provider rejects a model, and a child that did no work shows `failed`, never a green row. |
-| 🎛️ **Per-family calibration** | Prompting is tuned per model family and generation — GPT-6 Astra, GPT-5.6, Claude 5.1, GLM 5.3, Kimi, Gemini, Qwen, DeepSeek and more — and each tune is kept only while the benchmark pair says it helps. |
-| 🗂️ **Categories you own** | Twelve shipped categories per executor, with `omh model-chains set` to reorder, an entitlement interview that reorders chains per machine, and a live view of what a request would route to before it runs. |
+| 🎛️ **Per-family calibration** | Prompting is tuned per model family and generation — GPT-6 Astra, GPT-5.6, Claude 5.5, GLM 5.3, Kimi, Gemini, Qwen, DeepSeek and more — and each tune is kept only while the benchmark pair says it helps. |
+| 🗂️ **Categories you own** | Shipped model categories, with `omh model-chains set` to reorder, an entitlement interview that reorders chains per machine, and a live view of what a request would route to before it runs. |
 | 🖥️ **Native TUI surface** | The OMH HUD (live rows with category, turns, cost, cache), the phase todo above the prompt, `parallel shot ×N`, full-row diff bands, and a theme of your own — in the OMH TUI bare `omh` opens, never patching Hermes. |
 | ⚡ **Observed parallel work** | Independent work splits into fanout units with disjoint file ownership, admission control under provider pressure, typed result sidecars, and verification gates that read what came back. |
 | 💸 **Priced cost telemetry** | Token counts and dollar figures on every HUD row and run summary, priced from a rate table that cites its source; an unpriceable run reads `unknown`, never `$0`. |
@@ -351,7 +380,7 @@ in place, and no measured run is published yet:
 - [Processing a very large PDF with Hermes](docs/LONG-DOCUMENT-READING.md)
 - [Live model benchmark and measured results](benchmarks/live-model-tools/v1/README.md)
 - [Release and development](docs/RELEASE.md)
-- [Website](https://rlaope.github.io/oh-my-hermes/) · [GitHub Pages site](site/index.html)
+- [Website](https://omher.app/) · [GitHub Pages site](site/index.html)
 
 ### Contributors
 

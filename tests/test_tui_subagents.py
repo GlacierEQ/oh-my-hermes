@@ -184,7 +184,7 @@ class RelayFixtureTests(unittest.TestCase):
             lines_text(roster.view_lines(70, THEME, 0, 7, 500.0)),
             [  # each row's title, then the model it ran on leading its figures; a row's count without the word
                 "  ● main",
-                "  ○ find usages of old_ap…  deepseek-v4.1-flash · 12s · 6 tools · ↓340",
+                "  ✓ find usages of old_ap…  deepseek-v4.1-flash · 12s · 6 tools · ↓340",
                 "  ✗ read the diff for risks        deepseek-v4.1-flash · 30s · 0 tools",
             ],
         )
@@ -193,8 +193,8 @@ class RelayFixtureTests(unittest.TestCase):
             lines_text(rows),
             [
                 "  ● main",
-                "  ○ find usages of old_ap…  deepseek-v4.1-flash · 12s · 6 tools · ↓340",
-                "▸ ✗ read the diff for risks        deepseek-v4.1-flash · 30s · 0 tools",
+                "  ✓ find usages of old_ap…  deepseek-v4.1-flash · 12s · 6 tools · ↓340",
+                "❯ ✗ read the diff for risks        deepseek-v4.1-flash · 30s · 0 tools",
             ],
         )
         self.assertEqual(ids, (MAIN_ID, FIRST, SECOND))
@@ -218,6 +218,12 @@ class FoldTests(unittest.TestCase):
         self.assertEqual((agent.status, agent.started_at, agent.finished_at, agent.duration), ("running", 7.0, None, None))
         self.assertEqual((agent.tool_count, agent.last_tool, list(agent.log)), (0, "", []))
         self.assertEqual(agent.name, "find usages of")
+
+    def test_a_name_leaves_off_a_colon_its_last_word_ended_on_and_keeps_a_dot(self) -> None:
+        # Found live: `↪ steering child beta:: …` and `· Interrupted child alpha:.` from goals `child beta: …`.
+        for goal, name in (("child alpha: count to ten slowly", "child alpha"), ("review;", "review"), (":", ":"),
+                           ("use e.g. this one", "use e.g. this"), ("bump to v1.2.", "bump to v1.2.")):
+            self.assertEqual(Agent("a1", "running", 0.0, goal=goal).name, name, goal)
 
     def test_spawn_requested_queues_and_start_then_times_the_run_not_the_wait(self) -> None:
         roster = Roster()
@@ -663,8 +669,8 @@ class ViewTests(unittest.TestCase):
             feed(roster, "complete", subagent_id=f"sa-{status}", status=status)
         rows = roster.view_lines(40, THEME, 2, 20, 0.0)
         self.assertEqual([line_text(row)[:4] for row in rows],
-                         ["  ● ", "  ⠹ ", "  ○ ", "  ◌ ", "  ✗ ", "  ✗ ", "  ✗ ", "  ▪ "])
-        for row, glyph, style in zip(rows, "●⠹○◌✗✗✗▪", (THEME.running, THEME.running, THEME.muted, THEME.muted,
+                         ["  ● ", "  ⠹ ", "  ✓ ", "  ◌ ", "  ✗ ", "  ✗ ", "  ✗ ", "  ▪ "])
+        for row, glyph, style in zip(rows, "●⠹✓◌✗✗✗▪", (THEME.running, THEME.running, THEME.ok, THEME.muted,
                                                        THEME.error, THEME.error, THEME.error, THEME.muted)):
             with self.subTest(glyph=glyph):
                 self.assertEqual(style_of(row, glyph), style)
@@ -686,7 +692,7 @@ class ViewTests(unittest.TestCase):
         self.assertEqual(view[0], "  ● main")
         self.assertEqual(len(view), len(listed), "Down highlights a row and moves none")
         self.assertEqual([row[2:] for row in view], [row[2:] for row in listed])
-        self.assertEqual([row[:2] for row in listed], ["  ", "▸ ", "  "])
+        self.assertEqual([row[:2] for row in listed], ["  ", "❯ ", "  "])
 
     def test_an_agent_waiting_for_a_worker_shows_the_wait_on_its_clock(self) -> None:
         roster = Roster()
@@ -710,7 +716,7 @@ class ViewTests(unittest.TestCase):
         cases = {
             7: ["● main", "task 0 completed", "task 1 running", "task 2 failed", "task 3 completed", "task 4 running",
                 "task 5 queued"],
-            6: ["● main", "task 1 running", "task 2 failed", "task 4 running", "task 5 queued", "○ 2 done"],
+            6: ["● main", "task 1 running", "task 2 failed", "task 4 running", "task 5 queued", "✓ 2 done"],
             5: ["● main", "task 1 running", "task 4 running", "task 5 queued", "+3 more · 1 failed · 2 done"],
             4: ["● main", "task 1 running", "task 4 running", "+4 more · 1 waiting · 1 failed · 2 done"],
             3: ["● main", "task 1 running", "+5 more · 1 running · 1 waiting · 1 failed · 2 done"],
@@ -721,9 +727,44 @@ class ViewTests(unittest.TestCase):
             with self.subTest(max_rows=max_rows):
                 rows = lines_text(roster.view_lines(80, THEME, 0, max_rows, 0.0))
                 self.assertEqual(len(rows), min(max_rows, 7))
-                shown = [row[2:].split("  ")[0].replace("⠋ ", "").replace("○ task", "task").replace("✗ ", "")
+                shown = [row[2:].split("  ")[0].replace("⠋ ", "").replace("✓ task", "task").replace("✗ ", "")
                          .replace("◌ ", "") for row in rows]
                 self.assertEqual(shown, expected)
+
+    def test_a_completed_agent_row_starts_with_a_green_check_an_interrupted_one_does_not(self) -> None:
+        roster = Roster()
+        feed(roster, "start", subagent_id="sa-ok", goal="finished")
+        feed(roster, "complete", subagent_id="sa-ok", status="completed")
+        feed(roster, "start", subagent_id="sa-stop", goal="stopped")
+        feed(roster, "complete", subagent_id="sa-stop", status="interrupted")
+        done, stopped = roster.view_lines(40, THEME, 0, 7, 0.0)[1:]
+        self.assertEqual((line_text(done)[:4], style_of(done, "✓")), ("  ✓ ", THEME.ok))
+        self.assertFalse("✓" in line_text(stopped))
+        self.assertNotEqual(style_of(stopped, "▪"), THEME.ok)
+
+    def test_a_cancelled_agent_gets_no_green_check(self) -> None:
+        for status in ("cancelled", "canceled"):
+            with self.subTest(status=status):
+                roster = Roster()
+                feed(roster, "start", subagent_id="sa-x", goal="odd end")
+                feed(roster, "complete", subagent_id="sa-x", status=status)
+                row = roster.view_lines(40, THEME, 0, 7, 0.0)[1]
+                self.assertEqual(line_text(row)[:4], "  ○ ")
+                self.assertEqual(style_of(row, "○"), THEME.muted)
+                self.assertEqual(roster.agents["sa-x"].status, "ended")
+                self.assertNotIn("✓", line_text(roster.view_lines(40, THEME, 0, 2, 0.0)[-1]))
+
+    def test_the_collapsed_done_row_is_green_only_when_every_cut_agent_completed(self) -> None:
+        for second, row_text, style in (("completed", "✓ 2 done", THEME.ok), ("interrupted", "▪ 2 done", THEME.muted)):
+            with self.subTest(second=second):
+                roster = Roster()
+                feed(roster, "start", subagent_id="sa-run", goal="running")
+                for index, status in enumerate(("completed", second)):
+                    feed(roster, "start", subagent_id=f"sa-{index}", goal=f"task {index}")
+                    feed(roster, "complete", subagent_id=f"sa-{index}", status=status)
+                last = roster.view_lines(40, THEME, 0, 3, 0.0)[-1]
+                self.assertEqual(line_text(last).strip(), row_text)
+                self.assertEqual(style_of(last, row_text[0]), style)
 
     def test_the_collapsed_row_is_muted_and_no_row_exceeds_its_width(self) -> None:
         roster = started(*[f"sa-{index}" for index in range(9)])
@@ -757,7 +798,7 @@ class ListTests(unittest.TestCase):
             [
                 "  ● main",
                 "  ⠹ find usages of…  deepseek-v4.1-flash · 10s · 4 tools",  # the title is cut first
-                "▸ ⠹ read the diff fo…  deepseek-v4.1-flash · 4s · 1 tool",
+                "❯ ⠹ read the diff fo…  deepseek-v4.1-flash · 4s · 1 tool",
             ],
         )
         self.assertEqual(ids, (MAIN_ID, "sa-a", "sa-b"))
@@ -772,7 +813,7 @@ class ListTests(unittest.TestCase):
         self.assertEqual(style_of(rows[2], "read the diff"), THEME.text)
         self.assertEqual(style_of(rows[2], "deepseek-v4.1-flash · 4s"), THEME.muted)
         rows, _ = self._roster().list_lines(50, THEME, MAIN_ID, 0, 6, 20.0)
-        self.assertEqual(line_text(rows[0]), "▸ ● main" + " " * 42)
+        self.assertEqual(line_text(rows[0]), "❯ ● main" + " " * 42)
         self.assertEqual({span.style for span in rows[0]}, {THEME.menu_current})
 
     def test_an_unknown_selection_highlights_nothing_and_shows_the_top(self) -> None:
@@ -785,7 +826,7 @@ class ListTests(unittest.TestCase):
         roster = self._roster()
         feed(roster, "complete", 30.0, "sa-a", status="completed", duration_seconds=75.2, tool_count=5)
         rows, _ = roster.list_lines(60, THEME, MAIN_ID, 0, 6, 9999.0)
-        self.assertEqual(line_text(rows[1]), "  ○ find usages of …  deepseek-v4.1-flash · 1m 15s · 5 tools")
+        self.assertEqual(line_text(rows[1]), "  ✓ find usages of …  deepseek-v4.1-flash · 1m 15s · 5 tools")
         self.assertTrue(line_text(rows[2]).endswith(" · 2h 46m · 1 tool"), line_text(rows[2]))
 
     def test_the_list_scrolls_only_as_far_as_the_selection_needs(self) -> None:
@@ -802,7 +843,7 @@ class ListTests(unittest.TestCase):
                 self.assertEqual(shown, ids[start : start + 6])
                 if index in expected_start:
                     self.assertEqual(start, expected_start[index])
-                marked = [line_text(row).startswith("▸ ") for row in rows]
+                marked = [line_text(row).startswith("❯ ") for row in rows]
                 self.assertEqual(marked, [shown_id == row_id for shown_id in shown])
 
     def test_a_list_shorter_than_its_room_shows_every_row(self) -> None:
@@ -841,7 +882,7 @@ class ListTests(unittest.TestCase):
                 for row in rows:
                     self.assertLessEqual(line_width(row), width)
         rows, _ = roster.list_lines(30, THEME, "sa-a", 0, 6, 5.0)
-        self.assertEqual(line_text(rows[1]), "▸ ⠋ 한글 검색 에이전트 실행 … ")  # no room for the model: the title alone
+        self.assertEqual(line_text(rows[1]), "❯ ⠋ 한글 검색 에이전트 실행 … ")  # no room for the model: the title alone
         self.assertEqual(line_width(rows[1]), 30)
         rows, _ = roster.list_lines(60, THEME, "sa-a", 0, 6, 5.0)
         self.assertTrue(line_text(rows[1]).endswith("  deepseek-v4.1-flash · 5s · 0 tools"), line_text(rows[1]))
@@ -918,7 +959,7 @@ class TokenTests(unittest.TestCase):
         self.assertEqual(roster.token_sessions(30.0), ("child-b",))
         roster.ingest_tokens({"child-a": 1490})  # a read taken before the last call's tokens landed
         self.assertEqual(roster.agents["sa-a"].output_tokens, 1500)
-        self.assertEqual(self.row(roster, 1, now=40.0), "  ○ find usages of old_a…  deepseek-v4.1-flash · 20s · 3 tools · ↓1.5k")
+        self.assertEqual(self.row(roster, 1, now=40.0), "  ✓ find usages of old_a…  deepseek-v4.1-flash · 20s · 3 tools · ↓1.5k")
 
     def test_complete_without_a_count_keeps_the_last_read_and_takes_one_more(self) -> None:
         # Hermes' failure path (`finish_failed`) sends no count, and the tokens of the call that ended the child land

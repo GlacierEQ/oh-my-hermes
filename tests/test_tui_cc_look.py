@@ -1,7 +1,8 @@
 """Round 4, the Claude Code look in the transcript: per-call rows, results under `⎿`, the working row; since the
 rail and kind colours (2026-10-22) each block hangs on a `┃` rail.
 
-Each tool call is one row on a rail in its state's colour: its state's mark
+Each tool call is one row on a rail in the launch look's accent (red when it
+failed or was denied, as its band is; owner's pick of 2026-10-29): its state's mark
 (`○` running blue, `●` done green, `✗` failed or denied red), the tool's name
 bold in its family's hue and what it ran on in parentheses, its duration at
 the end. What it printed goes under `  ⎿  `; a read or a load says in one
@@ -23,10 +24,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import unittest
 from unittest import mock
 
-from _tui_lines import RULE_ROW, line_text, lines_text
+from _tui_lines import RULE_ROW, badge_text, line_text, lines_text, without_badge
 from test_tui_modes import drawn, make_app, show_mode, type_text
 from omh.skin_pack import SKIN_THEMES
 from omh.tui.app import (
@@ -40,17 +42,18 @@ from omh.tui.app import (
     queue_lines,
     working_verb,
 )
-from omh.tui.frame import MODE_ACCEPT, MODE_PLAN, sticky_line
+from omh.tui.frame import MODE_ACCEPT, MODE_PLAN
 from omh.tui.diff_view import DIFF_ADDED, DIFF_FILE, DIFF_HUNK, DIFF_INDENT, DiffLine, diff_rows
 from omh.tui.gateway import Event
 from omh.tui.composer import PROMPT
 from omh.tui.history import HistorySearch
-from omh.tui.keys import BACKSPACE, CHAR, Key
+from omh.tui.keys import CHAR, Key
 from omh.tui.session_picker import FILTER_PROMPT
-from omh.tui.style import Span
+from omh.tui.style import Span, is_fill
 from omh.tui.theme import DEFAULT_THEME as THEME
-from omh.tui.theme import build_theme, contrast_ratio, kind_style
+from omh.tui.theme import LAUNCH_PRESETS, TEXT_CONTRAST, build_theme, contrast_ratio, kind_style, with_prompt_band
 from omh.tui.transcript import (
+    GUTTER,
     NOTICE_INFO,
     PULSE_SECONDS,
     TOOL_DENIED,
@@ -65,8 +68,9 @@ from omh.tui.transcript import (
     TurnSummaryBlock,
     UserBlock,
     block_rows,
+    rail_cell,
 )
-from omh.tui.width import line_width
+from omh.tui.width import cell_width, clusters, line_width
 
 SID = "s"
 
@@ -99,24 +103,29 @@ class ToolRowTests(unittest.TestCase):
     def test_a_call_is_its_mark_then_its_name_and_what_it_ran_on_in_parentheses(self) -> None:
         (row,) = rows_of(ToolRow("t", "terminal", "rm -rf ./tmp-cache", TOOL_OK, duration_s=1.9))
         self.assertEqual(line_text(row), "┃ ● terminal(rm -rf ./tmp-cache)  1.9s")
-        self.assertEqual(row[:3], (Span("┃", THEME.ok), Span(" "), Span("●", THEME.ok)))  # the rail, then the mark
+        # The rail in the launch look's accent, then the mark in its state's colour.
+        self.assertEqual(row[:3], (rail_cell(THEME.accent), Span(" ", GUTTER), Span("●", THEME.ok)))
         self.assertEqual([span.style for span in row if span.text == "terminal"], [kind_style("terminal", THEME)])
         self.assertEqual(row[-1].style, THEME.faint)  # the duration, under the args' grey
 
-    def test_the_mark_and_the_rail_are_green_done_red_failed_or_denied_and_blue_while_it_runs(self) -> None:
-        # The DAG border rule: running blue, failed red, done green, and each state its own glyph, so the colour
-        # is never the only thing that says it.
-        for status, glyph, style in ((TOOL_OK, "●", THEME.ok), (TOOL_ERROR, "✗", THEME.error),
-                                     (TOOL_DENIED, "✗", THEME.error), (TOOL_RUNNING, "○", THEME.running)):
+    def test_the_mark_is_green_done_red_failed_or_denied_and_blue_while_it_runs_on_the_looks_rail(self) -> None:
+        # The DAG border rule on the mark: running blue, failed red, done green, and each state its own glyph, so the
+        # colour is never the only thing that says it. The rail is the launch look's accent (owner, 2026-10-29), but
+        # a failure's, which stays red as its band does.
+        for status, glyph, style, rail in ((TOOL_OK, "●", THEME.ok, THEME.accent),
+                                           (TOOL_ERROR, "✗", THEME.error, THEME.error),
+                                           (TOOL_DENIED, "✗", THEME.error, THEME.error),
+                                           (TOOL_RUNNING, "○", THEME.running, THEME.accent)):
             with self.subTest(status=status):
                 rows = rows_of(ToolRow("t", "terminal", "ls", status, started_at=0.0, duration_s=0.1, output=("x",)))
                 self.assertEqual(rows[0][2], Span(glyph, style))
-                self.assertEqual({row[0] for row in rows}, {Span("┃", style)})  # one rail down the whole call
+                self.assertEqual({row[0] for row in rows}, {rail_cell(rail)})  # one rail down the whole call
         self.assertEqual(THEME.running.fg, "#58A6FF")  # the owner's approved shade, apart from the graph's edge stops
+        self.assertNotIn(THEME.accent.fg, {THEME.ok.fg, THEME.error.fg, THEME.running.fg})
         running = ToolRow("t", "terminal", "ls", TOOL_RUNNING, started_at=0.0)
         pulsed = rows_of(running, now=PULSE_SECONDS * 1.5)[0]
         self.assertEqual(pulsed[2], Span("○", THEME.dim))  # its dim half; the rail holds still
-        self.assertEqual(pulsed[0], Span("┃", THEME.running))
+        self.assertEqual(pulsed[0], rail_cell(THEME.accent))
         self.assertFalse([row for row in rows_of(ToolRow("t", "terminal", "ls", TOOL_OK)) if "✓" in line_text(row)])
 
     def test_on_a_light_terminal_each_mark_reads_against_what_it_sits_on(self) -> None:
@@ -144,8 +153,10 @@ class ToolRowTests(unittest.TestCase):
         tool = ToolRow("t", "terminal", "seq 5", TOOL_OK, duration_s=0.1, output=("1", "2", "3", "4", "5"))
         self.assertEqual(
             lines_text(rows_of(tool)),
-            ["┃ ● terminal(seq 5)  0.1s", "┃   ⎿  1", "┃      2", "┃      3", "┃      … +2 lines · ctrl+o shows all"],
-        )
+            ["┃ ● terminal(seq 5)  0.1s", "┃   ⎿  … +2 lines · ctrl+o shows all", "┃      3", "┃      4", "┃      5"],
+        )  # a successful shell run shows its end, the count above it
+        read = ToolRow("t", "read_file", "a.py", TOOL_OK, duration_s=0.1, output=("1", "2", "3", "4", "5"))
+        self.assertEqual(lines_text(rows_of(read))[1:], ["┃   ⎿  1", "┃      2", "┃      3", "┃      … +2 lines · ctrl+o shows all"])
         failed = ToolRow("t", "terminal", "pytest", TOOL_ERROR, duration_s=2.0, output=("a", "b", "c", "1 failed"))
         self.assertEqual(lines_text(rows_of(failed))[1:], ["┃   ⎿  … +1 line · ctrl+o shows all", "┃      b",
                                                            "┃      c", "┃      1 failed"])
@@ -271,6 +282,10 @@ def working_rows(app, cols: int = 100) -> list[str]:
     return [line for line in lines_text(app._tail(cols)) if line][-2:]
 
 
+# A completion menu row: the pointer or its blank column, a name, then its summary (not the composer or the info line).
+MENU_ROW = re.compile(r"(❯|\s) /\S+ {2,}\S")
+
+
 class WorkingRowTests(unittest.TestCase):
     def busy(self, rows: int = 24, **options: object):
         clock = Clock()
@@ -282,7 +297,7 @@ class WorkingRowTests(unittest.TestCase):
         app, clock = self.busy()
         app.transcript.activity = "(⌐■_■) synthesizing..."
         app.effort = "xhigh"
-        app.usage_output, app.turn_output_base = 4200, 0
+        app.turn_shown = 4200
         clock.now += 84
         working = working_rows(app)[0]
         self.assertEqual(working[2:], "Synthesizing… (1m 24s · ↓4.2k tokens · thinking with xhigh effort · esc to interrupt)")
@@ -295,8 +310,25 @@ class WorkingRowTests(unittest.TestCase):
                 app.effort = effort
                 self.assertEqual(working_rows(app)[0][2:], "Working… (0s · esc to interrupt)")
         app, _clock = self.busy()
+        # A face with no verb leaves the slot `Working`; a status goes after the facts, dim (2026-10-28).
         app.transcript.activity, app.transcript.status = "(◔_◔)...", "compressing context"
-        self.assertTrue(working_rows(app)[0][2:].startswith("Compressing context… (0s"))
+        self.assertEqual(working_rows(app)[0][2:], "Working… (0s · esc to interrupt) · Compressing context")
+
+    def test_a_status_never_takes_the_verb_slot_and_gives_way_first(self) -> None:
+        # The owner's screenshot of 2026-10-28: `✳ OMH — recalled 4 memories… (18m 6s · ↓1.6k tokens …)`.
+        app, clock = self.busy()
+        app.effort = "high"
+        app.transcript.activity = "(⌐■_■) pondering..."
+        app.transcript.status = "🧠 OMH — recalled 4 memories"
+        clock.now += 1086
+        app.inbound_at = clock.now  # the status just came from the gateway: no silence to name
+        rows = working_rows(app, 140)
+        self.assertEqual(rows[0][2:], "Pondering… (18m 6s · thinking with high effort · esc to interrupt) · "
+                                      "OMH — recalled 4 memories")
+        app.transcript.activity = "🧠 OMH — recalled 4 memories"  # the same words on the activity channel
+        app.transcript.status = ""
+        self.assertTrue(working_rows(app, 140)[0][2:].startswith("Pondering… (18m 6s"))  # the verb holds
+        self.assertEqual(working_rows(app, 60)[0][2:], "Pondering… (18m 6s · esc to interrupt)")  # status goes first
 
     def test_a_stall_notice_keeps_its_cause_and_how_long_on_the_row(self) -> None:
         app, _clock = self.busy()
@@ -317,7 +349,7 @@ class WorkingRowTests(unittest.TestCase):
         # Review B at 40 columns: `✶ Working… (4s · ↓170 tokens · esc to i…`.
         app, clock = self.busy()
         app.effort = "high"
-        app.usage_output, app.turn_output_base = 170, 0
+        app.turn_shown = 170
         clock.now += 4
         for width, said in ((100, "Working… (4s · ↓170 tokens · thinking with high effort · esc to interrupt)"),
                             (60, "Working… (4s · ↓170 tokens · esc to interrupt)"), (40, "Working… (4s · esc to interrupt)"),
@@ -331,14 +363,28 @@ class WorkingRowTests(unittest.TestCase):
         for _ in range(len(WORKING_GLYPHS)):
             clock.now += TICK_SECONDS
             seen.append(app._tail(100)[-2][0])
-        self.assertEqual({span.text for span in seen}, set("·✢✳✶✻✽"))
-        self.assertEqual({span.style for span in seen}, {THEME.running})
+        self.assertEqual({span.text for span in seen}, {"·", "✢", "✳\ufe0e", "✶", "✻", "✽"})
+        self.assertEqual({span.style for span in seen}, {THEME.accent})  # the launch look's, not a state's
         still, clock = self.busy(environ={"OMH_TUI_REDUCED_MOTION": "1"})
         held = set()
         for _ in range(len(WORKING_GLYPHS)):
             clock.now += TICK_SECONDS
             held.add(still._tail(100)[-2][0].text)
         self.assertEqual(held, {WORKING_GLYPHS[0]})
+
+    def test_spinner_frames_keep_text_presentation_and_one_cell_without_extra_ticks(self) -> None:
+        expected = ("✻", "✽", "✻", "✶", "✳\ufe0e", "✢", "·", "✢", "✳\ufe0e", "✶")
+        self.assertEqual(WORKING_GLYPHS, expected)
+        app, _clock = self.busy()
+        for frame, glyph in enumerate(expected):
+            with self.subTest(frame=frame):
+                self.assertEqual(clusters(glyph), [glyph])
+                self.assertEqual(cell_width(glyph), 1)
+                with mock.patch.object(app, "_spinner_frame", return_value=frame):
+                    row = next(row for row in app._tail(100) if "Working…" in line_text(row))
+                self.assertEqual(row[0].text, glyph)
+                self.assertEqual(cell_width(line_text(row).split("Working…")[0]), 2)
+                self.assertEqual(row[0].style, THEME.accent)
 
     def test_the_interrupting_row_lines_up_with_the_working_row(self) -> None:
         app, _clock = self.busy()
@@ -385,43 +431,61 @@ class WorkingRowTests(unittest.TestCase):
         type_text(app, "/")
         screen = drawn(app)
         self.assertTrue([line for line in screen if "Tip:" in line], screen)  # nothing above the composer moved
-        menu = [line for line in screen if line.startswith(" /")]
+        menu = [line for line in screen if MENU_ROW.match(line)]
         self.assertEqual(len(menu), 5, screen)
         alone, _clock = self.busy(rows=TIP_MIN_ROWS)
         type_text(alone, "/")
         with mock.patch("omh.tui.app.TIP_MIN_ROWS", TIP_MIN_ROWS + 1):  # the same frame with no tip
-            self.assertEqual([line for line in drawn(alone) if line.startswith(" /")], menu)
+            self.assertEqual([line for line in drawn(alone) if MENU_ROW.match(line)], menu)
         listing, _clock = self.busy()
         listing.list_selected = 0  # the agent list has the keys
         self.assertTrue([line for line in lines_text(listing._tail(100)) if "Tip:" in line])
 
 class PromptRowTests(unittest.TestCase):
-    def test_a_prompt_is_a_dim_mark_and_dim_text_on_no_band(self) -> None:
+    def test_without_a_prompt_band_a_prompt_is_a_dim_mark_and_dim_text_and_no_fill(self) -> None:
         for theme in (THEME, build_theme(SKIN_THEMES[0], "#1E1E1E"), build_theme(SKIN_THEMES[0], "#FFFFFF")):
             rows = block_rows(UserBlock("first line\nsecond line"), 40, theme)
             with self.subTest(theme=theme.name):
                 self.assertEqual(lines_text(rows), ["┃ ❯ first line", "┃   second line"])
-                self.assertEqual({row[0] for row in rows}, {Span("┃", theme.dim)})  # a grey rail down the prompt
+                self.assertEqual({row[0] for row in rows}, {rail_cell(theme.dim)})  # a grey rail down the prompt
                 self.assertEqual(rows[0][2], Span("❯ ", theme.dim))
                 self.assertEqual({span.style for row in rows for span in row[3:]}, {theme.muted})  # after the lead
-                self.assertEqual({span.style.bg for row in rows for span in row}, {None})  # no band, no fill
+                self.assertEqual({span.style.bg for row in rows for span in row}, {None})  # no prompt_band set: no fill
 
-    def test_a_prompt_the_queue_sent_says_so_in_the_same_dim(self) -> None:
+    def test_a_sent_prompt_runs_on_the_launch_look_s_band_to_the_right_edge(self) -> None:
+        # Owner's pick of 2026-10-27 ("보낸프롬프트 배경색"): every row of a sent prompt, a wrapped and a blank one
+        # too, on one band that ends at the right edge (a fill, not padding), its words at 4.5:1 on it.
+        for background in ("#0D1117", "#FFFFFF"):
+            for look in LAUNCH_PRESETS:
+                theme = with_prompt_band(build_theme(SKIN_THEMES[0], background), SKIN_THEMES[0], background, look)
+                rows = block_rows(UserBlock("first line\n\n" + "word " * 12), 30, theme)
+                with self.subTest(background=background, look=look):
+                    self.assertEqual(len(rows), 5)  # the first line, the blank one, and the long one wrapped onto three
+                    self.assertTrue(all(is_fill(row[-1]) and row[-1].style.bg == theme.prompt_band.bg for row in rows))
+                    self.assertEqual({span.style.bg for row in rows for span in row}, {theme.prompt_band.bg})
+                    words = [span for row in rows for span in row[3:-1] if span.text.strip()]
+                    self.assertTrue(words)
+                    for span in words:
+                        self.assertGreaterEqual(contrast_ratio(span.style.fg, theme.prompt_band.bg), TEXT_CONTRAST)
+
+    def test_a_prompt_the_queue_sent_reads_as_any_prompt(self) -> None:
+        # The `⧗ from queue` tag is gone (owner, 2026-11-21): once sent, a queued prompt looks like a typed one.
         (row,) = block_rows(UserBlock("next one", from_queue=True), 40, THEME)
-        self.assertEqual(line_text(row), "┃ ❯ next one  ⧗ from queue")
-        self.assertEqual(row[-1].style, THEME.muted)
+        self.assertEqual(line_text(row).rstrip(), "┃ ❯ next one")
+        self.assertEqual(row, block_rows(UserBlock("next one"), 40, THEME)[0])
 
-    def test_the_sticky_reminder_and_the_queue_read_apart_from_a_prompt(self) -> None:
-        prompt = line_text(block_rows(UserBlock("fix it"), 40, THEME)[0])
-        sticky = line_text(sticky_line("fix it", 40, THEME))
-        (queued,) = lines_text(queue_lines(["fix it"], 40, 3, THEME))
-        self.assertEqual([prompt[:4], sticky[:7], queued[:2]], ["┃ ❯ ", "↳ you: ", "⧗ "])
+    def test_the_queue_reads_as_a_prompt_the_turn_has_not_taken(self) -> None:
+        sent = block_rows(UserBlock("fix it"), 40, THEME)[0]
+        _blank, queued, _hint = queue_lines([("fix it", (), ())], 40, THEME)
+        self.assertEqual([line_text(sent)[:4], line_text(queued)[:4]], ["┃ ❯ ", "┃ ❯ "])  # the same prompt row
+        words = [next(span for span in row if span.text == "fix it").style.fg for row in (sent, queued)]
+        self.assertEqual(words, [THEME.muted.fg, THEME.dim.fg])  # dim while it waits, as a steer not yet read
 
     def test_a_command_echoes_as_a_prompt_does_in_the_hint_colour(self) -> None:
         rows = block_rows(CommandBlock("/model", [("Current model: x", NOTICE_INFO)], done=True), 40, THEME)
         # On the prompt's dim rail (#2223 review 7), so a bare `❯` on the left edge is only ever the composer.
         self.assertEqual(lines_text(rows), ["┃ ❯ /model", "┃   ⎿  Current model: x"])
-        self.assertEqual({row[0] for row in rows}, {Span("┃", THEME.dim)})
+        self.assertEqual({row[0] for row in rows}, {rail_cell(THEME.dim)})
         self.assertEqual((rows[0][2], rows[0][3].style), (Span("❯ ", THEME.dim), THEME.hint))
 
 
@@ -460,37 +524,34 @@ class InfoLineInsetTests(unittest.TestCase):
         screen = [row for row in drawn(app) if row]
         composer, info = screen[-3], screen[-1]
         self.assertTrue(composer.startswith(PROMPT), screen)
-        self.assertEqual(info.index("?"), len(PROMPT))  # under the composer's text, two cells in
-        self.assertTrue(info.startswith("  ? for shortcuts"), info)
+        self.assertEqual(info.index("["), len(PROMPT))  # the badge under the composer's text, two cells in
+        self.assertTrue(info.startswith(f"  {badge_text()}   "), info)  # the badge alone on the left
         self.assertEqual(line_width(app._info_line(80)), 80)  # the right side still ends on the last cell
 
     def test_a_tiny_terminal_draws_no_rules_and_the_line_starts_on_the_edge(self) -> None:
         app, _client = make_app(rows=5, cols=80)
+        show_mode(app, MODE_ACCEPT)  # no badge on a tiny terminal: the mode's label is the line's first cell
         screen = [row for row in drawn(app) if row]
-        self.assertTrue(screen[-1].startswith("? for shortcuts"), screen)
+        self.assertTrue(screen[-1].startswith("⏵⏵ accept all on"), screen)
         self.assertFalse([row for row in screen if row.startswith(RULE_ROW)], screen)
 
 
 class ShortcutsHintTests(unittest.TestCase):
-    """`? for shortcuts` is said only while `?` would open the list: on an empty composer (review B, NIT-2)."""
+    """The line names no `?` key (owner, 2026-10-28): the launch card lists `? every shortcut`, and `?` on an empty
+    composer still opens the list."""
 
-    def test_the_hint_leaves_while_the_composer_holds_text_and_comes_back_when_it_is_empty(self) -> None:
+    def test_the_line_never_says_the_shortcuts_hint_and_the_key_still_opens_the_list(self) -> None:
         app, _client = make_app(cols=100)
-        self.assertTrue(line_text(app._info_line(100)).startswith("  ? for shortcuts"))
-        for typed in ("/", "model"):  # the slash menu opens over the `/`
+        for typed in ("", "/", "model"):  # the slash menu opens over the `/`
             type_text(app, typed)
-            self.assertTrue(app._menu_rows())
             row = line_text(app._info_line(100))
             with self.subTest(composer=app.composer.text):
                 self.assertNotIn("shortcuts", row)
                 self.assertTrue(row.endswith("ctrl+t effort"), row)  # the right side stays
-        for _ in "/model":
-            app._on_input(Key(BACKSPACE))
-        type_text(app, "hello")
-        self.assertNotIn("shortcuts", line_text(app._info_line(100)))
-        for _ in "hello":
-            app._on_input(Key(BACKSPACE))
-        self.assertTrue(line_text(app._info_line(100)).startswith("  ? for shortcuts"))
+        app._set_composer("")
+        app._on_input(Key(CHAR, "?"))
+        self.assertEqual(app.composer.text, "")  # `?` opened the list instead of typing itself
+        self.assertIsNotNone(app.pager)
 
     def test_a_mode_keeps_its_label_and_where_shift_tab_goes_while_text_is_typed(self) -> None:
         for mode, said in ((MODE_ACCEPT, "⏵⏵ accept all on (⇧⇥ to cycle)"), (MODE_PLAN, "⏸ plan mode on (⇧⇥ to cycle)")):
@@ -499,7 +560,7 @@ class ShortcutsHintTests(unittest.TestCase):
                 show_mode(app, mode)
                 app.yolo_by_tui = app.approvals_off  # accept as the TUI turns it on: Shift+Tab walks every mode
                 type_text(app, "hello")
-                self.assertTrue(line_text(app._info_line(100)).startswith(f"  {said}"))
+                self.assertTrue(without_badge(line_text(app._info_line(100))).startswith(f"  {said}"))
 
 
 class PromptMarkTests(unittest.TestCase):
@@ -531,22 +592,24 @@ class ResumedHistoryTests(unittest.TestCase):
         app._draw_history(RESUME)
         return [line for line in app.transcript.take_stable_lines(width, THEME)]
 
-    def test_each_recorded_call_is_one_row_with_a_neutral_mark_and_a_blank_row_between_as_live(self) -> None:
-        # Since the rail and kind colours (2026-10-22) a live turn puts a blank row between two calls; a record too.
+    def test_each_recorded_call_is_one_row_with_a_neutral_mark_and_two_blank_rows_between_as_live(self) -> None:
+        # Since 2026-11-09 a live turn puts two blank rows between two calls (one between other blocks); a record too.
+        # Since 2026-11-20 consecutive calls of one tool fold into one row and their commands (test_tui_same_tool_runs).
         lines = self.history()
         texts = lines_text(lines)
-        first, after = texts.index("┃ ● read_file(README.md)"), texts.index("┃ ● terminal(sleep 6 + 1 command)")
-        self.assertEqual(texts[first + 1 : first + 5], ["", "┃ ● read_file(calc.py)", "", "┃ ● patch(calc.py)"])
-        diff = texts[first + 5 : after - 1]
+        first, after = texts.index("┃ ● read_file · 2 calls"), texts.index("┃ ● terminal · 2 calls")
+        self.assertEqual(texts[first + 1 : first + 6], ["┃   ⎿  README.md", "┃      calc.py", "", "", "┃ ● patch(calc.py)"])
+        diff = texts[first + 6 : after - 2]
         self.assertTrue(diff and all(text.startswith("┃ ") for text in diff), texts)  # the diff, on the edit's rail
-        self.assertEqual(texts[after - 1 : after + 4],
-                         ["", "┃ ● terminal(sleep 6 + 1 command)", "", "┃ ● terminal(ls does-not-exist)", ""])
-        self.assertTrue(texts[after + 4].startswith("┃ ● Done — div added to calc.py"), texts)
-        calls = [lines[index] for index in (first, first + 2, first + 4, after, after + 2)]
-        # The record says what ran, not how it ended: neither green nor red, its rail and its mark grey.
-        self.assertEqual({row[0] for row in calls}, {Span("┃", THEME.dim)})
+        self.assertEqual(texts[after - 2 : after + 4],
+                         ["", "", "┃ ● terminal · 2 calls", "┃   ⎿  sleep 6 + 1 command", "┃      ls does-not-exist", ""])
+        self.assertEqual(texts[after + 4], "⚚ Hermes", texts)  # the reply's header, then its words
+        self.assertTrue(texts[after + 5].startswith("  Done — div added to calc.py"), texts)
+        calls = [lines[index] for index in (first, first + 5, after)]
+        # The record says what ran, not how it ended: neither green nor red, its mark grey on the look's rail.
+        self.assertEqual({row[0] for row in calls}, {rail_cell(THEME.accent)})
         self.assertEqual({row[2] for row in calls}, {Span("●", THEME.dim)})
-        self.assertNotIn("·", "".join(texts[first : after + 3]))  # no old-style `· name  args` row
+        self.assertNotIn("·", "".join(texts[first + 1 : after]))  # no old-style `· name  args` row
 
     def test_a_record_whose_result_metadata_is_not_a_mapping_draws_its_row_alone(self) -> None:
         for junk in ("inline_diff", ["inline_diff"], 7):
@@ -559,7 +622,7 @@ class ResumedHistoryTests(unittest.TestCase):
     def test_the_edit_shows_the_diff_a_live_call_shows(self) -> None:
         texts = lines_text(self.history())
         start = texts.index("┃ ● patch(calc.py)") + 1
-        recorded = texts[start : texts.index("┃ ● terminal(sleep 6 + 1 command)") - 1]  # up to the blank row
+        recorded = texts[start : texts.index("┃ ● terminal · 2 calls") - 2]  # up to the two blank rows
         patch = next(message for message in RESUME if message.get("name") == "patch")
         transcript = Transcript(clock=Clock())
         transcript.cwd = RESUME_CWD
@@ -603,15 +666,15 @@ class DocumentedLookTests(unittest.TestCase):
         app, _client = make_app(busy=True, clock=clock)
         app.busy_since = clock.now
         app.transcript.activity, app.effort = "(⌐■_■) synthesizing...", "high"
-        app.usage_output, app.turn_output_base = 4200, 0
+        app.turn_shown = 4200
         clock.now += 84
         working, tip = working_rows(app)
         self.assertTrue(f"`✶ {working[2:]}`" in prose, working)
         self.assertTrue(f"(`{' '.join(tip.split())}`)" in prose, tip)
         self.assertTrue("(`· ✢ ✳ ✶ ✻ ✽`)" in prose)
-        self.assertEqual(set(WORKING_GLYPHS), set("·✢✳✶✻✽"))
+        self.assertEqual({glyph.removesuffix("\ufe0e") for glyph in WORKING_GLYPHS}, set("·✢✳✶✻✽"))
         self.assertTrue(f"On a terminal {TIP_MIN_ROWS} rows tall or more a tip sits under it" in prose)
-        app.interrupting, app.usage_output = True, None  # the example has written nothing yet
+        app.interrupting, app.turn_shown = True, 0  # the example has written nothing yet
         (row,) = [line for line in lines_text(app._tail(100)) if INTERRUPTING in line]
         self.assertTrue(f"`{row.replace('1m 24s', '12s')}`" in prose, row)
 
@@ -621,7 +684,7 @@ class DocumentedLookTests(unittest.TestCase):
         (done,) = block_rows(TurnSummaryBlock(34.0, 3, 1200), 80, THEME)
         self.assertTrue(f"(`{line_text(done).strip()}`)" in prose, line_text(done))
         echo = block_rows(CommandBlock("/model", done=True), 80, THEME)[0]
-        self.assertTrue(f"(`{line_text(echo)}`)" in prose, line_text(echo))
+        self.assertTrue(f"(`{line_text(echo).strip()}`)" in prose, line_text(echo))  # with the rail's bar
         self.assertTrue("the composer's dim `❯` and dim text with no band behind it" in prose)
 
 

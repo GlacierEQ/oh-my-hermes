@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 
 from ..local_store import atomic_write_json, ensure_dir, ensure_file, read_json_object, read_jsonl_objects, utc_now
 from ..paths import OmhPaths
+from .pi_family_interop import LEGACY_RUNTIME_PROFILE_ID, PI_DISTRIBUTION_HOST, PI_FORK_HOST, canonical_progress_record
 from ..plugin_bundle.omh.run_records import (
     DELEGATION_FILE,
     EVENTS_FILE,
@@ -37,7 +39,7 @@ from ..plugin_bundle.omh.iso_datetime import strict_fromisoformat
 
 # `ALLOWED_EXECUTOR_PROFILES` and `BINDING_STATES` are the run-record
 # vocabularies the plugin reader checks too, so `run_records` owns them.
-# Without `omo_runtime` there `fanout dispatch` spawns omo units into a lane
+# Without `pi_family_runtime` there `fanout dispatch` spawns pi-family units into a lane
 # that `normalize_executor_profile` rejects, so the units run entirely unobserved.
 TARGET_TYPES = ("run", "wrapper_session")
 # One definition, several names. The vocabulary is owned by `run_records` in
@@ -149,7 +151,33 @@ class ExecutorProgressError(ValueError):
     pass
 
 
+# A user-declared executor's progress dialect is one tagged id,
+# `external.<executor id>` (design §2). The tag is written by the dispatcher
+# when it opens the binding; the owner id alone is never a profile, so a
+# built-in and a user executor that share a spelling cannot collide. Readers
+# accept this exact grammar and load no executable config to interpret it.
+EXTERNAL_PROGRESS_PROFILE_PREFIX = "external."
+_EXTERNAL_PROGRESS_PROFILE = re.compile(r"external\.[a-z][a-z0-9-]{1,31}", re.ASCII)
+
+
+def is_external_progress_profile(profile: object) -> bool:
+    """True for an exact `external.<id>` tag; no case folding, no aliases."""
+    return bool(_EXTERNAL_PROGRESS_PROFILE.fullmatch(str(profile or "")))
+
+
+def progress_profile_allowed(profile: object) -> bool:
+    """The closed built-in vocabulary, or one exact tagged external id."""
+    value = str(profile or "")
+    return value in ALLOWED_EXECUTOR_PROFILES or is_external_progress_profile(value)
+
+
 def normalize_executor_profile(value: str, *, observed_hermes_execution: bool = False) -> str:
+    if value.startswith(EXTERNAL_PROGRESS_PROFILE_PREFIX):
+        # No `casefold()` for a tagged id: the tag is exact and an owner id
+        # that differs in case is a different (invalid) id, not an alias.
+        if is_external_progress_profile(value):
+            return value
+        raise ExecutorProgressError(f"unsupported executor profile for progress: {value}")
     normalized = value.strip().casefold().replace("_", "-")
     aliases = {
         "codex": "codex",
@@ -157,12 +185,16 @@ def normalize_executor_profile(value: str, *, observed_hermes_execution: bool = 
         "claude-code": "claude_code",
         "claude-code-cli": "claude_code",
         "claude_code": "claude_code",
-        # The omo host CLIs collapse into one lane. `normalized` has already
-        # folded "_" to "-", so "omo_runtime" arrives here as "omo-runtime".
-        "omo-runtime": "omo_runtime",
-        "pi": "omo_runtime",
-        "senpi": "omo_runtime",
-        "opencode": "omo_runtime",
+        # The pi-family host CLIs collapse into one lane. `normalized` has already
+        # folded "_" to "-", so "pi_family_runtime" arrives here as "pi-family-runtime".
+        "pi-family-runtime": "pi_family_runtime",
+        "pi": "pi_family_runtime",
+        PI_DISTRIBUTION_HOST: "pi_family_runtime",
+        PI_FORK_HOST: "pi_family_runtime",
+        # Read-only: the profile id and lane older releases wrote (the fold
+        # above makes the lane spelling equal the profile id).
+        LEGACY_RUNTIME_PROFILE_ID: "pi_family_runtime",
+        "opencode": "pi_family_runtime",
     }
     if normalized == "hermes":
         if observed_hermes_execution:
@@ -361,7 +393,7 @@ def write_progress_binding(paths: OmhPaths, binding: dict[str, Any]) -> dict[str
 
 
 def read_progress_binding(paths: OmhPaths, target_type: str, target_id: str) -> dict[str, Any] | None:
-    binding = read_json_object(progress_dir_for_target(paths, target_type, target_id) / EXECUTOR_PROGRESS_BINDING_FILE)
+    binding = canonical_progress_record(read_json_object(progress_dir_for_target(paths, target_type, target_id) / EXECUTOR_PROGRESS_BINDING_FILE))
     if not binding:
         return None
     _require_valid("binding", validate_progress_binding(binding))
@@ -378,7 +410,7 @@ def list_progress_bindings(paths: OmhPaths, *, limit: int | None = None) -> list
             continue
         for binding_path in sorted(root.glob("*/executor_progress/binding.json")):
             try:
-                binding = read_json_object(binding_path)
+                binding = canonical_progress_record(read_json_object(binding_path))
                 if not binding:
                     continue
                 _require_valid("binding", validate_progress_binding(binding))
@@ -450,13 +482,19 @@ _ROUTING_CATEGORIES = frozenset(
         "capable",
         "deep",
         "deep-work",
+        "forensics",
+        "google-search",
         "quick",
+        "review",
         "simple-work",
+        "swarm",
+        "synthesize",
         "unspecified-high",
         "unspecified-low",
         "ultrabrain",
         "visual-engineering",
         "writing",
+        "x-search",
     }
 )
 
@@ -552,7 +590,7 @@ def build_safe_progress_signal(
         "explicit_summary": _compact_text(_sanitize_progress_copy(explicit_summary), 280),
         "evidence_ref_count": len(evidence_refs or []),
         # The routed model is what a live row needs to answer "which model is
-        # this"; the runtime alone cannot, because one profile (omo_runtime
+        # this"; the runtime alone cannot, because one profile (pi_family_runtime
         # especially) fronts many models.
         "routed_model": _compact_text(routed_model, 120),
         "routed_reasoning_effort": _compact_text(routed_reasoning_effort, 40),
@@ -1085,6 +1123,7 @@ def append_progress_event(paths: OmhPaths, binding: dict[str, Any], event: dict[
 def latest_progress_event(paths: OmhPaths, binding: dict[str, Any]) -> dict[str, Any]:
     target = _binding_target(binding)
     events, _errors = read_jsonl_objects(progress_dir_for_target(paths, target["type"], target["id"]) / EVENTS_FILE)
+    events = [canonical_progress_record(event) for event in events]
     valid = [event for event in events if not validate_progress_event(event) and _payload_matches_binding_instance(event, binding)]
     return valid[-1] if valid else {}
 
@@ -1141,6 +1180,7 @@ def append_progress_report(paths: OmhPaths, binding: dict[str, Any], report: dic
 def latest_progress_report(paths: OmhPaths, binding: dict[str, Any]) -> dict[str, Any]:
     target = _binding_target(binding)
     reports, _errors = read_jsonl_objects(progress_dir_for_target(paths, target["type"], target["id"]) / EXECUTOR_PROGRESS_REPORTS_FILE)
+    reports = [canonical_progress_record(report) for report in reports]
     valid = [report for report in reports if not validate_progress_report(report) and _payload_matches_binding_instance(report, binding)]
     return valid[-1] if valid else {}
 
@@ -1333,7 +1373,7 @@ def validate_progress_binding(record: dict[str, Any]) -> list[str]:
     elif any(separator in target_id for separator in ("/", "\\", "\x00")) or target_id in {".", ".."}:
         errors.append("target_id must be one safe path segment")
     profile = str(record.get("executor_profile") or record.get("executor") or "")
-    if profile not in ALLOWED_EXECUTOR_PROFILES:
+    if not progress_profile_allowed(profile):
         errors.append(_unsupported_profile_error())
     if str(record.get("binding_id", "")) != binding_id_for(target_type, target_id, profile):
         errors.append("binding_id must be target_type:target_id:executor_profile")
@@ -1356,7 +1396,7 @@ def validate_progress_event(record: dict[str, Any]) -> list[str]:
         errors.append("schema_version must be omh_progress_event/v1")
     if str(record.get("event_type", "")) not in PROGRESS_EVENT_TYPES:
         errors.append("event_type is unsupported")
-    if str(record.get("executor_profile", "")) not in ALLOWED_EXECUTOR_PROFILES:
+    if not progress_profile_allowed(record.get("executor_profile")):
         errors.append(_unsupported_profile_error())
     if not str(record.get("binding_id", "")):
         errors.append("binding_id is required")
@@ -1375,7 +1415,7 @@ def validate_progress_report(record: dict[str, Any]) -> list[str]:
     errors = _raw_or_hidden_errors(record)
     if record.get("schema_version") != EXECUTOR_PROGRESS_REPORT_SCHEMA_VERSION:
         errors.append("schema_version must be omh_progress_report/v1")
-    if str(record.get("executor_profile", "")) not in ALLOWED_EXECUTOR_PROFILES:
+    if not progress_profile_allowed(record.get("executor_profile")):
         errors.append(_unsupported_profile_error())
     if not str(record.get("binding_id", "")):
         errors.append("binding_id is required")

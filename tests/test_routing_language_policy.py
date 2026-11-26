@@ -30,6 +30,7 @@ import collections
 import unittest
 
 from omh.routing.input_language import (
+    SCRIPT_CYRILLIC,
     SCRIPT_HAN,
     SCRIPT_HANGUL,
     SCRIPT_KANA,
@@ -96,7 +97,10 @@ FROZEN_HANGUL_TRIGGERS_BY_SKILL: dict[str, int] = {
     # "watch continuously", "monitor continuously") and the ja/zh packs ship in
     # the same commit: new capability reach, not padding over a Korean-only
     # miss.
-    "automation-blueprint": 18,
+    # 18 -> 20 (2026-11-07, skill audit): bare `반복` dispatched "반복 학습이 중요해" and
+    # left. Its scheduling sense stays as `반복해줘`, `반복 실행` and `반복 일정`, each held
+    # back word by word: a narrowing that costs entries, not padding over a miss.
+    "automation-blueprint": 20,
     "browser-operator": 15,
     "build-failure-triage": 14,
     "code-review": 7,
@@ -169,6 +173,17 @@ FROZEN_HANGUL_TRIGGERS_BY_SKILL: dict[str, int] = {
     # English equivalents in the same commit ("switch provider account",
     # "provider quota exceeded") — new capability reach, not padding over a
     # routing miss.
+    # 0 -> 6 (2026-11-07, new skill): model-compression ships with its own
+    # Korean phrases for quantization, distillation and pruning of a model
+    # (모델 양자화, 모델 증류, 지식 증류, 모델 프루닝, 모델 가지치기, 양자화 인식
+    # 학습), with the English base corpus in the same commit. Frozen at what it
+    # carries so a later Korean miss is not papered over by padding it; 모델
+    # 압축 and 모델 경량화 are not pack phrases because a 3D asset is compressed
+    # and slimmed too, and they count only beside a word of model weights.
+    # 6 -> 5 (2026-11-08, #2664 review): 지식 증류 leaves the pack too; a team
+    # distills its know-how, so it counts only beside a weight word, a
+    # parameter count or 모델. A narrowing that costs an entry.
+    "model-compression": 5,
     "model-setup": 10,  # +3 (모델 세팅/모델 체인/카테고리별 모델): chain-interview vocabulary, owner request 2026-08-21
     "morning-brief": 4,
     "oh-my-hermes": 2,
@@ -192,6 +207,11 @@ FROZEN_HANGUL_TRIGGERS_BY_SKILL: dict[str, int] = {
     "rules-distill": 4,
     "security-safety-review": 5,
     "skill-health": 6,
+    # 0 -> 3 (2026-11-19, new skill): skill-eval ships 스킬 평가, 스킬 점검 and
+    # 스킬 호환성 with its English base corpus in the same commit. Each counts
+    # alone or beside a word of agent skills (`skill_eval_korean_match`), since
+    # a staff skill assessment says them too. Frozen at what it carries.
+    "skill-eval": 3,
     "skill-scout": 13,
     "source-finder": 8,
     # 0 -> 24 (2026-10-15, owner decision D.4, KO-1): the other safety gate,
@@ -200,6 +220,15 @@ FROZEN_HANGUL_TRIGGERS_BY_SKILL: dict[str, int] = {
     # admission rule admits.
     "spend-gate": 24,
     "strategy-brief": 6,
+    # 7 -> 9 (2026-11-02, architecture deepening): "코드베이스 아키텍처
+    # 개선해줘" and "코드 아키텍처 개선해줘" arrived WITH their English base
+    # corpus in the same commit ("improve the codebase architecture", "... of
+    # this repo"), new capability reach for an intent the audit had no trigger
+    # for in any language. Both name the code and are the request form, so a
+    # course, paper or job post about the topic does not count; a bare 아키텍처
+    # 개선 is ML, infra, org and building work, so it stays out. Frozen here
+    # from now on.
+    "tech-debt-audit": 9,
     "toolbelt-readiness": 5,
     "ultragoal": 4,
     "ultraprocess": 19,
@@ -220,7 +249,14 @@ FROZEN_HANGUL_TRIGGERS_BY_SKILL: dict[str, int] = {
     "research": 10,
     "web-research": 10,
     "websearch-setup": 4,
-    "wiki": 7,
+    # 7 -> 8 (2026-11-07, skill audit): a project handover had no signal in Korean;
+    # `인수인계 문서 써줘` carries the request, and its words are held back.
+    "wiki": 8,
+    # 0 -> 4 (2026-11-07, skill audit): the skill could not be reached in Korean at all.
+    # `시장 규모` and `경쟁사 분석` are terms of the job, with their common spacing
+    # (`시장규모`, `경쟁사분석`), held back word by word and read only right before a
+    # request verb of `_market_research_korean_request`.
+    "market-research": 4,
     "workflow-learning": 11,
     "workspace-audit": 4,
     "workspace-file-operator": 12,
@@ -285,9 +321,10 @@ class RoutingLanguagePolicyTests(unittest.TestCase):
         self.assertGreater(counts[SCRIPT_HANGUL], 100)
         self.assertGreater(counts[SCRIPT_HAN], 50)
         self.assertGreater(counts[SCRIPT_KANA], 50)
+        self.assertGreater(counts[SCRIPT_CYRILLIC], 100)
         self.assertEqual(
             set(trigger_backed_scripts()),
-            {SCRIPT_LATIN, SCRIPT_HANGUL, SCRIPT_HAN, SCRIPT_KANA},
+            {SCRIPT_LATIN, SCRIPT_HANGUL, SCRIPT_HAN, SCRIPT_KANA, SCRIPT_CYRILLIC},
         )
 
     def test_the_shipped_packs_are_what_makes_a_script_trigger_backed(self) -> None:
@@ -299,7 +336,7 @@ class RoutingLanguagePolicyTests(unittest.TestCase):
         # `trigger_backed_scripts()`: Latin was already backed by the English
         # catalog, so a Latin pack adds a language to a supported script rather
         # than a script to the supported set.
-        self.assertEqual(set(shipped_trigger_pack_languages()), {"ko", "ja", "zh", "id", "vi"})
+        self.assertEqual(set(shipped_trigger_pack_languages()), {"ko", "ja", "zh", "id", "vi", "ru"})
 
     def test_every_routable_skill_is_reachable_in_english(self) -> None:
         missing = [
@@ -319,13 +356,13 @@ class RoutingLanguagePolicyTests(unittest.TestCase):
         self.assertEqual(detect_input_script("Claude Code로 바로 열어줘"), SCRIPT_HANGUL)
 
     def test_scripts_without_a_trigger_table_are_marked_model_selection(self) -> None:
-        # Cyrillic and Devanagari ship no pack, so a deterministic trigger score
+        # Devanagari and Arabic ship no pack, so a deterministic trigger score
         # is not evidence of intent for them and the contract has to say so --
-        # the same statement the Kana and Han rows made before their packs
-        # existed.
+        # the same statement the Kana, Han, and Cyrillic rows made before their
+        # packs existed.
         for message, expected_script in (
-            ("почему сборка падает", "cyrillic"),
             ("बिल्ड क्यों फेल हो रहा है", "devanagari"),
+            ("لماذا يفشل البناء", "arabic"),
         ):
             with self.subTest(message=message):
                 script = detect_input_script(message)
@@ -338,15 +375,16 @@ class RoutingLanguagePolicyTests(unittest.TestCase):
             "빌드 실패 원인 봐줘",
             "ビルドが失敗した理由を教えて",
             "为什么构建失败了",
+            "почему сборка падает",
         ):
             with self.subTest(message=message):
                 self.assertEqual(routing_language_support(detect_input_script(message)), SUPPORT_TRIGGER_BACKED)
 
     def test_routing_input_language_states_the_boundary(self) -> None:
-        payload = routing_input_language("почему сборка падает")
+        payload = routing_input_language("बिल्ड क्यों फेल हो रहा है")
 
         self.assertEqual(payload["schema_version"], "routing_input_language/v1")
-        self.assertEqual(payload["script"], "cyrillic")
+        self.assertEqual(payload["script"], "devanagari")
         self.assertEqual(payload["trigger_support"], SUPPORT_MODEL_SELECTION_REQUIRED)
         self.assertIn("not evidence of intent", str(payload["boundary"]))
         self.assertIn(SCRIPT_KANA, payload["trigger_backed_scripts"])

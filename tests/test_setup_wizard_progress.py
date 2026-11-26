@@ -18,9 +18,12 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
+import shlex
+import sys
 import unittest
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -33,6 +36,7 @@ load_local_package()
 from omh.coding.executors import EXTERNAL_CLI_PROFILES  # noqa: E402
 from omh.commands import setup as setup_module  # noqa: E402
 from omh.commands.language import LANGUAGE_CODES, MESSAGES, tr  # noqa: E402
+from omh.commands.main import main  # noqa: E402
 from omh.maintenance.update_check import (  # noqa: E402
     DEFAULT_UPDATE_CHECK_MODE,
     UPDATE_CHECK_MODES,
@@ -58,6 +62,8 @@ _STEP_LABEL_KEYS = (
     "wizard_step_model_chains",
     "wizard_step_mcp_host",
     "wizard_step_update_check",
+    "wizard_step_auto_resume_shell",
+    "wizard_step_model_onboarding",
 )
 
 
@@ -150,7 +156,11 @@ class WizardProgressTests(_WizardHarness, unittest.TestCase):
             self.assertEqual({total for _index, total, _label in headings}, {5})
             self.assertEqual(
                 [label for _index, _total, label in headings],
-                [tr("en", key) for key in _STEP_LABEL_KEYS],
+                # The harness's stdout is a StringIO, so the model-onboarding
+                # and auto-resume shell groups (both need a terminal on
+                # stdout) stay silent here; their own tests cover them.
+                [tr("en", key) for key in _STEP_LABEL_KEYS
+                 if key not in ("wizard_step_model_onboarding", "wizard_step_auto_resume_shell")],
             )
             # The count is the questions, not the groups that might have run:
             # each group stopped at its opening prompt, so one prompt is one
@@ -290,6 +300,95 @@ class WizardProgressTests(_WizardHarness, unittest.TestCase):
             self.assertIn(question.label_key, MESSAGES["en"])
 
 
+class AutoResumeShellQuestionTests(_WizardHarness, unittest.TestCase):
+    """The opt-in shell hook: asked on a terminal while the shell's rc exists without the block, default No."""
+
+    def setUp(self) -> None:
+        self._tmp = TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.root = Path(self._tmp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.rc = self.home / ".zshrc"
+        self.rc.write_bytes(b"export A=1\n")
+        environ = {"HOME": str(self.home), "USERPROFILE": str(self.home), "ZDOTDIR": str(self.home),
+                   "SHELL": "/bin/zsh"}
+        patcher = patch.dict(os.environ, environ)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.paths = self._paths(self.root)
+        self._config(self.paths, _CONFIG)
+        write_update_check_policy(self.paths, mode="off")  # settles the only other question that could speak
+
+    def _wizard(self, answer: bool, *, terminal: bool = True, **flags):
+        prompts: list[tuple[str, bool, str]] = []
+
+        def yes_no(prompt, *, default, note="", **_kwargs):
+            prompts.append((prompt, default, note))
+            return answer
+
+        args = argparse.Namespace(profile=[], profile_pack=[], default_executor=None, with_mcp=False,
+                                  mcp_host="generic", **flags)
+        stream = io.StringIO()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(setup_module, "_detect_external_cli_profiles", return_value=_NONE_DETECTED))
+            stack.enter_context(patch.object(setup_module, "_stdin_is_tty", return_value=False))
+            stack.enter_context(patch.object(setup_module, "_provider_candidates", return_value=[]))
+            stack.enter_context(patch.object(setup_module, "_auto_resume_shell_terminal", return_value=terminal))
+            stack.enter_context(patch.object(setup_module, "_will_ask_model_onboarding", return_value=False))
+            stack.enter_context(patch.object(setup_module, "_ask_yes_no", side_effect=yes_no))
+            stack.enter_context(redirect_stdout(stream))
+            setup_module._run_setup_wizard(args, self.paths, "en")
+        return args, prompts, stream.getvalue()
+
+    def test_yes_installs_the_block_and_no_writes_nothing(self) -> None:
+        args, prompts, output = self._wizard(False)
+        self.assertEqual(len(prompts), 1)
+        prompt, default, note = prompts[0]
+        self.assertEqual(prompt, tr("en", "auto_resume_shell_prompt"))
+        self.assertIs(default, False)
+        self.assertIn(str(self.rc), note)
+        self.assertIn("omh auto-resume shell remove", note)
+        self.assertIn("[1/1] " + tr("en", "wizard_step_auto_resume_shell"), output)
+        self.assertIs(args._auto_resume_shell_choice, False)
+        self.assertEqual(self.rc.read_bytes(), b"export A=1\n")
+
+        args, prompts, output = self._wizard(True)
+        self.assertIs(args._auto_resume_shell_choice, True)
+        self.assertIn("auto-resume shell-start", self.rc.read_text(encoding="utf-8"))
+        self.assertIn(tr("en", "auto_resume_shell_installed", rc=str(self.rc)), output)
+
+        # Installed: not asked again.
+        args, prompts, output = self._wizard(True)
+        self.assertEqual(prompts, [])
+        self.assertIsNone(args._auto_resume_shell_choice)
+
+    def test_not_asked_without_a_terminal_an_rc_or_beside_yes(self) -> None:
+        for label, terminal, flags in (("no terminal", False, {}), ("--yes", True, {"yes": True}),
+                                       ("--no-interactive", True, {"no_interactive": True})):
+            with self.subTest(label):
+                args, prompts, _output = self._wizard(True, terminal=terminal, **flags)
+                self.assertEqual(prompts, [])
+                self.assertIsNone(args._auto_resume_shell_choice)
+        self.rc.unlink()
+        args, prompts, _output = self._wizard(True)
+        self.assertEqual(prompts, [])
+        self.assertFalse(self.rc.exists())
+
+    def test_it_sits_right_before_model_onboarding(self) -> None:
+        keys = [question.key for question in setup_module._wizard_question_groups()]
+        self.assertEqual(keys[-2:], ["auto_resume_shell", "model_onboarding"])
+
+    def test_strings_exist_in_every_language(self) -> None:
+        for code in LANGUAGE_CODES:
+            for key in ("wizard_step_auto_resume_shell", "auto_resume_shell_prompt", "auto_resume_shell_note",
+                        "auto_resume_shell_installed", "auto_resume_shell_failed"):
+                with self.subTest(language=code, key=key):
+                    self.assertTrue(MESSAGES[code][key].strip())
+            self.assertIn("{rc}", MESSAGES[code]["auto_resume_shell_note"])
+            self.assertIn("omh auto-resume shell remove", MESSAGES[code]["auto_resume_shell_note"])
+
+
 class UpdateCheckQuestionTests(_WizardHarness, unittest.TestCase):
     """The one wizard question about the install rather than about the assistant.
 
@@ -361,7 +460,7 @@ class UpdateCheckQuestionTests(_WizardHarness, unittest.TestCase):
         return captured
 
     def test_the_preselected_option_is_the_shipped_default(self) -> None:
-        """Enter lands where a `--yes` install lands, and makes no network request."""
+        """Enter lands on `off`, the shipped default: no launch check, and, stored as a choice, no TUI update notice."""
         with TemporaryDirectory() as tmp:
             paths = self._paths(Path(tmp))
             captured = self._captured_menu(paths)
@@ -458,6 +557,97 @@ class NonInteractiveRunTests(unittest.TestCase):
     def test_plain_run_without_a_terminal_prints_no_headings(self) -> None:
         with TemporaryDirectory() as tmp:
             status, stdout, stderr = run_cli(self._base(Path(tmp)) + ["setup"], output_json=False)
+            self.assertEqual(status, 0, stderr)
+            self._assert_no_question_headings(stdout)
+            self._assert_no_update_check_answer(Path(tmp))
+
+    def _run_with_stdin(self, stdin, args: list[str]) -> tuple[int, str, str]:
+        # `run_cli` always supplies a StringIO stdin; these cases need the
+        # two shapes a shell gives a child: `<&-` (None) and `</dev/null`.
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.dict(os.environ), patch.object(sys, "stdin", stdin), redirect_stdout(stdout), redirect_stderr(stderr):
+            os.environ.pop("OMH_OUTPUT", None)
+            status = main(args)
+        return status, stdout.getvalue(), stderr.getvalue()
+
+    def test_interactive_without_a_terminal_refuses_before_any_change(self) -> None:
+        # Given: an agent shell with no terminal on stdin, closed or /dev/null.
+        with open(os.devnull, encoding="utf-8") as devnull:
+            for label, stdin in (("closed", None), ("devnull", devnull)):
+                with self.subTest(stdin=label), TemporaryDirectory() as tmp:
+                    root = Path(tmp)
+                    # When: the wizard is asked for explicitly.
+                    status, stdout, stderr = self._run_with_stdin(
+                        stdin, self._base(root) + ["setup", "--interactive", "--no-menubar"]
+                    )
+                    # Then: no default stands in for a choice the user never saw.
+                    refusal = json.loads(stdout)
+                    self.assertEqual(status, 1)
+                    self.assertTrue(refusal["refused"])
+                    self.assertEqual(refusal["refusal_reason"], "interactive_requires_terminal")
+                    next_command = shlex.join(
+                        ["omh", *self._base(root), "setup", "--no-menubar", "--no-interactive", "--json"]
+                    )
+                    self.assertEqual(refusal["next_command"], next_command)
+                    self.assertIn(tr("en", "setup_interactive_needs_terminal", command=next_command), stderr)
+                    paths = setup_module._paths(
+                        argparse.Namespace(omh_home=str(root / ".omh"), hermes_home=str(root / ".hermes"), scope=None)
+                    )
+                    self.assertFalse(update_check_policy_recorded(paths))
+                    self.assertFalse(paths.setup_profile_path.exists())
+
+    def test_the_refusal_names_the_same_command_with_the_wizard_swapped_out(self) -> None:
+        # The user's other choices must survive into the command they are told to run.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "a dir with spaces"
+            argv = [
+                *self._base(root),
+                "setup",
+                "--model-setup",
+                "--scope",
+                "project",
+                "--profile-pack",
+                "engineering-delivery",
+                "--inter",
+                "--no-menubar",
+            ]
+            status, stdout, _stderr = self._run_with_stdin(None, argv)
+            self.assertEqual(status, 1)
+            next_command = json.loads(stdout)["next_command"]
+            self.assertEqual(
+                shlex.split(next_command),
+                [
+                    "omh",
+                    *self._base(root),
+                    "setup",
+                    "--model-setup",
+                    "--scope",
+                    "project",
+                    "--profile-pack",
+                    "engineering-delivery",
+                    "--no-menubar",
+                    "--no-interactive",
+                    "--json",
+                ],
+            )
+
+    def test_the_refusal_prints_only_the_line_to_a_person_at_a_terminal(self) -> None:
+        class _TerminalOut(io.StringIO):
+            def isatty(self) -> bool:
+                return True
+
+        with TemporaryDirectory() as tmp:
+            stdout, stderr = _TerminalOut(), io.StringIO()
+            with patch.dict(os.environ), patch.object(sys, "stdin", None), redirect_stdout(stdout), redirect_stderr(stderr):
+                os.environ.pop("OMH_OUTPUT", None)
+                status = main(self._base(Path(tmp)) + ["setup", "--interactive", "--no-menubar"])
+            self.assertEqual(status, 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertIn("needs a terminal on stdin", stderr.getvalue())
+
+    def test_plain_run_with_closed_stdin_keeps_the_non_interactive_path(self) -> None:
+        with TemporaryDirectory() as tmp:
+            status, stdout, stderr = self._run_with_stdin(None, self._base(Path(tmp)) + ["setup"])
             self.assertEqual(status, 0, stderr)
             self._assert_no_question_headings(stdout)
             self._assert_no_update_check_answer(Path(tmp))

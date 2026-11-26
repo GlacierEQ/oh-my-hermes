@@ -21,7 +21,7 @@ from ..plugin_bundle.omh.hermes_session_commands import (
 from .executor_cues import (
     CODING_DELIVERY_REQUEST_PHRASES,
     CODING_DELIVERY_REQUEST_TOKENS,
-    OMO_RUNTIME_CODING_AGENT_PHRASES,
+    PI_FAMILY_CODING_AGENT_PHRASES,
     SUBSTRING_NAMED_CODING_AGENT_PHRASES,
     contains_boundary_phrase,
 )
@@ -30,10 +30,33 @@ from .reference_regions import executable_routing_text
 from .jev_addressing import jev_addressed_skill
 from .localization import normalized_phrase, phrase_is_spoken, routing_terms, routing_tokens
 from .materials_cues import OFFICE_FILE_MATERIAL_PHRASES
+from .model_compression_cues import MODEL_COMPRESSION_ANCHORS, MODEL_COMPRESSION_SHARED_PHRASES
+from .skill_eval_cues import (
+    SKILL_EVAL_ANCHORS,
+    SKILL_EVAL_SHARED_PHRASES,
+    skill_eval_person_sense,
+    skill_eval_phrase_spoken,
+)
+from .bot_template_cues import (
+    BOT_TEMPLATE_ANCHORS,
+    BOT_TEMPLATE_SHARED_PHRASES,
+    bot_template_code_sense,
+    bot_template_id_applied,
+    bot_template_phrase_spoken,
+)
 from ..plugin_bundle.omh.dag_ulw_cues import DAG_ULW, asks_about_dag_ulw, dag_ulw_control, declines_dag_ulw, invokes_dag_ulw
 from ..plugin_bundle.omh.invocation_cues import invoked_instruction
+from ..coding.pi_family_interop import PI_DISTRIBUTION_HOST, RUNTIME_SHORT_NAME
 from ..plugin_bundle.omh.name_report_cues import about_the_skill
-from ..plugin_bundle.omh.request_lead import after_courtesy
+from ..plugin_bundle.omh.command_verb import DIRECT_CODING_EDIT_VERBS as _DIRECT_CODING_EDIT_VERBS
+from ..plugin_bundle.omh.command_verb import command_words as _command_words
+from ..plugin_bundle.omh.command_verb import commanded_words
+from ..plugin_bundle.omh.show_reel_cues import show_reel_request_admitted
+from ..plugin_bundle.omh.domain_signals import canonical_domain_tokens, domain_tokens_are_locally_negated
+from ..plugin_bundle.omh.code_review_cues import (
+    code_review_request_guard_applies as code_review_request_guard_applies,
+    code_review_request_sentence as code_review_request_sentence,
+)
 from ..plugin_bundle.omh.spend_signals import (
     SPEND_EVERYDAY_SENSE_ANCHORS,
     SPEND_EVERYDAY_SENSE_PHRASES,
@@ -1909,7 +1932,7 @@ _EXECUTOR_RUNTIME_READINESS_TOKENS = _normalized_token_set(
         "handoff",
         "agent",
         "omx",
-        "omo",
+        RUNTIME_SHORT_NAME,
         "omc",
         "런타임",
         "실행",
@@ -1984,7 +2007,6 @@ _TOOLBELT_READINESS_PHRASES = (
     "외부 도구",
     "커넥터",
     "자격증명",
-    "api 키",
     "키가 없어",
     "키 없어서",
     "이미지 도구",
@@ -2005,6 +2027,9 @@ _TOOLBELT_READINESS_PHRASES = (
     "gpt 이미지 도구",
     "도구 연결",
     "연결체",
+    "웹 검색 연결이 없",
+    "웹 검색 연결이 안",
+    "웹 검색 연결 설정",
 )
 _TOOLBELT_READINESS_TOKENS = _normalized_token_set(
     {
@@ -2063,7 +2088,22 @@ _TOOLBELT_READINESS_TOKENS = _normalized_token_set(
 # scoring, the operator-surface fast path, the harness-session guard, a bare
 # leading name ("cancel my netflix subscription"), and the clarify shortlist.
 # The routing-precision controls fail when any one of those checks is removed.
+# Rows whose phrases carry anchor words of their own ("4-bit quantization",
+# "make the model smaller"): the anchor has to stand outside the spoken phrase,
+# or every such phrase would anchor itself.
+_ANCHOR_OUTSIDE_PHRASE_SKILLS = frozenset({"model-compression"})
 EVERYDAY_SENSE_PHRASES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
+    # "export this Figma frame as PNG" is a file export, not a frame to build.
+    "frontend": (
+        ("figma frame", "figma to code", "figma design to code", "implement this figma", "build this figma"),
+        frozenset(
+            {
+                "app", "build", "code", "component", "components", "css", "design", "frontend", "handoff",
+                "html", "implement", "layout", "page", "react", "responsive", "screen", "site", "svelte",
+                "tailwind", "tokens", "vue", "website",
+            }
+        ),
+    ),
     "failure-signal-audit": (
         ("silent failure", "silent failures", "hidden failure", "hidden failures"),
         frozenset(
@@ -2085,7 +2125,7 @@ EVERYDAY_SENSE_PHRASES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
             {
                 "adapter", "adapters", "agents", "claude", "cli", "codex", "coding",
                 "config", "configs", "connector", "connectors", "drift", "inventory", "lifecycle",
-                "list", "mcp", "omh", "opencode", "recall", "recover", "senpi", "session", "show",
+                "list", "mcp", "omh", "opencode", "recall", "recover", PI_DISTRIBUTION_HOST, "session", "show",
                 "worktree", "worktrees",
             }
         ),
@@ -2234,6 +2274,20 @@ EVERYDAY_SENSE_PHRASES: dict[str, tuple[tuple[str, ...], frozenset[str]]] = {
             }
         ),
     ),
+    # "distill our model of customer churn into a one-pager", "prune the model of
+    # unused variables", "compress the model for the web" (a 3D asset) and "make
+    # the model smaller in Blender" name a conceptual, statistical or 3D model;
+    # each phrase keeps this route only beside a word of model weights.
+    "model-compression": (MODEL_COMPRESSION_SHARED_PHRASES, MODEL_COMPRESSION_ANCHORS),
+    # "is my skill any good at chess" and "my tennis skill evaluation" name a
+    # person's ability; each phrase keeps this route only alone or beside a
+    # word of agent skills or their hosts.
+    "skill-eval": (SKILL_EVAL_SHARED_PHRASES, SKILL_EVAL_ANCHORS),
+    # "create a discord bot template in python" and "slack bot template repo"
+    # ask for a starter project; each phrase keeps this route only alone or
+    # beside a template id or a word that applies, lists or shows one, and
+    # never beside a word of code (`bot_template_code_sense`).
+    "bot-template": (BOT_TEMPLATE_SHARED_PHRASES, BOT_TEMPLATE_ANCHORS),
     # "we need to backfill the open position on the team", "my family lineage
     # goes back to scotland", "duplicate events in my calendar" and "the batch
     # job at the bakery" are not pipelines; each phrase keeps this route only
@@ -2375,14 +2429,28 @@ def everyday_sense_phrase_unanchored(skill: str, normalized_query: str) -> bool:
     # names; `spend_signals`' clause rule skips the check for it too.
     if skill == "spend-gate" and spend_gate_named_as_command(normalized_query):
         return False
+    # "evaluate my skill at using Codex for Python": a host word sits beside
+    # the phrase, but the skill is the person's (`skill_eval_person_sense`).
+    if skill == "skill-eval" and skill_eval_phrase_spoken(normalized_query) and skill_eval_person_sense(
+        normalized_query
+    ):
+        return True
+    # "apply a discord bot template in python": an anchor sits beside the
+    # phrase, but the template is a starter project (`bot_template_code_sense`).
+    if skill == "bot-template" and bot_template_phrase_spoken(normalized_query) and bot_template_code_sense(
+        normalized_query
+    ):
+        return True
     phrases, anchors = entry
     spoken = tuple(phrase for phrase in phrases if phrase_is_spoken(normalized_query, phrase))
     if not spoken:
         return False
     query_tokens = routing_tokens(normalized_query)
-    if query_tokens & anchors:
+    phrase_tokens = routing_tokens(" ".join(spoken))
+    context = query_tokens - phrase_tokens if skill in _ANCHOR_OUTSIDE_PHRASE_SKILLS else query_tokens
+    if context & anchors:
         return False
-    return bool(query_tokens - routing_tokens(" ".join(spoken)) - _EVERYDAY_SENSE_FILLER_TOKENS)
+    return bool(query_tokens - phrase_tokens - _EVERYDAY_SENSE_FILLER_TOKENS)
 
 
 _HARNESS_SESSION_INVENTORY_PHRASES = (
@@ -3701,11 +3769,9 @@ _VOICE_OPERATOR_TOKENS = _normalized_token_set(
         "spoken",
         "short",
         "terse",
-        "accessibility",
         "음성",
         "모바일",
         "짧은",
-        "접근성",
     }
 )
 _BROWSER_OPERATOR_PHRASES = (
@@ -4211,7 +4277,6 @@ _LIVE_INFO_OPERATOR_PHRASES = (
     "game score",
     "time zone",
     "timezone",
-    "time in",
     "map directions",
     "directions to",
     "near me",
@@ -4220,7 +4285,6 @@ _LIVE_INFO_OPERATOR_PHRASES = (
     "오늘 날씨",
     "현재 날씨",
     "날씨 예보",
-    "주가",
     "코인 가격",
     "환율",
     "스포츠 점수",
@@ -4231,6 +4295,9 @@ _LIVE_INFO_OPERATOR_PHRASES = (
     "길찾기",
     "주변 식당",
 )
+# Read by `phrase_is_spoken`, not containment: "time in" is inside "time
+# instead" and "주가" is inside the folded "주간" (weekly).
+_LIVE_INFO_OPERATOR_SPOKEN_PHRASES = tuple(normalized_phrase(phrase) for phrase in ("time in", "주가"))
 _LIVE_INFO_OPERATOR_CONTEXT_TOKENS = _normalized_token_set(
     {
         "weather",
@@ -4307,6 +4374,13 @@ _LIVE_INFO_OPERATOR_EVERYDAY_CONTEXT_TOKENS = _normalized_token_set(
 )
 _LIVE_INFO_OPERATOR_LIVE_CUE_TOKENS = _normalized_token_set(
     {"now", "today", "current", "latest", "tonight", "yesterday", "live", "nearby"}
+)
+# A "current" that is not said of the workspace the work happens in: any "current" but one before a workspace noun
+# ("the current directory", "current branch", "current working directory"), which names where the work is.
+_CURRENT_NOT_OF_THE_WORKSPACE = re.compile(
+    r"\bcurrent\b(?!\s+(?:working\s+)?(?:directory|dir|folder|repo|repository|branch|checkout|worktree|workspace"
+    r"|project|file|module|package|code|codebase|implementation|behaviou?r|test\s+suite|tests?|commit|config"
+    r"|configuration|setup)\b)"
 )
 _LIVE_INFO_OPERATOR_BLOCKERS = (
     "web search",
@@ -4933,6 +5007,70 @@ _CREDENTIAL_ROTATION_SUBJECTS = (
     "인증서",
     "자격 증명",
 )
+# A game built for the browser is a rendered UI: `frontend` owns the scene craft
+# bar and the screenshot loop it needs. Measured on afb4f11a5, "three.js로 3D
+# 게임 만들어줘" reached the greenfield interview, "make a browser platformer game
+# in canvas" clarified toward the browser and live-score lanes (`game` is a
+# live-score topic word), and "이 게임 화면이 밋밋해 고쳐줘" reached nothing. The
+# game noun alone is a topic, so it needs a build or a look-and-feel cue beside
+# it, and a native engine, a question, or a non-build artifact stands it down.
+_GAME_NOUNS = (
+    "game",
+    "games",
+    "platformer",
+    "roguelike",
+    "tetris clone",
+    "게임",
+    "플랫포머",
+    "슈팅",
+)
+_GAME_BUILD_CUES = (
+    *_GREENFIELD_CREATION_PHRASES,
+    "make a ",
+    "make an ",
+    "make the game",
+    "feel juicier",
+    "juicier",
+    "game feel",
+    "polish the game",
+    "만들어",
+    "구현해",
+    "밋밋",
+    "화면이",
+    "그래픽",
+    "타격감",
+    "이펙트",
+)
+_GAME_NATIVE_ENGINES = (
+    "unity",
+    "unreal",
+    "godot",
+    "roblox",
+    "gamemaker",
+    "game maker",
+    "유니티",
+    "언리얼",
+    "고도 엔진",
+    "로블록스",
+)
+_GAME_TOPIC_BLOCKERS = (
+    *_GREENFIELD_QUESTION_OPENERS,
+    "game theory",
+    "trailer",
+    "recommend",
+    "tonight",
+    "score",
+    "sprite",
+    "market",
+    "design doc",
+    "추천",
+    "트레일러",
+    "이론",
+    "시장",
+    "기획서",
+    "점수",
+    "스프라이트",
+)
 _DEPENDENCY_UPGRADE_PHRASES = (
     "dependency upgrade",
     "dependency upgrades",
@@ -5091,7 +5229,7 @@ _CODING_HANDOFF_EXECUTOR_TOKENS = _normalized_token_set(
         "claude-code",
         "claudecode",
         "omx",
-        "omo",
+        RUNTIME_SHORT_NAME,
         "omc",
         "executor",
         "codex로",
@@ -5233,6 +5371,476 @@ _EXPLICIT_SCHEDULED_OPS_BLUEPRINT_PHRASES = (
     "hermes cron spec",
     "cron spec",
 )
+# "Watch <Slack/Discord channel> and tell me first when <condition>" is a
+# recurring job: a collector script on a cron schedule, a judging prompt that
+# replies [SILENT] when nothing matches, and a Bot Chat delivery. Measured on
+# c4a0496e5, the Korean phrasings dispatched `gateway-intent-card` on the
+# platform and `알림` triggers, and the English ones clarified toward it or
+# `connector-operator`. It needs all three: a messenger platform, a watch verb,
+# and a tell-me cue; a how-to question or a video stands it down.
+_CHANNEL_WATCH_PLATFORMS = ("slack", "discord", "슬랙", "디스코드")
+_CHANNEL_WATCH_VERBS = (
+    "keep an eye on",
+    "keep watching",
+    "keep monitoring",
+    "지켜보",
+    "지켜봐",
+    "감시",
+    "모니터링",
+    "주시",
+)
+_CHANNEL_WATCH_SPOKEN_VERBS = ("watch", "monitor")
+_CHANNEL_WATCH_NOTIFY_CUES = (
+    "tell me",
+    "ping me",
+    "notify me",
+    "alert me",
+    "let me know",
+    "message me",
+    "dm me",
+    "알려줘",
+    "알려 줘",
+    "알려주",
+    "알림",
+)
+# The platform as the delivery target ("ping me on Slack when CPU spikes",
+# "장애 나면 슬랙으로 알려줘") means something else is watched; that keeps its
+# base route.
+_CHANNEL_WATCH_BLOCKERS = (
+    *_GREENFIELD_QUESTION_OPENERS,
+    "video",
+    "영상",
+    "on slack",
+    "to slack",
+    "via slack",
+    "in slack dm",
+    "on discord",
+    "to discord",
+    "via discord",
+    "슬랙으로",
+    "디스코드로",
+)
+# "Tell me when a mail from my boss arrives", "노션 페이지 바뀌면 알려줘": a
+# trigger on a platform that sends Hermes no webhook (Gmail, Google Calendar,
+# Notion, Linear, Jira, Obsidian, Sentry) is one of automation-blueprint's
+# monitor recipes, a Hermes cron monitor job. Measured before the
+# `monitor_trigger_before_connector_or_wiki` guard, these clarified toward
+# morning-brief, connector-operator, wiki or operating-rhythm, fell back, or
+# dispatched connector-operator, wiki or github-event-ops; none listed
+# automation-blueprint. It needs all three: the platform named, a tell-me cue,
+# and an event cue that is about the platform's own items (arrives, changes,
+# is assigned, opens; 오면, 바뀌면, 배정되면, 생기면) or a time before a start
+# ("10 minutes before", "시작 15분 전에"). A bare `when` or `before` is not an
+# event: "tell me when my next meeting is" is a question. A question about
+# time, a how-to, a service outage or API, the platform as the delivery target,
+# the bot's own work, or a write that follows the trigger stands it down.
+_MONITOR_TRIGGER_SPOKEN_PLATFORMS = (
+    "gmail", "inbox", "mail", "mails", "calendar", "notion", "jira", "obsidian", "sentry",
+)
+_MONITOR_TRIGGER_PLATFORMS = (
+    "linear issue",
+    "linear ticket",
+    "linear app",
+    "지메일",
+    "메일",
+    "받은편지함",
+    "캘린더",
+    "노션",
+    "리니어",
+    "지라",
+    "옵시디언",
+    "센트리",
+)
+_MONITOR_TRIGGER_NOTIFY_CUES = (
+    "tell me",
+    "ping me",
+    "notify me",
+    "alert me",
+    "let me know",
+    "remind me",
+    "message me",
+    "알려줘",
+    "알려 줘",
+    "알려주",
+    "알림",
+)
+_MONITOR_TRIGGER_SPOKEN_EVENTS = (
+    "arrives",
+    "arrive",
+    "comes in",
+    "come in",
+    "changes",
+    "changed",
+    "is updated",
+    "gets updated",
+    "is edited",
+    "is assigned",
+    "gets assigned",
+    "assigned to me",
+    "is opened",
+    "opens",
+    "is created",
+    "minutes before",
+    "minute before",
+    "mins before",
+    "hour before",
+    "hours before",
+    "before it starts",
+    "before each",
+    "starts soon",
+)
+_MONITOR_TRIGGER_KO_EVENTS = (
+    "오면",
+    "들어오면",
+    "생기면",
+    "바뀌면",
+    "변경되면",
+    "수정되면",
+    "배정되면",
+    "할당되면",
+    "올라오면",
+    "열리면",
+    "분 전에",
+    "분 전",
+    "시간 전에",
+    "시작 전",
+    "시작하기 전",
+)
+_MONITOR_TRIGGER_SPOKEN_BLOCKERS = (
+    "when is",
+    "when my next",
+    "when did",
+    "when i",
+    "when you",
+    "before you",
+    "is down",
+    "back up",
+    "back online",
+    "api",
+    "docs",
+    "and then",
+    "and update",
+    "then update",
+    "and create",
+    "and reply",
+    "and send",
+    "and post",
+    "email me",
+    "mail me",
+    "video",
+)
+_MONITOR_TRIGGER_BLOCKERS = (
+    *_GREENFIELD_QUESTION_OPENERS,
+    "what's",
+    "whats",
+    "영상",
+    "방법",
+    "왜",
+    "설정",
+    "끄는",
+    "이전에",
+    "보내",
+)
+# "Watch PR 42 until its checks finish" is a wait on one pull request: a Hermes
+# cron monitor job from github-event-ops' PR watch recipe, not a model polling
+# loop. Measured before the `pr_watch_before_loop_or_ultrawork` guard, the
+# English phrasings clarified toward `ultrawork` (its `until` and `finish`
+# triggers) or `loop`, and the Korean ones fell back. It needs all three: a
+# pull request named as one, a watch or wait verb, and a settle cue (until it
+# finishes, passes, or merges); a how-to question, a queue of PRs, or a video
+# stands it down.
+_PR_WATCH_SPOKEN_OBJECTS = ("pr", "pull request")
+_PR_WATCH_OBJECTS = ("풀 리퀘스트", "풀리퀘스트", "풀리퀘")
+_PR_WATCH_VERBS = (
+    "keep an eye on",
+    "keep watching",
+    "keep monitoring",
+    "wait for",
+    "wait on",
+    "wait until",
+    "지켜보",
+    "지켜봐",
+    "기다려",
+    "기다렸다",
+    "감시",
+    "모니터링",
+    "주시",
+)
+_PR_WATCH_SPOKEN_VERBS = ("watch", "monitor", "babysit")
+_PR_WATCH_SETTLE_TOKENS = frozenset(
+    {
+        "until", "till", "finish", "finishes", "finished", "done", "complete", "completes", "completed",
+        "pass", "passes", "passed", "green", "merge", "merges", "merged", "settle", "settles", "settled",
+    }
+)
+_PR_WATCH_SETTLE_CUES = (
+    "끝날",
+    "끝나",
+    "끝날 때까지",
+    "완료",
+    "통과",
+    "머지",
+    "때까지",
+)
+# The PR must be the thing watched, and the wait must end on the PR's own state.
+# English: the PR comes within a few words after the watch or wait verb, the
+# words up to the clause opener (`until`, `to`, `when`) name no other watched
+# thing and no measure of PRs, and the clause names a PR state (checks, CI,
+# merged, approved) and no calendar boundary. Korean: the PR comes before the
+# verb with a PR-state word or the verb right after it, and the span up to the
+# verb holds the settle ending and no other watched thing, measure or date.
+# "배포 끝날 때까지 지켜보다가 PR 올려줘" names the PR as the result of the wait,
+# and "monitor PR merge rate until the sprint ends" a measure until a date.
+_PR_WATCH_EN_VERB_WORDS = (
+    ("watch",),
+    ("watching",),
+    ("monitor",),
+    ("monitoring",),
+    ("babysit",),
+    ("keep", "an", "eye", "on"),
+    ("keep", "watching"),
+    ("keep", "monitoring"),
+    ("wait", "for"),
+    ("wait", "on"),
+    ("wait", "until"),
+)
+_PR_WATCH_EN_OBJECT_WINDOW = 4
+_PR_WATCH_EN_CLAUSE_OPENERS = frozenset({"until", "till", "to", "when", "once"})
+_PR_WATCH_EN_STATE_WORDS = frozenset(
+    {
+        "check", "checks", "ci", "test", "tests", "build", "builds",
+        "pass", "passes", "passed", "passing", "green", "fail", "fails", "failed", "red",
+        "merge", "merges", "merged", "mergeable", "approve", "approves", "approved",
+        "review", "reviews", "reviewed", "close", "closes", "closed", "land", "lands", "landed",
+        "done", "finish", "finishes", "finished", "complete", "completes", "completed", "settle", "settles",
+    }
+)
+_PR_WATCH_EN_CALENDAR = frozenset(
+    {
+        "sprint", "week", "weekend", "month", "quarter", "year", "today", "tonight", "tomorrow", "eod",
+        "deadline", "morning", "evening", "noon", "monday", "tuesday", "wednesday", "thursday", "friday",
+        "saturday", "sunday",
+    }
+)
+# Another thing watched in the PR's place, and a measure of PRs.
+_PR_WATCH_OTHER_OBJECTS = frozenset(
+    {
+        "queue", "backlog", "video", "videos", "deploy", "deploys", "deployment", "deployments",
+        "release", "releases", "staging", "production", "prod", "rollout", "server", "servers", "logs",
+        "dashboard", "pipeline", "pipelines",
+    }
+)
+_PR_WATCH_MEASURES = frozenset(
+    {
+        "rate", "rates", "count", "counts", "number", "numbers", "speed", "time", "times", "turnaround",
+        "throughput", "latency", "velocity", "metric", "metrics", "stats", "statistics", "average", "long",
+        "many", "volume", "trend", "trends",
+    }
+)
+_PR_WATCH_KO_VERB_STEMS = ("지켜보", "지켜봐", "기다려", "기다렸", "감시", "모니터링", "주시")
+_PR_WATCH_KO_STATE_WORDS = ("체크", "ci", "머지", "리뷰", "빌드", "테스트", "검사", "승인", "통과", "실패", "닫히")
+_PR_WATCH_KO_OBJECT_WINDOW = 6
+# Whole words, compared after the router's own fold (Hangul is decomposed there).
+_PR_WATCH_KO_MEASURE_WORDS = frozenset(
+    normalized_phrase(word) for word in ("수", "수를", "수가", "속도", "속도를", "건수", "개수", "비율", "시간")
+)
+# The until-clause names another branch's state (CI on main, the release branch),
+# which a monitor of this PR cannot observe; merging into that branch is still
+# the PR's own state.
+_PR_WATCH_EN_OTHER_REFS = frozenset({"main", "main's", "master", "master's", "develop", "trunk", "branch", "branches"})
+_PR_WATCH_EN_MERGE_WORDS = frozenset({"merge", "merges", "merged", "land", "lands", "landed"})
+# A Korean watch or wait verb declined right where it is said: 지켜보지 말고/마,
+# 안 지켜봐도, 지켜볼 필요 없어.
+_PR_WATCH_KO_NEGATIONS = ("지 마", "지마", "지 말", "지말", "지 않", "지않", "필요 없", "필요는 없", "안 해도", "않아도")
+_PR_WATCH_KO_BLOCKERS = (
+    "배포", "릴리즈", "릴리스", "스테이징", "서버", "로그", "영상", "대기열",
+    "통계", "지표", "평균", "얼마나", "속도", "건수", "개수", "비율",
+    "이번 주", "주말", "금요일", "월요일", "화요일", "수요일", "목요일", "토요일", "일요일",
+    "스프린트", "분기", "오늘", "내일", "월말",
+)
+_PR_WATCH_BLOCKERS = (
+    *_GREENFIELD_QUESTION_OPENERS,
+    "watch out",
+    "how long",
+    "how many",
+)
+
+# An item in another app that should become work is app-work-intake: a spec page
+# or tracker issue turned into a PR, a mail message turned into a task instead
+# of a reply, or a Sentry or Datadog alert turned into a fix. Each shape needs
+# the app item and the work it becomes together, said as whole words. Before
+# this guard the tracker phrasings dispatched connector-operator (a one-action
+# card) or ultrawork (no source read, no write-back), and the alert ones
+# clarified toward build-failure-triage. Reading, summarizing, creating or
+# moving one thing in the app has no work cue and stays with connector-operator,
+# and a cadence or a "tell me when" trigger is automation-blueprint's job, whose
+# run loads this skill.
+_APP_WORK_SPEC_APPS = frozenset({"notion", "confluence", "linear", "jira"})
+# A Korean app name counts only at the start of a word: `지라` also ends
+# `~ㄹ지라도` ("even if"), which is never the tracker.
+_APP_WORK_SPEC_APPS_KO = ("노션", "컨플루언스", "리니어", "지라")
+_APP_WORK_SPEC_APPS_KO_NOT = ("지라도",)
+# The app name has to name its item: "Linear issue", "Notion spec", "Jira ticket
+# PAY-118". "linear interpolation" and "a notion that" name no item.
+_APP_WORK_SPEC_NOUNS = frozenset(
+    {"spec", "specs", "specification", "page", "pages", "doc", "docs", "issue", "issues", "ticket", "tickets", "story", "epic"}
+)
+_APP_WORK_SPEC_NOUNS_KO = ("티켓", "이슈", "페이지", "스펙", "문서")
+_APP_WORK_ISSUE_KEY = re.compile(r"\b[a-z][a-z0-9]{1,9}-\d+\b")
+_APP_WORK_PR_VERBS = frozenset(
+    {"turn", "turning", "make", "convert", "implement", "implementing", "build", "building", "raise", "create"}
+)
+# `open` creates a PR only as "open a PR": "open the PR linked in Jira ticket PAY-2" reads one that exists.
+_APP_WORK_OPEN_PR_PHRASES = ("open a pr", "open a pull request", "open prs")
+_APP_WORK_PR_VERBS_KO = ("만들", "올려", "열어", "생성")
+# Building from the item with no PR named needs the item named as one that is
+# read: "implement this Notion spec", "build what this Confluence page describes".
+_APP_WORK_BUILD_VERBS = frozenset({"implement", "implementing", "build", "building"})
+_APP_WORK_READING_DETERMINERS = frozenset({"this", "the", "that"})
+_APP_WORK_MAIL_NOUNS = frozenset({"email", "emails", "e-mail", "mail", "mails", "inbox", "gmail"})
+_APP_WORK_MAIL_NOUNS_KO = ("메일", "이메일", "받은편지함")
+_APP_WORK_MAIL_CUES = (
+    "into a task",
+    "into tasks",
+    "into a work item",
+    "into work",
+    "into a thread",
+    "into threads",
+    "as a task",
+    "instead of replying",
+    "instead of a reply",
+    "rather than replying",
+    "inbox to work",
+)
+_APP_WORK_MAIL_CUES_KO = ("작업으로", "태스크로", "할 일로", "스레드로", "답장 말고", "답장하지 말고")
+# A reply, a forward or a send asked for outright is a send, which this recipe never makes; it counts only when the
+# sentence declines the reply in so many words.
+_APP_WORK_MAIL_SEND_TERMS = frozenset({"reply", "respond", "forward", "send"})
+_APP_WORK_MAIL_SEND_KO = ("답장해", "회신해", "전달해", "보내")
+_APP_WORK_MAIL_DECLINES = ("instead of replying", "instead of a reply", "rather than replying", "답장하지 말고", "답장 말고")
+_APP_WORK_ALERT_APPS = frozenset({"sentry", "datadog"})
+_APP_WORK_ALERT_APPS_KO = ("센트리", "데이터독")
+# The alert has to be one: an alert or monitor that fired, not an SDK, an
+# integration or an agent that errors.
+_APP_WORK_ALERT_TERMS = frozenset({"alert", "alerts", "monitor", "monitors", "fired", "firing", "triggered"})
+_APP_WORK_ALERT_PHRASES = ("sentry issue",)
+_APP_WORK_ALERT_KO = ("알림", "알럿", "경보")
+# "fix the datadog monitor threshold for latency" tunes the monitor, not the code the alert is about.
+_APP_WORK_ALERT_BLOCKERS = frozenset(
+    {"sdk", "integration", "agent", "install", "config", "configuration", "setup", "threshold", "thresholds"}
+)
+_APP_WORK_FIX_VERBS = frozenset({"fix", "triage", "debug", "investigate", "handoff"})
+_APP_WORK_FIX_PHRASES = ("hand off", "hand it off", "fix hand-off", "alert to fix")
+_APP_WORK_FIX_CUES_KO = ("고쳐", "수정해", "수정까지", "트리아지", "분류하고", "넘겨")
+_APP_WORK_BLOCKERS = (
+    *_GREENFIELD_QUESTION_OPENERS,
+    "summarize",
+    "summary of",
+    "set up",
+    "install",
+    "configure",
+    "connect my",
+    "pr description",
+    "pr title",
+    "pr body",
+    "요약",
+    "설치",
+    "연결해",
+)
+# A trigger that waits for the item ("tell me when a Linear issue is assigned")
+# is a monitor job; automation-blueprint creates it and its run loads this skill.
+_APP_WORK_TRIGGER_CUES = (
+    "tell me when",
+    "let me know when",
+    "notify me",
+    "whenever",
+    "every time",
+    "each time",
+    "when a new",
+    "as soon as",
+    # `has_cadence` reads no Korean frequency word.
+    "매일",
+    "매주",
+    "매달",
+    "매시간",
+    "마다",
+)
+# A meeting's notes or transcript turned into tracker issues is operating-rhythm's
+# meeting-to-issues recipe, which loads Hermes' `meeting-action-items` and keeps
+# the created links in the action item history. Before this guard a sentence
+# naming Linear or Jira dispatched connector-operator's one-ticket card. It
+# needs the meeting record, a creation verb and the issues together; a
+# question about the notes, a transcript to translate, or one GitHub issue filed
+# from a report stays where it was.
+_MEETING_RECORD_PHRASES = (
+    "meeting notes",
+    "meeting transcript",
+    "meeting minutes",
+    "standup notes",
+    "call notes",
+    "call transcript",
+    "action items",
+    "the transcript",
+    "this transcript",
+    "회의록",
+    "회의 내용",
+    "미팅 노트",
+)
+# Not `open`: "open issues" are issues that already exist.
+_MEETING_CREATE_VERBS = frozenset({"turn", "create", "file", "make", "convert", "raise"})
+_MEETING_ISSUE_TERMS = frozenset({"issues", "tickets"})
+_MEETING_ISSUE_PHRASES_KO = ("이슈로 만들", "이슈 만들", "이슈 등록", "이슈 생성", "티켓으로 만들", "티켓 만들", "티켓 등록")
+_MEETING_TO_ISSUES_BLOCKERS = (
+    *_GREENFIELD_QUESTION_OPENERS,
+    "summarize",
+    "summary of",
+    "translate",
+    # A recording to transcribe first is a media input; the issues come after it.
+    "transcribe",
+    "voice memo",
+    "recording",
+    "which",
+    "what",
+    "github",
+    "요약",
+    "번역",
+    "알려줘",
+)
+# An Obsidian vault named as where the bot recalls from, keeps its daily journal,
+# or copies approved memory records is wiki's vault-as-knowledge recipe. Before
+# this guard "daily" and "obsidian" read as a recurring research department.
+# It needs an Obsidian or notes vault and one of those uses, said as a phrase;
+# a secrets vault, an app's memory use, a bolt (볼트), and research collected on
+# a cadence into the vault keep their routes.
+_VAULT_KNOWLEDGE_VAULTS = ("obsidian", "my vault", "notes vault", "옵시디언")
+_VAULT_KNOWLEDGE_USES = (
+    "as memory",
+    "as my memory",
+    "recall from",
+    "journal in",
+    "journal to",
+    "daily journal",
+    "memory records",
+    "approved records",
+    "일지",
+    "저널",
+    "기억",
+)
+_VAULT_KNOWLEDGE_BLOCKERS = (
+    *_GREENFIELD_QUESTION_OPENERS,
+    "research department",
+    "리서치 부서",
+    "memory usage",
+    "too much memory",
+    "uses memory",
+    "메모리 사용량",
+    "hashicorp",
+    "secret",
+)
+_VAULT_KNOWLEDGE_RESEARCH_TERMS = frozenset(
+    {"research", "collect", "gather", "scan", "news", "papers", "paper", "articles", "digest"}
+)
+_VAULT_KNOWLEDGE_RESEARCH_KO = ("리서치", "수집", "조사", "뉴스", "논문")
 _ONE_OFF_TOKENS = _normalized_token_set(
     {
         "once",
@@ -5825,6 +6433,33 @@ CREDENTIAL_ROTATION_GUARD = RoutingGuardRule(
     why="Matched guard/trigger metadata; replacing a live credential needs an overlap window, a cutover order, and a check that the old credential stopped working.",
     activation_status="active",
 )
+CODE_REVIEW_REQUEST_GUARD = RoutingGuardRule(
+    id="code_review_request_before_generic_clarify",
+    rule="A sentence that is, as a whole, a request to review a diff, patch, PR, commit or code change, or to find bugs in one, reaches code-review before generic clarification or token matches.",
+    matched_label="guard:code_review_request",
+    preferred_skills=("code-review",),
+    score_boost=30,
+    why="A sentence matched a closed review or bug-finding shape over a code-change object; any other word in that sentence keeps the request's own route.",
+    activation_status="active",
+)
+FRONTEND_DESIGN_GUARD = RoutingGuardRule(
+    id="frontend_design_before_generic_picker",
+    rule="A request that is, as a whole, a redesign of a named UI surface or a visual fault on a phone viewport reaches frontend before generic matches.",
+    matched_label="guard:frontend_design",
+    preferred_skills=("frontend",),
+    score_boost=30,
+    why="The whole request matched a closed redesign or phone-viewport fault shape; a request with any other word keeps its own route.",
+    activation_status="active",
+)
+GAME_BUILD_GUARD = RoutingGuardRule(
+    id="game_build_before_greenfield_interview",
+    rule="Building or polishing a browser game should route to frontend, which owns the rendered-scene craft bar and the screenshot loop, before the greenfield interview or the browser and live-score lanes.",
+    matched_label="guard:game_build",
+    preferred_skills=("frontend",),
+    score_boost=30,
+    why="Matched a game noun with a build or look-and-feel cue; a browser game is a rendered UI whose first frame, input response, and loop must be seen, not read.",
+    activation_status="active",
+)
 DEPENDENCY_UPGRADE_GUARD = RoutingGuardRule(
     id="dependency_upgrade_before_generic_plan",
     rule="A major dependency or framework upgrade should route to the phased refactor planner rather than the generic plan lane.",
@@ -5859,6 +6494,60 @@ SCHEDULED_OPS_BLUEPRINT_GUARD = RoutingGuardRule(
     preferred_skills=("automation-blueprint",),
     score_boost=24,
     why="Matched guard/trigger metadata; recurring schedule or delivery requests should prepare a Hermes ops blueprint first.",
+    activation_status="active",
+)
+CHANNEL_WATCH_GUARD = RoutingGuardRule(
+    id="channel_watch_before_gateway_or_connector",
+    rule="Watching a Slack or Discord channel and telling the user first when a matching post appears should route to automation-blueprint's channel-watch recipe before the gateway intent card or the connector lane.",
+    matched_label="guard:channel_watch",
+    preferred_skills=("automation-blueprint",),
+    score_boost=36,
+    why="Matched a messenger platform, a watch verb, and a tell-me cue; a channel watch is a recurring collector job with a [SILENT] judging prompt, not a one-off delivery card.",
+    activation_status="active",
+)
+VAULT_KNOWLEDGE_GUARD = RoutingGuardRule(
+    id="vault_knowledge_before_research_department",
+    rule="An Obsidian vault named as a recall source, the bot's daily journal, or the place for approved memory records should route to wiki's vault-as-knowledge recipe before the research department.",
+    matched_label="guard:vault_knowledge",
+    preferred_skills=("wiki",),
+    score_boost=40,
+    why="Matched a vault and a recall, journal, or memory use; the recipe reads notes as data, appends only to the folder the person named, and copies approved records only.",
+    activation_status="active",
+)
+MEETING_TO_ISSUES_GUARD = RoutingGuardRule(
+    id="meeting_to_issues_before_connector",
+    rule="A meeting's notes or transcript that should become tracker issues should route to operating-rhythm's meeting-to-issues recipe before the one-ticket connector card.",
+    matched_label="guard:meeting_to_issues",
+    preferred_skills=("operating-rhythm",),
+    score_boost=40,
+    why="Matched a meeting record and the issues it should become; the recipe extracts with Hermes' meeting-action-items, creates only approved issues, and keeps their links in the action item history.",
+    activation_status="active",
+)
+APP_WORK_INTAKE_GUARD = RoutingGuardRule(
+    id="app_work_intake_before_connector_or_coding",
+    rule="An item in another app that should become work (a Notion, Confluence, Linear or Jira spec to a PR, a mail message to a task instead of a reply, a Sentry or Datadog alert to a fix) should route to app-work-intake before the one-action connector card or a coding plan.",
+    matched_label="guard:app_work_intake",
+    preferred_skills=("app-work-intake",),
+    score_boost=44,
+    why="Matched an app item and the work it should become; app-work-intake reads the item through the bot's own Hermes tool, picks the path, and writes back only as an approved action.",
+    activation_status="active",
+)
+MONITOR_TRIGGER_GUARD = RoutingGuardRule(
+    id="monitor_trigger_before_connector_or_wiki",
+    rule="Being told when something happens on Gmail, Google Calendar, Notion, Linear, Jira, Obsidian, or Sentry should route to automation-blueprint's monitor recipes before the connector, wiki, or briefing lanes.",
+    matched_label="guard:monitor_trigger",
+    preferred_skills=("automation-blueprint",),
+    score_boost=36,
+    why="Matched a platform with no webhook, a tell-me cue, and an event cue; the trigger is a paused Hermes cron monitor job whose script wakes the agent only on a change, not a one-off read.",
+    activation_status="active",
+)
+PR_WATCH_GUARD = RoutingGuardRule(
+    id="pr_watch_before_loop_or_ultrawork",
+    rule="Waiting on one pull request until its checks finish, it merges, or it settles should route to github-event-ops' PR watch recipe before the loop or ultrawork lanes.",
+    matched_label="guard:pr_watch",
+    preferred_skills=("github-event-ops",),
+    score_boost=44,
+    why="Matched a pull request, a watch or wait verb, and a settle cue; a PR watch is a bounded Hermes cron monitor job, not a model polling loop or a coding plan.",
     activation_status="active",
 )
 RESEARCH_DEPARTMENT_GUARD = RoutingGuardRule(
@@ -5925,6 +6614,12 @@ ROUTING_GUARD_RULES = (
     JIT_LEARN_GUARD,
     RESEARCH_DEPARTMENT_GUARD,
     SCHEDULED_OPS_BLUEPRINT_GUARD,
+    CHANNEL_WATCH_GUARD,
+    MONITOR_TRIGGER_GUARD,
+    PR_WATCH_GUARD,
+    APP_WORK_INTAKE_GUARD,
+    MEETING_TO_ISSUES_GUARD,
+    VAULT_KNOWLEDGE_GUARD,
     SOURCE_FINDER_GUARD,
     WEB_RESEARCH_BEFORE_PROCESS_GUARD,
     POINT_IN_TIME_WEB_GUARD,
@@ -5955,6 +6650,9 @@ ROUTING_GUARD_RULES = (
     DIRECT_CODING_TASK_GUARD,
     NAMED_CODING_AGENT_DELIVERY_GUARD,
     CODING_HANDOFF_STATUS_GUARD,
+    GAME_BUILD_GUARD,
+    FRONTEND_DESIGN_GUARD,
+    CODE_REVIEW_REQUEST_GUARD,
 )
 
 
@@ -6013,6 +6711,9 @@ GUARD_DISPATCH_TRUST: dict[str, tuple[str, str]] = {
     "gateway_intent_before_feedback_triage": (GUARD_TRUSTED, "messenger thread or delivery policy named as the task; measured 2 right / 0 wrong"),
     "generated_artifact_provenance_before_deliverable_package": (GUARD_TRUSTED, "asks whether a change touches a generated file; no measured record as a winner, keeps its shape label"),
     "github_event_ops_before_generic_planning": (GUARD_TRUSTED, "an explicit PR, CI, or issue-to-PR event; measured 0 right / 1 wrong; kept trusted: demoting it removes no measured wrong dispatch and moves canonical pins"),
+    "code_review_request_before_generic_clarify": (GUARD_TRUSTED, "one sentence is a closed review or find-bugs shape over a diff, patch, PR, commit or code change; no measured record as a winner"),
+    "frontend_design_before_generic_picker": (GUARD_TRUSTED, "the whole request is a closed redesign or phone-viewport fault shape; no measured record as a winner, keeps its shape label"),
+    "game_build_before_greenfield_interview": (GUARD_TRUSTED, "a build or look-and-feel cue on a browser game, native engines and topic uses excluded; no measured record as a winner, keeps its shape label"),
     "github_issue_intake_before_event_ops_or_feedback": (GUARD_TRUSTED, "an imperative to file a new issue; no measured record as a winner, keeps its shape label"),
     "greenfield_build_before_generic_picker": (GUARD_CONTEXT_ONLY, "fires on build plus the absence of a named existing surface; no measured record as a winner, keeps its shape label"),
     "harness_session_inventory_before_toolbelt_or_observability": (GUARD_TRUSTED, "an inventory request over named harness sessions; measured 1 right / 0 wrong"),
@@ -6042,6 +6743,12 @@ GUARD_DISPATCH_TRUST: dict[str, tuple[str, str]] = {
     "research_department_before_generic_scheduled_ops": (GUARD_TRUSTED, "a recurring research operation shape; measured 1 right / 1 wrong; kept trusted: demoting it breaks the grounded-score and chat-card coverage floors"),
     "risky_refactor_before_cleanup": (GUARD_TRUSTED, "risky refactor named as the change; no measured record as a winner, keeps its shape label"),
     "safe_feature_change_before_generic_plan": (GUARD_TRUSTED, "a safe feature change named as the change; no measured record as a winner, keeps its shape label"),
+    "channel_watch_before_gateway_or_connector": (GUARD_TRUSTED, "a watch verb on a Slack or Discord channel plus a tell-me cue; no measured record as a winner, keeps its shape label"),
+    "monitor_trigger_before_connector_or_wiki": (GUARD_TRUSTED, "a platform with no webhook, a tell-me cue and an event cue; no measured record as a winner, keeps its shape label"),
+    "vault_knowledge_before_research_department": (GUARD_TRUSTED, "a vault plus a recall, journal, or memory use; no measured record as a winner, keeps its shape label"),
+    "meeting_to_issues_before_connector": (GUARD_TRUSTED, "a meeting record plus the issues it should become; no measured record as a winner, keeps its shape label"),
+    "app_work_intake_before_connector_or_coding": (GUARD_TRUSTED, "an app item plus the work it should become; no measured record as a winner, keeps its shape label"),
+    "pr_watch_before_loop_or_ultrawork": (GUARD_TRUSTED, "a watch or wait verb on one pull request plus a settle cue; no measured record as a winner, keeps its shape label"),
     "scheduled_ops_blueprint_before_reliability_or_research": (GUARD_CONTEXT_ONLY, "a cadence plus a scheduled action; measured 0 right / 1 wrong"),
     "source_finder_before_generic_web_research": (GUARD_CONTEXT_ONLY, "fires on source and paper nouns; no measured record as a winner, keeps its shape label"),
     "strategy_brief_before_generic_plan": (GUARD_TRUSTED, "a decide-whether or prioritize decision shape; no measured record as a winner, keeps its shape label"),
@@ -6339,6 +7046,10 @@ def _bare_first_word_names_a_longer_skill(
         for name in names
         if name.startswith(f"{candidate}-")
     )
+    # "skill harness check" and "skill compatibility" name `skill-eval` by its
+    # job rather than its name.
+    if candidate == "skill" and "skill-eval" in names and skill_eval_phrase_spoken(normalized):
+        return True
     return _contains_phrase(normalized, longer_names)
 
 
@@ -6572,6 +7283,25 @@ def _active_routing_guard_rules_cached(
         and (explicit_scheduled_ops_blueprint or not research_department_applies)
     ):
         rules.append(SCHEDULED_OPS_BLUEPRINT_GUARD)
+    channel_watch_applies = not direct_coding_task_applies and channel_watch_guard_applies(normalized_query)
+    if channel_watch_applies:
+        rules.append(CHANNEL_WATCH_GUARD)
+    # A monitor trigger names the platform as what is watched, so the connector
+    # and GitHub event lanes, which fire on the same platform and issue words,
+    # stand down for it.
+    monitor_trigger_applies = (
+        not direct_coding_task_applies and not channel_watch_applies and monitor_trigger_guard_applies(normalized_query)
+    )
+    if monitor_trigger_applies:
+        rules.append(MONITOR_TRIGGER_GUARD)
+    if not direct_coding_task_applies and pr_watch_guard_applies(normalized_query):
+        rules.append(PR_WATCH_GUARD)
+    if app_work_intake_guard_applies(normalized_query):
+        rules.append(APP_WORK_INTAKE_GUARD)
+    if meeting_to_issues_guard_applies(normalized_query):
+        rules.append(MEETING_TO_ISSUES_GUARD)
+    if vault_knowledge_guard_applies(normalized_query):
+        rules.append(VAULT_KNOWLEDGE_GUARD)
     source_finder_applies = (
         not delivery_cycle_applies
         and not paper_learning_applies
@@ -6610,12 +7340,18 @@ def _active_routing_guard_rules_cached(
         rules.append(MISSED_WORKFLOW_WEB_RESEARCH_GUARD)
     if _github_issue_intake_guard_applies(normalized_query, query_tokens):
         rules.append(GITHUB_ISSUE_INTAKE_GUARD)
-    if _github_event_ops_guard_applies(normalized_query, query_tokens):
+    if not monitor_trigger_applies and _github_event_ops_guard_applies(normalized_query, query_tokens):
         rules.append(GITHUB_EVENT_OPS_GUARD)
     if contract_redline_guard_applies(normalized_query):
         rules.append(CONTRACT_REDLINE_GUARD)
     if credential_rotation_guard_applies(normalized_query):
         rules.append(CREDENTIAL_ROTATION_GUARD)
+    if frontend_design_guard_applies(normalized_query):
+        rules.append(FRONTEND_DESIGN_GUARD)
+    if not direct_coding_task_applies and code_review_request_guard_applies(normalized_query):
+        rules.append(CODE_REVIEW_REQUEST_GUARD)
+    if not direct_coding_task_applies and game_build_guard_applies(normalized_query):
+        rules.append(GAME_BUILD_GUARD)
     if dependency_upgrade_guard_applies(normalized_query):
         rules.append(DEPENDENCY_UPGRADE_GUARD)
     if _generated_artifact_provenance_guard_applies(normalized_query):
@@ -6649,7 +7385,12 @@ def _active_routing_guard_rules_cached(
     memory_new_applies = _memory_new_guard_applies(normalized_query)
     if memory_new_applies:
         rules.append(MEMORY_NEW_GUARD)
-    if not workflow_learning_applies and not memory_new_applies and _memory_curation_guard_applies(normalized_query, query_tokens):
+    if (
+        not workflow_learning_applies
+        and not memory_new_applies
+        and not code_review_request_guard_applies(normalized_query)
+        and _memory_curation_guard_applies(normalized_query, query_tokens)
+    ):
         rules.append(MEMORY_CURATION_GUARD)
     if _agent_board_guard_applies(normalized_query, query_tokens):
         rules.append(AGENT_BOARD_GUARD)
@@ -6676,6 +7417,7 @@ def _active_routing_guard_rules_cached(
     if (
         not direct_coding_task_applies
         and not feedback_before_coding_applies
+        and not monitor_trigger_applies
         and _connector_operator_guard_applies(normalized_query, query_tokens)
     ):
         rules.append(CONNECTOR_OPERATOR_GUARD)
@@ -6834,15 +7576,6 @@ def _deep_interview_guard_applies(normalized_query: str, query_tokens: set[str])
     return (interview or clarify) and before_plan
 
 
-# The words of a message from its command verb on, after the courtesy openers
-# and the address to the assistant ("please", "can you", "omh", "hermes,") that
-# every reader of a request's opening strips (`request_lead.COURTESY_OPENERS`).
-# Used only to NARROW guards: an edit verb that is not the command verb does
-# not make a request an edit.
-def _command_words(normalized_query: str) -> list[str]:
-    return re.findall(r"[a-z0-9#][a-z0-9#+.-]*", after_courtesy(normalized_query.strip()))
-
-
 # Code-shaped objects: the nouns a code edit acts on. The direct code-edit
 # guard needs one; `_CODE_UNIT_TOKENS`, the units of source code among them,
 # is what the file-operation guard declines a file named by.
@@ -6855,9 +7588,6 @@ _CODE_OBJECT_TOKENS = frozenset(
 )
 _CODE_UNIT_TOKENS = frozenset({"class", "component", "function", "method", "module", "variable"})
 _UI_BUILD_SURFACES = frozenset({"page", "pages", "screen", "screens", "sidebar", "dashboard", "form", "landing", "site", "website"})
-_DIRECT_CODING_EDIT_VERBS = frozenset(
-    {"add", "adjust", "build", "change", "delete", "edit", "fix", "implement", "make", "patch", "remove", "rename", "set", "tweak", "update"}
-)
 _CADENCE_TIME_WORDS = frozenset(
     {
         "morning", "evening", "night", "day", "weekday", "week", "month", "hour", "minute",
@@ -7009,7 +7739,7 @@ def _direct_coding_task_guard_applies(
         words = _command_words(normalized_query)
         # The command verb, a verb introduced as the task ("use X to fix",
         # "help me fix"), or a second command joined by "and"/"then".
-        commanded = set(words[:1]) | {words[i] for i in range(1, len(words)) if words[i - 1] in {"to", "me", "and", "then"}}
+        commanded = commanded_words(words)
         edit_verbs = edit_verbs & commanded
     if normalized_query.isascii():
         # "set up" is setup, not an edit; building a new page or screen is a
@@ -7581,6 +8311,18 @@ def _korean_usage_request(normalized_query: str) -> bool:
     return False
 
 
+_ALERT_TRIGGER_LEADS = ("when", "whenever", "if", "once", "every time", "each time")
+_ALERT_TRIGGER_EVENTS = ("fires", "fire", "triggers", "trips", "goes off")
+_ALERT_TRIGGER_KO = ("울리면", "뜨면", "오면", "발생하면", "하면", "때마다")
+
+
+def _alert_trigger_phrasing(normalized_query: str) -> bool:
+    """"when a datadog monitor fires ...", "데이터독 알림 뜨면 ...": an event the person wants a reaction to."""
+    return (
+        _contains_phrase(normalized_query, _ALERT_TRIGGER_LEADS) and _contains_phrase(normalized_query, _ALERT_TRIGGER_EVENTS)
+    ) or _contains_phrase(normalized_query, _ALERT_TRIGGER_KO)
+
+
 def _ops_observability_guard_applies(normalized_query: str, query_tokens: set[str]) -> bool:
     if _public_plugin_connector_readiness_requested(normalized_query):
         return False
@@ -7589,6 +8331,11 @@ def _ops_observability_guard_applies(normalized_query: str, query_tokens: set[st
         PUBLIC_PLUGIN_CONNECTOR_ALIAS_PHRASES,
     )
     if ops_observability_external_blocked(normalized_query):
+        return False
+    # "Datadog monitor fired for high latency, investigate and fix it": latency is what the alert is about, and the
+    # alert should become a fix, not a status card. "when a datadog monitor fires ..." is a trigger, which belongs to
+    # automation-blueprint, so this does not widen app-work-intake over it.
+    if app_work_intake_guard_applies(normalized_query) and not _alert_trigger_phrasing(normalized_query):
         return False
     if _contains_phrase(normalized_query, _OPS_OBSERVABILITY_PHRASES):
         return True
@@ -8161,7 +8908,12 @@ def _explicit_material_export_requested(normalized_query: str, query_tokens: set
 def _research_department_guard_applies(normalized_query: str, query_tokens: set[str]) -> bool:
     if is_explicit_one_off_request(normalized_query, query_tokens):
         return False
+    # "apply the research-vault template to this bot with obsidian" sets a bot up; the id is not a research request.
+    if bot_template_id_applied(normalized_query):
+        return False
     if _wiki_capture_destination_request(normalized_query, query_tokens):
+        return False
+    if vault_knowledge_guard_applies(normalized_query):
         return False
     explicit_research_ops = _contains_phrase(normalized_query, _RESEARCH_DEPARTMENT_PHRASES)
     # A research department named outright keeps its request even when the
@@ -8889,6 +9641,9 @@ def _coding_handoff_status_guard_applies(
 
 
 def _github_issue_intake_guard_applies(normalized_query: str, query_tokens: set[str]) -> bool:
+    # Issues taken from a meeting's notes are operating-rhythm's meeting-to-issues recipe, not one report to file.
+    if meeting_to_issues_guard_applies(normalized_query):
+        return False
     # Pre-creation filing only: issue-to-PR and pull-request event language
     # stays with github-event-ops, classification-only reports with
     # feedback-triage.
@@ -8936,6 +9691,9 @@ def _github_event_ops_guard_applies(normalized_query: str, query_tokens: set[str
     if {"plan", "spec", "roadmap"} & query_tokens and _contains_phrase(normalized_query, ("into a", "into the")):
         return False
     if _github_issue_intake_guard_applies(normalized_query, query_tokens):
+        return False
+    # "apply the pr-review template to this bot for our github prs" sets a bot up; GitHub is where it will work.
+    if bot_template_id_applied(normalized_query):
         return False
     if _contains_phrase(normalized_query, _SECURITY_EVENT_OVER_GITHUB_EVENT_PHRASES):
         return False
@@ -9134,6 +9892,12 @@ def _memory_new_guard_applies(normalized_query: str) -> bool:
     return _contains_phrase(normalized_query, MEMORY_NEW_SCOPE_PHRASES)
 
 
+# A word inside a file path (`context/`, `src/memory/store.py`) names a directory
+# or a module, not the agent's memory store. A review task that says its files
+# are "under context/" dispatched memory-sync on that path segment alone. A path
+# here ends in a slash or a file with an extension, so "memory/context" and
+# "and/or" stay words.
+_PATH_LIKE_RE = re.compile(r"(?<![\w/])(?:[~.]?/)?(?:[\w.-]+/)+(?:[\w-]+\.\w+)?(?![\w/])")
 _SYSTEM_MEMORY_WORDS = frozenset(
     {"usage", "leak", "leaks", "leaking", "heap", "ram", "oom", "rss", "allocation", "allocations", "gc", "footprint"}
 )
@@ -9155,7 +9919,7 @@ def _memory_curation_guard_applies(normalized_query: str, query_tokens: set[str]
     context = bool(_MEMORY_CURATION_CONTEXT_TOKENS & query_tokens)
     hermes_context = _contains_phrase(normalized_query, ("hermes", "헤르메스"))
     omh_context = _contains_phrase(normalized_query, ("omh", "oh-my-hermes", "oh my hermes"))
-    memory_context = bool(_MEMORY_STORE_TOKENS & query_tokens)
+    memory_context = bool(_MEMORY_STORE_TOKENS & routing_tokens(_PATH_LIKE_RE.sub(" ", normalized_query)))
     if _scheduled_ops_blueprint_guard_applies(normalized_query, query_tokens) and not (
         hermes_context or omh_context or memory_context
     ):
@@ -9626,9 +10390,9 @@ def named_coding_agent_delivery_requested(normalized_query: str, query_tokens: s
 def _contains_named_coding_agent_phrase(normalized_query: str) -> bool:
     """Executor-name presence, with per-group matching rules.
 
-    The distinctive executor names keep plain containment. The omo-runtime
-    family needs word-boundary checks: "api한테" contains "pi한테" and "promo
-    runtime" contains "omo runtime", so raw containment named an executor the
+    The distinctive executor names keep plain containment. The pi-family-runtime
+    family needs word-boundary checks: "api한테" contains "pi한테", and a word that
+    ends in the runtime's short name contains its runtime phrase, so raw containment named an executor the
     message never mentioned (see `contains_boundary_phrase` in
     `routing/executor_cues.py` for the boundary rule).
 
@@ -9639,7 +10403,7 @@ def _contains_named_coding_agent_phrase(normalized_query: str) -> bool:
     if _contains_phrase(normalized_query, SUBSTRING_NAMED_CODING_AGENT_PHRASES):
         return True
     if contains_boundary_phrase(
-        normalized_query, _normalized_phrase_options(OMO_RUNTIME_CODING_AGENT_PHRASES)
+        normalized_query, _normalized_phrase_options(PI_FAMILY_CODING_AGENT_PHRASES)
     ):
         return True
     return _claude_bare_name_delegation_requested(normalized_query)
@@ -9699,7 +10463,7 @@ def _executor_runtime_readiness_guard_applies(normalized_query: str, query_token
     )
     named_executor = _contains_phrase(
         normalized_query,
-        ("codex", "claude code", "coding agent", "omx", "omo", "omc", "코덱스", "클로드"),
+        ("codex", "claude code", "coding agent", "omx", RUNTIME_SHORT_NAME, "omc", "코덱스", "클로드"),
     )
     selection = _contains_phrase(
         normalized_query,
@@ -9855,6 +10619,12 @@ def _provider_profile_posture_guard_applies(normalized_query: str) -> bool:
     )
 
 
+_TOOLBELT_READINESS_GAP_TOKENS = _normalized_token_set(
+    {"setup", "missing", "blocked", "unavailable", "connect", "연결", "없어", "없어서", "막히", "설정"}
+)
+_TOOLBELT_READINESS_NAMED_APART_TOKENS = _normalized_token_set({"plugin", "plugins", "툴"})
+
+
 def _toolbelt_readiness_guard_applies(normalized_query: str, query_tokens: set[str]) -> bool:
     if _hermes_setup_guide_requested(normalized_query):
         return False
@@ -9919,8 +10689,14 @@ def _toolbelt_readiness_guard_applies(normalized_query: str, query_tokens: set[s
         {"plugin", "plugins", "tool", "tools", "connector", "connectors", "mcp", "integration", "generator"} & query_tokens
     ):
         return False
-    tool_words = (_TOOLBELT_READINESS_TOKENS - {"setup"}) & query_tokens
-    if tool_words == {"api"} and not _contains_phrase(normalized_query, ("api key", "api keys", "api token", "credential")):
+    # The same holds for every word that is also a gap cue below: "the report is
+    # missing a chart", "connect the dots" and "리액트로 설정 화면 만들어줘" name no
+    # tool, and neither does a word that only says something is unset.
+    # A plugin, a tool said in Korean (`툴`) or a connector the operator lane knows is
+    # itself named, so its gap word stands: "노션 연결 설정해줘".
+    named_apart = bool(query_tokens & (_TOOLBELT_READINESS_NAMED_APART_TOKENS | _CONNECTOR_OPERATOR_CONTEXT_TOKENS))
+    tool_words = (_TOOLBELT_READINESS_TOKENS - ({"setup"} if named_apart else _TOOLBELT_READINESS_GAP_TOKENS)) & query_tokens
+    if tool_words == {"api"} and not _contains_phrase(normalized_query, ("api key", "api keys", "api token", "credential", "api 키")):
         tool_words = set()
     tool_context = bool(tool_words) or _contains_phrase(
         normalized_query,
@@ -10031,6 +10807,9 @@ def appearance_edit_request(query_tokens: set[str]) -> bool:
 def _browser_operator_guard_applies(normalized_query: str, query_tokens: set[str]) -> bool:
     if _contains_phrase(normalized_query, _BROWSER_OPERATOR_LIVE_INCIDENT_BLOCKERS):
         return False
+    # "build what this Confluence page describes and open a PR" reads the page through its app's tool.
+    if app_work_intake_guard_applies(normalized_query):
+        return False
     if _contains_phrase(normalized_query, _BROWSER_OPERATOR_VISUAL_QA_BLOCKERS):
         return False
     if _contains_phrase(normalized_query, _BROWSER_OPERATOR_PROVIDER_AUTH_BLOCKERS):
@@ -10139,6 +10918,13 @@ def _command_operator_guard_applies(normalized_query: str, query_tokens: set[str
 def _connector_operator_guard_applies(normalized_query: str, query_tokens: set[str]) -> bool:
     if _contains_phrase(normalized_query, _CONNECTOR_OPERATOR_BLOCKERS):
         return False
+    # "apply the meeting-to-issues template to this bot for our linear issues" sets a bot up, not one Linear action.
+    if bot_template_id_applied(normalized_query):
+        return False
+    # Work started from an app item is app-work-intake, and a meeting's issues are operating-rhythm's;
+    # this lane is one action in the app.
+    if app_work_intake_guard_applies(normalized_query) or meeting_to_issues_guard_applies(normalized_query):
+        return False
     # A digest on a cadence is a scheduled job, and a deploy command is a
     # release, not an action in a connected app.
     if has_cadence(normalized_query, query_tokens):
@@ -10153,7 +10939,11 @@ def _connector_operator_guard_applies(normalized_query: str, query_tokens: set[s
         return False
     if _contains_phrase(normalized_query, _CONNECTOR_OPERATOR_PHRASES):
         return True
-    connector_context = bool(_CONNECTOR_OPERATOR_CONTEXT_TOKENS & query_tokens)
+    context = _CONNECTOR_OPERATOR_CONTEXT_TOKENS & query_tokens
+    # "a SaaS product launch video" names a video about a SaaS, not an app to act in.
+    if context == {"saas"} and show_reel_request_admitted(normalized_query):
+        context = set()
+    connector_context = bool(context)
     connector_action = bool(_CONNECTOR_OPERATOR_ACTION_TOKENS & query_tokens)
     platform_write = _platform_connector_write_applies(normalized_query, query_tokens)
     return (connector_context and connector_action) or platform_write
@@ -10189,6 +10979,12 @@ def _live_info_operator_guard_applies(normalized_query: str, query_tokens: set[s
         return False
     if _contains_phrase(normalized_query, _LIVE_INFO_OPERATOR_PHRASES):
         return True
+    if any(phrase_is_spoken(normalized_query, phrase) for phrase in _LIVE_INFO_OPERATOR_SPOKEN_PHRASES):
+        return True
+    # "current" said of the workspace ("the current directory", "the current branch") is where the work is, not a
+    # live lookup: with every "current" of that kind it neither asks for nor times a lookup.
+    if "current" in query_tokens and not _CURRENT_NOT_OF_THE_WORKSPACE.search(normalized_query):
+        query_tokens = query_tokens - {"current"}
     live_context = _LIVE_INFO_OPERATOR_CONTEXT_TOKENS & query_tokens
     lookup_intent = bool(_LIVE_INFO_OPERATOR_LOOKUP_TOKENS & query_tokens)
     if not (live_context and lookup_intent):
@@ -10207,6 +11003,9 @@ def _live_info_operator_guard_applies(normalized_query: str, query_tokens: set[s
 
 def _media_input_operator_guard_applies(normalized_query: str, query_tokens: set[str]) -> bool:
     if _contains_phrase(normalized_query, _MEDIA_INPUT_OPERATOR_BLOCKERS):
+        return False
+    # A transcript already in hand that should become issues is a meeting record, not media to transcribe.
+    if meeting_to_issues_guard_applies(normalized_query):
         return False
     if _connector_operator_guard_applies(normalized_query, query_tokens):
         return False
@@ -10265,6 +11064,15 @@ def _content_operator_guard_applies(normalized_query: str, query_tokens: set[str
     return content_context and content_action and quality_context
 
 
+# Two image-card modality words are as often a video's ("a vertical video", "a
+# motion graphic"), and a SaaS is as often the subject of a launch video as a
+# connected app. Neither word names its skill's own target when the request is
+# one show-reel admits: the video is then the requested output, not the source
+# of a card or a post (`_visual_summary_guard_applies`,
+# `_connector_operator_guard_applies`).
+_VIDEO_SHARED_MODALITY_TOKENS = frozenset({"graphic", "vertical", normalized_phrase("세로")})
+
+
 def _visual_summary_guard_applies(normalized_query: str, query_tokens: set[str]) -> bool:
     # `prepare_routing_text` emits this cue only for bounded Apple-style
     # product-visual library intent, which must reach the Apple specialist
@@ -10302,9 +11110,14 @@ def _visual_summary_guard_applies(normalized_query: str, query_tokens: set[str])
         return True
     if _VISUAL_SUMMARY_NON_VISUAL_WORK_TOKENS & query_tokens:
         return False
-    if _VISUAL_SUMMARY_MODALITY_TOKENS & query_tokens and _VISUAL_SUMMARY_CAPABILITY_TOKENS & query_tokens:
+    modality = _VISUAL_SUMMARY_MODALITY_TOKENS & query_tokens
+    # "make a vertical video", "a motion graphic showing how coffee is brewed":
+    # the modality word qualifies a video, so no image is named.
+    if modality <= _VIDEO_SHARED_MODALITY_TOKENS and show_reel_request_admitted(normalized_query):
+        modality = set()
+    if modality and _VISUAL_SUMMARY_CAPABILITY_TOKENS & query_tokens:
         return True
-    if _VISUAL_SUMMARY_MODALITY_TOKENS & query_tokens and _VISUAL_SUMMARY_OUTPUT_CONTEXT_TOKENS & query_tokens:
+    if modality and _VISUAL_SUMMARY_OUTPUT_CONTEXT_TOKENS & query_tokens:
         return True
     if _VISUAL_SUMMARY_OUTPUT_CONTEXT_TOKENS & query_tokens and _contains_phrase(
         normalized_query,
@@ -10338,6 +11151,427 @@ def contract_redline_guard_applies(normalized_query: str) -> bool:
     return _contains_phrase(normalized_query, _CONTRACT_MARKUP_CUES) and _contains_phrase(
         normalized_query, _CONTRACT_DOCUMENT_NOUNS
     )
+
+
+# Two earlier shapes of this guard (a surface word with a repair verb, then a
+# surface word with a symptom word) looked for cue words anywhere in the
+# message, and every such word has an everyday reading outside UI work: a
+# cracked phone screen, broken text encoding in an export, calendar events that
+# overlap, a database that is redesigned. So this guard reads the whole message
+# instead of words in it. It fires only when the entire request is one of the
+# closed sentence shapes below, with every slot filled from these tuples and
+# joined only by particles and the function words written in the shapes. A word
+# from outside them ("자동차 대시보드", "dashboard database schema", "엑셀
+# 열면"), a trailing clause or a question mark stands it down, and the request
+# keeps the verdict it has without this guard. Nothing outside the shapes can
+# match, which is why there is no blocker tuple. The cost is reach: a visual
+# fault named by an ambiguous word (겹쳐, 잘려, overlap, cut off) is not read.
+_FRONTEND_GUARD_DETERMINERS = ("이", "우리")
+# The surface is named bare. "페이지" and "page" are not surfaces here: a page
+# is also a page of a document.
+_FRONTEND_GUARD_SURFACES = ("대시보드", "랜딩 페이지", "랜딩페이지", "홈페이지")
+# A bare "화면" is also the glass of a phone, so only a pointed-at one counts.
+_FRONTEND_GUARD_POINTED_SURFACES = ("이 화면",)
+_FRONTEND_GUARD_SOFTENERS = ("좀",)
+_FRONTEND_GUARD_REDESIGN_VERBS = ("다시 디자인해", "리디자인해")
+_FRONTEND_GUARD_REPAIR_VERBS = ("고쳐", "수정해")
+_FRONTEND_GUARD_REQUEST_ENDINGS = ("줘", "주세요")
+# Where the fault shows. A visual fault counts only when it is tied to one.
+_FRONTEND_GUARD_VIEWPORTS = ("모바일", "폰")
+_FRONTEND_GUARD_SCROLL_FAULTS = ("가로 스크롤",)
+_FRONTEND_GUARD_APPEAR_FORMS = ("생기는데", "생겨서", "생겨")
+_FRONTEND_GUARD_BREAK_FORMS = ("깨지는데", "깨져서", "깨져")
+# The repair may restate what it fixes as "<viewport> 화면".
+_FRONTEND_GUARD_RESTATED_OBJECTS = ("화면",)
+_FRONTEND_GUARD_EN_POLITE = ("please",)
+_FRONTEND_GUARD_EN_DETERMINERS = ("the", "our")
+_FRONTEND_GUARD_EN_SURFACES = ("dashboard", "landing page", "homepage")
+# Plural surfaces appear only in the sameness shape, whose object is "the design".
+_FRONTEND_GUARD_EN_PLURAL_SURFACES = ("pages", "screens")
+_FRONTEND_GUARD_EN_REDESIGN_VERBS = ("redesign",)
+_FRONTEND_GUARD_EN_SAMENESS = ("all look the same",)
+_FRONTEND_GUARD_EN_DESIGN_ASKS = ("make the design less generic",)
+_FRONTEND_GUARD_EN_REPAIR_VERBS = ("fix",)
+_FRONTEND_GUARD_EN_SCROLL_FAULTS = ("horizontal scroll", "horizontal scrollbar")
+_FRONTEND_GUARD_EN_VIEWPORTS = ("mobile", "phones")
+
+
+def _frontend_guard_slot(*phrases: str) -> str:
+    # Cues and particles are folded like the query, so they match its decomposed text.
+    return "(?:" + "|".join(re.escape(normalized_phrase(phrase)) for phrase in phrases) + ")"
+
+
+def _frontend_guard_shapes() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    slot = _frontend_guard_slot
+    surface = (
+        f"(?:(?:{slot(*_FRONTEND_GUARD_DETERMINERS)} )?{slot(*_FRONTEND_GUARD_SURFACES)}"
+        f"|{slot(*_FRONTEND_GUARD_POINTED_SURFACES)})"
+    )
+    softener = f"(?: {slot(*_FRONTEND_GUARD_SOFTENERS)})?"
+    ending = f" ?{slot(*_FRONTEND_GUARD_REQUEST_ENDINGS)}"
+    repair = f"{softener} {slot(*_FRONTEND_GUARD_REPAIR_VERBS)}{ending}"
+    viewport = slot(*_FRONTEND_GUARD_VIEWPORTS)
+    on_viewport = f"{viewport}{slot('에서')}{slot('만')}?"
+    subject = f"{surface}{slot('이', '가')}?"
+    broken = slot(*_FRONTEND_GUARD_BREAK_FORMS)
+    polite = slot(*_FRONTEND_GUARD_EN_POLITE)
+    en_determiner = slot(*_FRONTEND_GUARD_EN_DETERMINERS)
+    shapes = (
+        # Design intent: the redesign verb's only object is the surface.
+        (
+            "design_intent",
+            f"{surface}{slot('를', '을')}?{softener} {slot(*_FRONTEND_GUARD_REDESIGN_VERBS)}{ending}",
+        ),
+        (
+            "design_intent",
+            f"(?:{polite} )?{slot(*_FRONTEND_GUARD_EN_REDESIGN_VERBS)} {en_determiner} "
+            f"{slot(*_FRONTEND_GUARD_EN_SURFACES)}(?: {polite})?",
+        ),
+        (
+            "design_intent",
+            f"{en_determiner} {slot(*_FRONTEND_GUARD_EN_PLURAL_SURFACES)} {slot(*_FRONTEND_GUARD_EN_SAMENESS)} "
+            f"(?:{polite} )?{slot(*_FRONTEND_GUARD_EN_DESIGN_ASKS)}",
+        ),
+        # A sideways scroll that appears on a phone viewport, and nothing else said.
+        (
+            "viewport_scroll_fault",
+            f"(?:{surface}{slot('이', '가', '에', '에서')}? )?{on_viewport} "
+            f"{slot(*_FRONTEND_GUARD_SCROLL_FAULTS)}{slot('이', '가')}? {slot(*_FRONTEND_GUARD_APPEAR_FORMS)}{repair}",
+        ),
+        (
+            "viewport_scroll_fault",
+            f"(?:{polite} )?{slot(*_FRONTEND_GUARD_EN_REPAIR_VERBS)} the {slot(*_FRONTEND_GUARD_EN_SCROLL_FAULTS)} "
+            f"on {slot(*_FRONTEND_GUARD_EN_VIEWPORTS)}(?: {polite})?",
+        ),
+        # "깨져" alone is also a cracked screen or broken text encoding. It
+        # counts only with the surface as its subject and the viewport as the
+        # place where it breaks.
+        (
+            "viewport_break_fault",
+            f"{subject} {on_viewport} {broken}"
+            f"(?: {viewport} {slot(*_FRONTEND_GUARD_RESTATED_OBJECTS)})?{repair}",
+        ),
+        ("viewport_break_fault", f"{on_viewport} {subject} {broken}{repair}"),
+    )
+    return tuple((tier, re.compile(pattern)) for tier, pattern in shapes)
+
+
+_FRONTEND_GUARD_SHAPES = _frontend_guard_shapes()
+
+
+def frontend_design_guard_tier(normalized_query: str) -> str:
+    """Name the closed shape the whole request matches, or "" when it matches none."""
+    request = " ".join(normalized_query.replace(",", " ").split()).rstrip(" .!~")
+    for tier, shape in _FRONTEND_GUARD_SHAPES:
+        if shape.fullmatch(request):
+            return tier
+    return ""
+
+
+def frontend_design_guard_applies(normalized_query: str) -> bool:
+    """The whole request is a redesign of a named UI surface or a phone-viewport visual fault with a repair ask."""
+    return bool(frontend_design_guard_tier(normalized_query))
+
+
+# A request to review a code change is read as whole sentences, in closed
+# shapes. The shapes live in the plugin bundle (`code_review_cues`) so the
+# per-turn route hint, which runs where `omh` may not import, reads the same
+# function as this guard; see that module for what each shape admits.
+
+
+def game_build_guard_applies(normalized_query: str) -> bool:
+    """A game noun plus a build or look-and-feel cue, for a game the browser renders."""
+    if not phrase_is_spoken(normalized_query, "game") and not _contains_phrase(normalized_query, _GAME_NOUNS):
+        return False
+    if not _contains_phrase(normalized_query, _GAME_BUILD_CUES):
+        return False
+    return not _contains_phrase(normalized_query, _GAME_NATIVE_ENGINES + _GAME_TOPIC_BLOCKERS)
+
+
+def channel_watch_guard_applies(normalized_query: str) -> bool:
+    """A Slack or Discord platform, a watch verb, and a tell-me cue together; none alone."""
+    if not _contains_phrase(normalized_query, _CHANNEL_WATCH_PLATFORMS):
+        return False
+    if not (
+        _contains_phrase(normalized_query, _CHANNEL_WATCH_VERBS)
+        or any(phrase_is_spoken(normalized_query, verb) for verb in _CHANNEL_WATCH_SPOKEN_VERBS)
+    ):
+        return False
+    if not _contains_phrase(normalized_query, _CHANNEL_WATCH_NOTIFY_CUES):
+        return False
+    return not _contains_phrase(normalized_query, _CHANNEL_WATCH_BLOCKERS)
+
+
+def _app_work_words(normalized_query: str) -> list[str]:
+    return [word.strip(".,!?;:()[]{}\"'`#") for word in normalized_query.split()]
+
+
+def _app_work_words_said(words: list[str], phrase: str) -> bool:
+    """The phrase as whole words: "into work" is not said in "into Workspace"."""
+    wanted = normalized_phrase(phrase).split()
+    return any(words[start:start + len(wanted)] == wanted for start in range(len(words) - len(wanted) + 1))
+
+
+def _app_work_trigger_or_cadence(normalized_query: str) -> bool:
+    """A schedule or a trigger is the entry point: automation-blueprint owns it, and its job runs this skill."""
+    # "as soon as possible" and "asap" are urgency, not a trigger.
+    unhurried = normalized_query.replace(normalized_phrase("as soon as possible"), " ")
+    return (
+        has_cadence(normalized_query, routing_tokens(normalized_query))
+        or _contains_phrase(unhurried, _APP_WORK_TRIGGER_CUES)
+        or monitor_trigger_guard_applies(normalized_query)
+    )
+
+
+def vault_knowledge_guard_applies(normalized_query: str) -> bool:
+    """An Obsidian or notes vault and a recall, journal, or memory-record use of it, said as a phrase."""
+    if _contains_phrase(normalized_query, _VAULT_KNOWLEDGE_BLOCKERS):
+        return False
+    # Told when a vault folder changes is a monitor recipe, not a use of the vault.
+    if monitor_trigger_guard_applies(normalized_query):
+        return False
+    if not _contains_phrase(normalized_query, _VAULT_KNOWLEDGE_VAULTS):
+        return False
+    # "recall what I wrote about RAG from my Obsidian vault": recall counts beside the vault wherever it is said.
+    if not (_contains_phrase(normalized_query, _VAULT_KNOWLEDGE_USES) or "recall" in routing_terms(normalized_query)):
+        return False
+    # Research collected on a cadence keeps the research department; the vault is only where it lands.
+    research = bool(_VAULT_KNOWLEDGE_RESEARCH_TERMS & routing_terms(normalized_query)) or _contains_phrase(
+        normalized_query, _VAULT_KNOWLEDGE_RESEARCH_KO
+    )
+    return not (research and has_cadence(normalized_query, routing_tokens(normalized_query)))
+
+
+def meeting_to_issues_guard_applies(normalized_query: str) -> bool:
+    """A meeting's notes or transcript, a creation verb, and the tracker issues it should become, together."""
+    if _contains_phrase(normalized_query, _MEETING_TO_ISSUES_BLOCKERS):
+        return False
+    if monitor_trigger_guard_applies(normalized_query):
+        return False
+    if not _contains_phrase(normalized_query, _MEETING_RECORD_PHRASES):
+        return False
+    terms = routing_terms(normalized_query)
+    if _MEETING_CREATE_VERBS & terms and _MEETING_ISSUE_TERMS & terms:
+        return True
+    return _contains_phrase(normalized_query, _MEETING_ISSUE_PHRASES_KO)
+
+
+def _app_work_spec_item(words: list[str], normalized_query: str) -> tuple[bool, bool]:
+    """(an app name naming its item, that item read as "this/the/that <app> <noun>")."""
+    item = read = False
+    has_key = bool(_APP_WORK_ISSUE_KEY.search(normalized_query))
+    for index, word in enumerate(words):
+        english = word in _APP_WORK_SPEC_APPS
+        korean = any(word.startswith(normalized_phrase(name)) for name in _APP_WORK_SPEC_APPS_KO) and not any(
+            word.startswith(normalized_phrase(name)) for name in _APP_WORK_SPEC_APPS_KO_NOT
+        )
+        if not (english or korean):
+            continue
+        following = words[index + 1] if index + 1 < len(words) else ""
+        noun = following in _APP_WORK_SPEC_NOUNS or any(
+            following.startswith(normalized_phrase(name)) for name in _APP_WORK_SPEC_NOUNS_KO
+        )
+        if noun or (has_key and english):
+            item = True
+            if index > 0 and words[index - 1] in _APP_WORK_READING_DETERMINERS:
+                read = True
+    return item, read
+
+
+def _app_work_pr_named(words: list[str]) -> bool:
+    return any(_is_pr_word(words, index) for index in range(len(words)))
+
+
+def app_work_intake_guard_applies(normalized_query: str) -> bool:
+    """An app item and the work it should become: a spec to a PR, a mail to a task, an alert to a fix."""
+    if _contains_phrase(normalized_query, _APP_WORK_BLOCKERS):
+        return False
+    if _app_work_trigger_or_cadence(normalized_query):
+        return False
+    # "apply the alert-triage template to this bot for our sentry alerts" sets a bot up; no alert is to be fixed.
+    if bot_template_id_applied(normalized_query):
+        return False
+    terms = routing_terms(normalized_query)
+    words = _app_work_words(normalized_query)
+    item, read = _app_work_spec_item(words, normalized_query)
+    if item:
+        pr_verb = (
+            bool(_APP_WORK_PR_VERBS & terms)
+            or any(_app_work_words_said(words, phrase) for phrase in _APP_WORK_OPEN_PR_PHRASES)
+            or _contains_phrase(normalized_query, _APP_WORK_PR_VERBS_KO)
+        )
+        if _app_work_pr_named(words) and pr_verb:
+            return True
+        if read and _APP_WORK_BUILD_VERBS & terms:
+            return True
+    mail = bool(_APP_WORK_MAIL_NOUNS & terms) or _contains_phrase(normalized_query, _APP_WORK_MAIL_NOUNS_KO)
+    if mail and (
+        any(_app_work_words_said(words, cue) for cue in _APP_WORK_MAIL_CUES)
+        or _contains_phrase(normalized_query, _APP_WORK_MAIL_CUES_KO)
+    ):
+        send = bool(_APP_WORK_MAIL_SEND_TERMS & terms) or _contains_phrase(normalized_query, _APP_WORK_MAIL_SEND_KO)
+        if not send or _contains_phrase(normalized_query, _APP_WORK_MAIL_DECLINES):
+            return True
+    alert_app = bool(_APP_WORK_ALERT_APPS & terms) or _contains_phrase(normalized_query, _APP_WORK_ALERT_APPS_KO)
+    if not alert_app or _APP_WORK_ALERT_BLOCKERS & terms:
+        return False
+    alert = (
+        bool(_APP_WORK_ALERT_TERMS & terms)
+        or _contains_phrase(normalized_query, _APP_WORK_ALERT_PHRASES)
+        or _contains_phrase(normalized_query, _APP_WORK_ALERT_KO)
+    )
+    fix = (
+        bool(_APP_WORK_FIX_VERBS & terms)
+        or _contains_phrase(normalized_query, _APP_WORK_FIX_PHRASES)
+        or _contains_phrase(normalized_query, _APP_WORK_FIX_CUES_KO)
+    )
+    return alert and fix
+
+
+def monitor_trigger_guard_applies(normalized_query: str) -> bool:
+    """A platform with no webhook, a tell-me cue, and an event cue on its items together; none alone."""
+    if not (
+        any(phrase_is_spoken(normalized_query, word) for word in _MONITOR_TRIGGER_SPOKEN_PLATFORMS)
+        or _contains_phrase(normalized_query, _MONITOR_TRIGGER_PLATFORMS)
+    ):
+        return False
+    if not _contains_phrase(normalized_query, _MONITOR_TRIGGER_NOTIFY_CUES):
+        return False
+    if not (
+        any(phrase_is_spoken(normalized_query, phrase) for phrase in _MONITOR_TRIGGER_SPOKEN_EVENTS)
+        or _contains_phrase(normalized_query, _MONITOR_TRIGGER_KO_EVENTS)
+    ):
+        return False
+    if any(phrase_is_spoken(normalized_query, phrase) for phrase in _MONITOR_TRIGGER_SPOKEN_BLOCKERS):
+        return False
+    return not _contains_phrase(normalized_query, _MONITOR_TRIGGER_BLOCKERS)
+
+
+def pr_watch_guard_applies(normalized_query: str) -> bool:
+    """A wait on one pull request's own state: the PR is what is watched, and the wait ends on its state."""
+    if not (
+        any(phrase_is_spoken(normalized_query, noun) for noun in _PR_WATCH_SPOKEN_OBJECTS)
+        or _contains_phrase(normalized_query, _PR_WATCH_OBJECTS)
+    ):
+        return False
+    if not (
+        _contains_phrase(normalized_query, _PR_WATCH_VERBS)
+        or any(phrase_is_spoken(normalized_query, verb) for verb in _PR_WATCH_SPOKEN_VERBS)
+    ):
+        return False
+    if not (
+        _contains_phrase(normalized_query, _PR_WATCH_SETTLE_CUES)
+        or _PR_WATCH_SETTLE_TOKENS & routing_terms(normalized_query)
+    ):
+        return False
+    if _contains_phrase(normalized_query, _PR_WATCH_BLOCKERS):
+        return False
+    raw = normalized_query.split()
+    words = [word.strip(".,!?;:()[]{}\"'`#") for word in raw]
+    return _english_pr_watch(raw, words) or _korean_pr_watch(words)
+
+
+def _is_pr_word(words: list[str], index: int) -> bool:
+    word = words[index]
+    if word in ("pr", "prs") or (word.startswith("pr") and word[2:] and not word[2:].isascii()):
+        return True  # `pr`, or `pr` with a Korean particle written onto it (`pr을`)
+    if word == "pull" and index + 1 < len(words) and words[index + 1].startswith("request"):
+        return True
+    return _contains_phrase(word, _PR_WATCH_OBJECTS)
+
+
+def _english_verb_spans(words: list[str]) -> list[tuple[int, int]]:
+    spans = []
+    for start in range(len(words)):
+        for verb in _PR_WATCH_EN_VERB_WORDS:
+            if tuple(words[start:start + len(verb)]) == verb:
+                spans.append((start, start + len(verb) - 1))
+    return spans
+
+
+def _english_verb_is_negated(raw: list[str], words: list[str], start: int) -> bool:
+    """"don't watch", "no need to babysit", "stop watching": the shared local-negation window, in the verb's clause."""
+    clause_start = 0
+    for k in range(start):
+        if raw[k][-1:] in ",;.!?" or words[k] in ("and", "but", "then"):
+            clause_start = k + 1
+    tokens = canonical_domain_tokens(" ".join(raw[clause_start:start]))
+    return domain_tokens_are_locally_negated(tokens, len(tokens)) or "stop" in tokens[-2:]
+
+
+def _korean_verb_is_negated(words: list[str], verb: int) -> bool:
+    """지켜보지 말고, 지켜보지 마, 안 지켜봐도, 지켜볼 필요 없어: a decline said at the verb itself."""
+    if verb > 0 and words[verb - 1] == normalized_phrase("안"):
+        return True
+    return _contains_phrase(" ".join(words[verb:verb + 3]), _PR_WATCH_KO_NEGATIONS)
+
+
+def _english_pr_watch(raw: list[str], words: list[str]) -> bool:
+    """An English verb takes the PR as its object, and its until-clause is about the PR's own state.
+
+    The verb is not declined in its own clause ("don't watch", "no need to babysit"). The object is the
+    words from the verb to the clause opener (`until`, `to`, `when`, ...); it may not name another
+    watched thing or a measure of PRs. The clause runs to the next comma or `and`/`then`; it must name
+    a PR state (checks, CI, merged, approved, ...), no calendar boundary, and no other branch's state
+    (CI on main) unless the PR merges into it.
+    """
+    pr_at = [index for index in range(len(words)) if _is_pr_word(words, index)]
+    for start, end in _english_verb_spans(words):
+        if _english_verb_is_negated(raw, words, start):
+            continue
+        for pr in (index for index in pr_at if end < index <= end + _PR_WATCH_EN_OBJECT_WINDOW):
+            opener = next((k for k in range(pr + 1, len(words)) if words[k] in _PR_WATCH_EN_CLAUSE_OPENERS), None)
+            if opener is None:
+                continue
+            obj = words[end + 1:opener]
+            if any(word in _PR_WATCH_OTHER_OBJECTS or word in _PR_WATCH_MEASURES for word in obj):
+                continue
+            clause = []
+            for k in range(opener + 1, len(words)):
+                if words[k] in ("and", "then", "but", "so"):
+                    break
+                clause.append(words[k])
+                if raw[k][-1:] in ",;.":
+                    break
+            other_branch = any(word in _PR_WATCH_EN_OTHER_REFS for word in clause) and not any(
+                word in _PR_WATCH_EN_MERGE_WORDS for word in clause
+            )
+            if any(word in _PR_WATCH_EN_STATE_WORDS for word in clause) and not other_branch and not any(
+                word in _PR_WATCH_EN_CALENDAR for word in clause
+            ):
+                return True
+    return False
+
+
+def _korean_pr_watch(words: list[str]) -> bool:
+    """A Korean verb follows the PR, and the words between them are the PR's own state ending.
+
+    A PR-state word (체크, CI, 머지, 리뷰, ...) or the verb comes right after the PR, the span up to
+    the verb holds the settle ending (끝날 때까지, 머지될 때까지, 되면), and it names no other watched
+    thing, no measure of PRs, and no calendar boundary.
+    """
+    pr_at = [index for index in range(len(words)) if _is_pr_word(words, index)]
+    verbs = [index for index, word in enumerate(words) if _contains_phrase(word, _PR_WATCH_KO_VERB_STEMS)]
+    for verb in verbs:
+        if _korean_verb_is_negated(words, verb):
+            continue
+        for pr in pr_at:
+            if not pr < verb <= pr + _PR_WATCH_KO_OBJECT_WINDOW:
+                continue
+            span = words[pr + 1:verb]
+            if _contains_phrase(" ".join(span), ("브랜치",)) and not _contains_phrase(" ".join(span), ("머지", "merge")):
+                continue  # another branch's state (main 브랜치 CI), not this PR's
+            close = words[pr + 1:min(pr + 3, verb + 1)]
+            if not (verb <= pr + 2 or any(_contains_phrase(word, _PR_WATCH_KO_STATE_WORDS) for word in close)):
+                continue
+            if any(word in _PR_WATCH_KO_MEASURE_WORDS or _contains_phrase(word, _PR_WATCH_KO_BLOCKERS) for word in span):
+                continue
+            if _contains_phrase(" ".join(span), _PR_WATCH_SETTLE_CUES) and any(
+                _contains_phrase(word, _PR_WATCH_KO_STATE_WORDS) for word in span
+            ):
+                return True
+    return False
+
 
 
 def credential_rotation_guard_applies(normalized_query: str) -> bool:

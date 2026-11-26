@@ -1,0 +1,210 @@
+/* Add-a-bot popover (from the sidebar +). */
+.ab-h {
+  font-size: 10.5px;
+  color: var(--quiet);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 4px 6px 0;
+}
+.ab-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.ab-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 6px;
+}
+.ab-hint {
+  font-size: 11px;
+  color: var(--quiet);
+}
+.ab-hint code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.ab-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: var(--r-sm);
+  min-height: 36px;
+}
+.ab-row:hover {
+  background: var(--hover);
+}
+.ab-m {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+  line-height: 1.3;
+}
+.ab-n {
+  font-size: 12.5px;
+  color: var(--ink);
+}
+.ab-s {
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+.ab-btn {
+  height: 24px;
+  padding: 0 9px;
+  border-radius: var(--r-sm);
+  background: var(--raise2);
+  color: var(--ink);
+  font-size: 11.5px;
+  flex: none;
+  white-space: nowrap;
+}
+.ab-btn:hover:not(:disabled) {
+  background: var(--seg-on);
+}
+.ab-btn:disabled {
+  opacity: 0.5;
+}
+.ab-sep {
+  height: 1px;
+  background: var(--line);
+  margin: 6px 0;
+}
+.ab-ssh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px;
+  border-radius: var(--r-sm);
+  color: var(--ink);
+  text-align: left;
+}
+.ab-ssh:hover {
+  background: var(--hover);
+}
+.ab-ssh .ssh-ic {
+  flex: none;
+  width: 22px;
+  color: var(--muted);
+}
+.ab-ssh .ab-s {
+  font-family: inherit;
+  font-size: 11px;
+}
+.ab-n .ssh-mark {
+  margin-left: 5px;
+}
+/* New bot: the template gallery, the name and Create (NewBot.tsx). */
+.ab-new {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 2px 2px;
+}
+.ab-hrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.ab-back {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--r-sm);
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+}
+.ab-back:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.ab-sub {
+  font-size: 11px;
+  color: var(--muted);
+  padding: 2px 6px 0;
+}
+.ab-gallery {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: min(320px, 46vh);
+  overflow-y: auto;
+}
+.ab-tpl {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  text-align: left;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid transparent;
+  line-height: 1.3;
+}
+.ab-tpl:hover {
+  background: var(--hover);
+}
+.ab-tpl.on {
+  border-color: var(--line);
+  background: var(--raise2);
+}
+.ab-tsub {
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.ab-meta {
+  font-size: 10.5px;
+  color: var(--quiet);
+}
+.ab-input {
+  height: 28px;
+  margin: 0 6px;
+  padding: 0 8px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--raise);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+.ab-err {
+  font-size: 11.5px;
+  color: var(--danger);
+  padding: 0 6px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ab-line {
+  font-size: 12px;
+  color: var(--ink);
+  padding: 2px 6px;
+}
+.ab-new .ab-hint {
+  padding: 0 6px;
+  overflow-wrap: anywhere;
+}
+.ab-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 2px 6px 4px;
+}
+/* the one primary action: the neutral ink fill, never the accent */
+.ab-btn.ab-primary {
+  background: var(--ink);
+  color: var(--bg);
+}
+.ab-btn.ab-primary:hover:not(:disabled) {
+  background: var(--ink);
+  opacity: 0.88;
+}

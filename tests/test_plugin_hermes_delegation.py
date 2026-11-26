@@ -299,17 +299,37 @@ class MixtureCategoryProjectionTest(unittest.TestCase):
         )
 
     def test_a_routed_ultrabrain_child_is_labeled_ultrabrain(self):
+        # Fable at xhigh heads ultrabrain since 2026-11-09 (owner decision;
+        # Fable 5.2 since 2026-11-10); it sat third in architect and labelled
+        # that before. Fable 5.1 left every shipped chain on 2026-11-10, so
+        # it labels nothing now.
         self.assertEqual(
-            mixture_category_for("gpt-6-astra", "xhigh", parent_model="kimi-k3"),
+            mixture_category_for("claude-fable-5-2", "xhigh", parent_model="kimi-k3"),
             "ultrabrain",
         )
+        self.assertEqual(mixture_category_for("claude-fable-5-1", "xhigh", parent_model="kimi-k3"), "")
+
+    def test_an_astra_xhigh_child_is_labeled_forensics(self):
+        # Astra at xhigh sits second in ultrabrain and architect and heads
+        # only forensics since 2026-11-09, so the head match labels it there.
+        # GPT-6.2 Astra took every GPT-6 Astra slot on 2026-11-18, so the label
+        # moved with the pair and the retired id labels nothing.
+        self.assertEqual(
+            mixture_category_for("gpt-6.2-astra", "xhigh", parent_model="kimi-k3"),
+            "forensics",
+        )
+        self.assertEqual(mixture_category_for("gpt-6-astra", "xhigh", parent_model="kimi-k3"), "")
+        # Sol's pairs moved the same way: 6.2 Sol at xhigh heads review, and
+        # 6.1 Sol labels nothing.
+        self.assertEqual(mixture_category_for("gpt-6.2-sol", "xhigh", parent_model="kimi-k3"), "review")
+        self.assertEqual(mixture_category_for("gpt-6.1-sol", "xhigh", parent_model="kimi-k3"), "")
 
     def test_an_effort_mismatch_with_the_chain_entry_yields_no_category(self):
-        # gpt-6-astra appears only at xhigh (the ultrabrain head and the
-        # architect GPT slot); a medium run on a different parent matches
-        # nothing and must not be dressed up as a routed ultrabrain dispatch.
+        # gpt-6.2-astra appears only at xhigh (the forensics head and the GPT
+        # slot of ultrabrain and architect); a medium run on a different parent
+        # matches nothing and must not be dressed up as a routed dispatch.
         self.assertEqual(
-            mixture_category_for("gpt-6-astra", "medium", parent_model="kimi-k3"), ""
+            mixture_category_for("gpt-6.2-astra", "medium", parent_model="kimi-k3"), ""
         )
 
     def test_head_match_beats_membership_match(self):
@@ -351,12 +371,23 @@ class MixtureCategoryProjectionTest(unittest.TestCase):
 
     def test_every_head_labels_its_own_category_except_the_accepted_collisions(self):
         # A head shared by two categories labels only the earlier one in
-        # canonical order. The owner accepted exactly two such collisions on
+        # canonical order. The owner accepted two such collisions on
         # 2026-10-13 -- (claude-opus-5-5, high) heads deep and
         # visual-engineering, (claude-opus-5-5, medium) heads writing and
         # capable -- and chose `max` for deep-work so its label survives.
-        # Routing is unaffected; a third collision fails here by name.
-        accepted = {"visual-engineering": "deep", "capable": "writing"}
+        # The first ended on 2026-11-10, when Fable 5.2 took
+        # visual-engineering's head; visual-engineering now labels its own.
+        # One more was accepted with the routing-recipe heads on 2026-10-28:
+        # (claude-opus-5-5, xhigh) heads architect and synthesize, so that
+        # label reaches a child only through a route-provenance record. The
+        # (gpt-6-astra, xhigh) collision of ultrabrain and forensics ended on
+        # 2026-11-09, when Fable 5.1 took ultrabrain's head; forensics now
+        # labels its own head. Routing is unaffected; a new collision fails
+        # here by name.
+        accepted = {
+            "capable": "writing",
+            "synthesize": "architect",
+        }
         for category, chain in HERMES_MIXTURE_CATEGORY_CHAINS.items():
             alias, effort = chain[0]
             with self.subTest(category=category):
@@ -435,8 +466,10 @@ class MixtureCategoryProjectionTest(unittest.TestCase):
         self.assertIs(provider_serves_alias("kimi-k3.1-pro", "anthropic"), False)
         self.assertIs(provider_serves_alias("kimi-k3.1-pro-highspeed", "kimi-coding"), True)
         self.assertIs(provider_serves_alias("kimi-k3.1-pro-highspeed", "zai"), False)
-        # The shipped slots label K3.1 Pro at the efforts K3 carried.
-        for effort, category in (("xhigh", "architect"), ("medium", "unspecified-high"), ("low", "quick")):
+        # The shipped slots label K3.1 Pro at the efforts K3 carried. Since
+        # 2026-10-28 xhigh projects to review, where K3.1 Pro sits third
+        # against fourth in architect (the shallower slot wins).
+        for effort, category in (("xhigh", "review"), ("medium", "unspecified-high"), ("low", "quick")):
             with self.subTest(effort=effort):
                 self.assertEqual(
                     mixture_category_for("moonshotai/kimi-k3.1-pro", effort, parent_model="gpt-6.1-sol"), category
@@ -447,6 +480,248 @@ class MixtureCategoryProjectionTest(unittest.TestCase):
             for effort in ("low", "medium", "high", "xhigh"):
                 with self.subTest(spelling=spelling, effort=effort):
                     self.assertEqual(mixture_category_for(spelling, effort, parent_model="gpt-6.1-sol"), "")
+
+    def test_gemini_4_argon_holds_the_gemini_slots_and_3_1_pro_labels_nothing(self):
+        # Argon took every Gemini 3.1 Pro slot on 2026-10-28: it heads
+        # google-search at `medium` and artistry at `high`, under every
+        # spelling, and costs out at the introductory list price with the
+        # 0.05 cache ratio. The retired id keeps its price and families for
+        # an operator override but labels no category.
+        cost = hermes_delegation_module._approximate_cost_usd
+        for spelling in ("gemini-4-argon", "google/gemini-4-argon", "gemini-4-argon-2026-10-13"):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(mixture_category_for(spelling, "medium", parent_model="gpt-6.1-sol"), "google-search")
+                self.assertEqual(mixture_category_for(spelling, "high", parent_model="gpt-6.1-sol"), "artistry")
+                self.assertAlmostEqual(cost(spelling, 1_000_000, 1_000_000, 1_000_000), 2.0 + 10.0 + 0.10)
+                self.assertIs(provider_serves_alias(spelling, "google"), True)
+                self.assertIs(provider_serves_alias(spelling, "anthropic"), False)
+        for effort in ("medium", "high"):
+            with self.subTest(retired_effort=effort):
+                self.assertEqual(mixture_category_for("gemini-3.1-pro", effort, parent_model="gpt-6.1-sol"), "")
+        self.assertAlmostEqual(cost("gemini-3.1-pro", 1_000_000, 1_000_000, 0), 14.0)
+        self.assertIs(provider_serves_alias("gemini-3.1-pro", "google"), True)
+
+    def test_gpt_61_terra_is_priced_and_provider_mapped_but_unchained(self):
+        # Onboarded 2026-10-27 ahead of any chain placement: an operator chain
+        # naming it costs out at OpenAI's list price and gets a provider
+        # verdict, and it borrows no category label from GPT-6.1 Sol.
+        cost = hermes_delegation_module._approximate_cost_usd
+        for spelling in ("gpt-6.1-terra", "openai/gpt-6.1-terra", "gpt-6.1-terra-pro"):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(cost(spelling, 1_000_000, 1_000_000, 0), 6.0)
+                # Cached input is 5% of input, not the default tenth.
+                self.assertAlmostEqual(cost(spelling, 0, 1, 1_000_000), 0.05 + 5.0 / 1_000_000)
+        self.assertIs(provider_serves_alias("gpt-6.1-terra", "openai-codex"), True)
+        # The declared `-pro` projection inherits the base row's eligibility.
+        self.assertIs(provider_serves_alias("gpt-6.1-terra-pro", "openai-codex"), True)
+        self.assertIs(provider_serves_alias("openai/gpt-6.1-terra-pro", "zai"), False)
+        self.assertIs(provider_serves_alias("gpt-6.1-terra", "anthropic"), False)
+        self.assertIsNone(provider_serves_alias("openai/gpt-6.1-terra", "openrouter"))
+        for spelling in ("gpt-6.1-terra", "openai/gpt-6.1-terra", "gpt-6.1-terra-pro"):
+            for effort in ("low", "medium", "high", "max"):
+                with self.subTest(spelling=spelling, effort=effort):
+                    self.assertEqual(mixture_category_for(spelling, effort, parent_model="gpt-6.1-sol"), "")
+        chains = {"writing": (("gpt-6.1-terra", "medium"),)}
+        self.assertEqual(
+            mixture_category_for("gpt-6.1-terra", "medium", parent_model="gpt-6.1-sol", chains=chains), "writing"
+        )
+
+    # Catalog sync, 2026-10-28: (input, output, cached input) per MTok as the
+    # vendor's own page lists it. Every id is recognition-only except Grok
+    # 4.7, which the 2026-10-28 routing recipe placed at the x-search head.
+    _CATALOG_SYNC_RATES = {
+        "grok-4.7": (2.0, 6.0, 0.50),
+        "grok-4.6": (2.0, 6.0, 0.50),
+        "grok-4.5": (2.0, 6.0, 0.30),
+        "grok-4.3": (1.25, 2.50, 0.20),
+        "deepseek-v4-pro": (1.32, 3.96, 0.044),
+        "gemini-3.8-flash": (0.75, 3.75, 0.075),
+        "gemini-3.6-flash": (0.75, 3.75, 0.075),
+        "gemini-3.5-flash-lite": (0.30, 2.50, 0.03),
+        "glm-5.3-flashx": (0.37, 1.25, 0.075),
+        # Alibaba publishes no per-model cache-hit rate: the default tenth.
+        "qwen3.8-max": (2.0, 6.0, 0.20),
+        "qwen3.8-flash": (0.15, 0.47, 0.015),
+        # Catalog sync, 2026-11-19: Qwen4-Max publishes its own cache rate,
+        # a twentieth of input (Singapore list).
+        "qwen4-max": (1.5, 4.5, 0.075),
+        "solar-pro4": (0.30, 1.20, 0.06),
+        "minimax-m3": (0.30, 1.20, 0.06),
+        "minimax-m3.1-flash": (0.15, 0.60, 0.015),
+        # Corrected the same day (the old figures were GLM-4.x rates and a
+        # halved ballpark of them); the tier carries its base's rate.
+        "glm-5.2": (1.4, 4.4, 0.26),
+        "glm-5.2-ultrafast": (1.4, 4.4, 0.26),
+        # Catalog sync, 2026-11-11: Gemini 4 Carbon carries Argon's
+        # introductory card (aistudio.google.com/docs/pricing).
+        "gemini-4-carbon": (2.0, 10.0, 0.10),
+        # Re-read 2026-11-18: Argon's introductory card, which runs through
+        # 2026-11-30 (4/20, cache 0.20, from 2026-12-01).
+        "gemini-4-argon": (2.0, 10.0, 0.10),
+        # Catalog sync, 2026-11-13: Gemini 4 Hydrogen's own card, cached
+        # input a twentieth of input (aistudio.google.com/docs/pricing).
+        "gemini-4-hydrogen": (1.5, 7.5, 0.075),
+        # Catalog sync, 2026-11-20: Gemini 4 Neon's own card, cached input a
+        # twentieth of input (aistudio.google.com/docs/pricing).
+        "gemini-4-neon": (3.0, 15.0, 0.15),
+        # Catalog sync, 2026-11-26: Solar Pro 4 Contributor's own card,
+        # cached input a fifth of input (console.upstage.ai/docs/models/solar-pro-4).
+        "solar-pro-4-contributor": (0.09, 0.36, 0.018),
+    }
+
+    def test_catalog_sync_rows_cost_out_at_the_vendor_list_price(self):
+        cost = hermes_delegation_module._approximate_cost_usd
+        for model_id, (input_rate, output_rate, cached_rate) in self._CATALOG_SYNC_RATES.items():
+            with self.subTest(model_id=model_id):
+                self.assertEqual(
+                    hermes_delegation_module.APPROX_PRICE_PER_MTOK[model_id], (input_rate, output_rate)
+                )
+                self.assertAlmostEqual(cost(model_id, 1_000_000, 1_000_000, 0), input_rate + output_rate)
+                # Cached input lands on the vendor's cached rate to within the
+                # table's three-significant-figure ratio (relative, so the
+                # smallest cached rates are held as tightly as the largest).
+                # One output token keeps the call non-empty (an empty call
+                # returns no cost); its price is subtracted again.
+                cached_cost = cost(model_id, 0, 1, 1_000_000) - output_rate / 1_000_000
+                self.assertLessEqual(abs(cached_cost - cached_rate) / cached_rate, 0.005)
+                # A provider-qualified spelling prices the same.
+                self.assertEqual(
+                    cost(f"vendor/{model_id}", 1_000, 1_000, 1_000), cost(model_id, 1_000, 1_000, 1_000)
+                )
+                # None of them borrows a category label from a chain, except
+                # Grok 4.7, which heads x-search since 2026-10-28, and Gemini 4
+                # Argon, which heads artistry since 2026-10-28.
+                self.assertEqual(
+                    mixture_category_for(model_id, "high", parent_model="gpt-6.1-sol"),
+                    {"grok-4.7": "x-search", "gemini-4-argon": "artistry"}.get(model_id, ""),
+                )
+
+    def test_mixed_case_served_ids_meet_the_lower_case_price_rows(self):
+        # MiniMax serves `MiniMax-M3` and `MiniMax-M3.1-Flash`; cost lookup
+        # casefolds the id (and drops a provider segment) before it reads the
+        # table, so the lower-case keys price the vendor's own spelling.
+        cost = hermes_delegation_module._approximate_cost_usd
+        for served, key in (
+            ("MiniMax-M3", "minimax-m3"),
+            ("minimax/MiniMax-M3", "minimax-m3"),
+            ("MiniMax-M3.1-Flash", "minimax-m3.1-flash"),
+        ):
+            with self.subTest(served=served):
+                self.assertNotIn(served, hermes_delegation_module.APPROX_PRICE_PER_MTOK)
+                self.assertIsNotNone(cost(served, 1_000, 1_000, 1_000))
+                self.assertEqual(cost(served, 1_000, 1_000, 1_000), cost(key, 1_000, 1_000, 1_000))
+
+    def test_catalog_sync_provider_rows_answer_for_their_own_families_only(self):
+        mapped = {
+            "grok-4.7": "xai",
+            "grok-4.6": "xai",
+            "grok-4.5": "xai",
+            "grok-4.3": "xai",
+            "deepseek-v4-pro": "deepseek",
+            "gemini-3.8-flash": "google",
+            "gemini-3.6-flash": "gemini",
+            "gemini-3.5-flash-lite": "google",
+            "glm-5.3-flashx": "zai",
+            "gemini-4-carbon": "gemini",
+            "gemini-4-hydrogen": "google",
+            "gemini-4-neon": "google",
+        }
+        for model_id, family in mapped.items():
+            with self.subTest(model_id=model_id):
+                self.assertIs(provider_serves_alias(model_id, family), True)
+                self.assertIs(provider_serves_alias(model_id, "anthropic"), False)
+                # A multi-vendor relay serves everything, so its verdict stays
+                # unknown rather than a claim either way.
+                self.assertIsNone(provider_serves_alias(model_id, "openrouter"))
+        # No OpenCode serving was observed for these two, so OpenCode is not
+        # claimed in their rows (it is a relay, so its own verdict is unknown).
+        for model_id in ("deepseek-v4-pro", "glm-5.3-flashx"):
+            with self.subTest(model_id=model_id):
+                self.assertNotIn(
+                    "opencode", hermes_delegation_module.HERMES_MIXTURE_ALIAS_PROVIDER_FAMILIES[model_id]
+                )
+        # Qwen 3.8, Qwen4-Max, Solar Pro 4 (and its Contributor variant), and
+        # MiniMax have no first-party family in the vocabulary that was
+        # observed serving them. OpenRouter lists some of
+        # these ids, but a relay-only row would turn every first-party
+        # provider's verdict into False, so there is no row and the verdict
+        # stays unknown.
+        for model_id in (
+            "qwen3.8-max",
+            "qwen3.8-flash",
+            "qwen4-max",
+            "solar-pro4",
+            "solar-pro-4-contributor",
+            "minimax-m3",
+            "minimax-m3.1-flash",
+        ):
+            with self.subTest(model_id=model_id):
+                self.assertNotIn(model_id, hermes_delegation_module.HERMES_MIXTURE_ALIAS_PROVIDER_FAMILIES)
+                self.assertIsNone(provider_serves_alias(model_id, "qwen-oauth"))
+                self.assertIsNone(provider_serves_alias(model_id, "anthropic"))
+
+    def test_the_access_gated_openai_models_are_priced_but_unchained(self):
+        # Onboarded 2026-11-06. OpenAI publishes a list price for each, so a
+        # user who names one gets a cost; each borrows no category label from
+        # the chain its base sits in; and only a family OpenAI names gets a
+        # verdict, and only GPT-6 Cyber has such a family.
+        cost = hermes_delegation_module._approximate_cost_usd
+        for spelling, total in (
+            ("gpt-6-cyber", 120.0),
+            ("openai/gpt-6-cyber", 120.0),
+            ("gpt-5.6-cyber", 87.5),
+            ("gpt-6-rosalind", 90.0),
+        ):
+            with self.subTest(spelling=spelling):
+                self.assertEqual(cost(spelling, 1_000_000, 1_000_000, 0), total)
+                for effort in ("low", "medium", "xhigh", "max"):
+                    self.assertEqual(mixture_category_for(spelling, effort, parent_model="gpt-6-astra"), "")
+        self.assertIs(provider_serves_alias("gpt-6-cyber", "openai-codex"), True)
+        self.assertIs(provider_serves_alias("gpt-6-cyber", "openai"), True)
+        self.assertIs(provider_serves_alias("gpt-6-cyber", "openrouter"), None)
+        self.assertIs(provider_serves_alias("gpt-6-cyber", "anthropic"), False)
+        # No vendor page says whether Codex serves these two, so no provider is
+        # given a verdict: an approved account on Codex is not refused or
+        # demoted on a guess.
+        codex_only = {"providers": {"openai-codex": "openai-codex"}}
+        for model_id in ("gpt-5.6-cyber", "gpt-6-rosalind"):
+            with self.subTest(model_id=model_id):
+                self.assertNotIn(model_id, hermes_delegation_module.HERMES_MIXTURE_ALIAS_PROVIDER_FAMILIES)
+                for provider in ("openai-codex", "openai", "anthropic"):
+                    self.assertIsNone(provider_serves_alias(model_id, provider), provider)
+                self.assertIs(hermes_delegation_module.alias_is_served(model_id, codex_only), True)
+                self.assertEqual(hermes_delegation_module.providers_known_to_serve_alias(model_id, codex_only), ())
+        # An operator chain that names one still labels it.
+        chains = {"ultrabrain": (("gpt-6-cyber", "xhigh"),)}
+        self.assertEqual(
+            mixture_category_for("gpt-6-cyber", "xhigh", parent_model="gpt-6-astra", chains=chains), "ultrabrain"
+        )
+
+    def test_the_recognition_only_third_party_rows_carry_the_vendor_list_price(self):
+        # Onboarded 2026-11-06 from each vendor's own page: Z.ai's legal
+        # sibling of GLM-5.3-FlashX, Mistral Large 4 under both of its API
+        # spellings, and Upstage's Solar Mini 4. None has a provider row
+        # except the Z.ai one, whose family the vocabulary names.
+        cost = hermes_delegation_module._approximate_cost_usd
+        for spelling, per_side in (
+            ("glm-5.3-flashx-legal", (0.37, 1.25)),
+            ("z-ai/glm-5.3-flashx-legal", (0.37, 1.25)),
+            ("mistral-large-4", (0.70, 2.10)),
+            ("mistralai/mistral-large-4-0", (0.70, 2.10)),
+            ("solar-mini4", (0.10, 0.40)),
+        ):
+            with self.subTest(spelling=spelling):
+                self.assertAlmostEqual(cost(spelling, 1_000_000, 1_000_000, 0), sum(per_side))
+                self.assertEqual(mixture_category_for(spelling, "high", parent_model="gpt-6-astra"), "")
+        # The legal sibling carries FlashX's cache ratio, not the default tenth.
+        self.assertAlmostEqual(cost("glm-5.3-flashx-legal", 0, 1, 1_000_000), 0.37 * 0.203 + 1.25 / 1_000_000)
+        self.assertIs(provider_serves_alias("glm-5.3-flashx-legal", "zai"), True)
+        self.assertIs(provider_serves_alias("glm-5.3-flashx-legal", "openai"), False)
+        for spelling in ("mistral-large-4", "solar-mini4"):
+            with self.subTest(spelling=spelling):
+                self.assertIsNone(provider_serves_alias(spelling, "openai"))
+        # A Mistral id the vendor did not publish stays unpriced.
+        self.assertEqual(cost("mistral-large-4-1", 1_000_000, 1_000_000, 0), None)
 
     def test_the_served_ultrafast_tiers_are_priced_without_a_provider_claim(self):
         # Observed 2026-09-24 on the OpenGateway route: the V4.1 Flash and GLM
@@ -505,8 +780,11 @@ class MixtureCategoryProjectionTest(unittest.TestCase):
                 self.assertEqual(mixture_category_for(spelling, "xhigh", parent_model="kimi-k3"), "")
 
     def test_a_routed_architect_child_is_labeled_architect(self):
+        # Opus 5.5 at xhigh heads architect (and synthesize, which loses the
+        # label to the earlier category). Fable 5.1 at xhigh labelled
+        # architect until it took ultrabrain's head on 2026-11-09.
         self.assertEqual(
-            mixture_category_for("claude-fable-5-1", "xhigh", parent_model="kimi-k3"),
+            mixture_category_for("claude-opus-5-5", "xhigh", parent_model="kimi-k3"),
             "architect",
         )
 
@@ -532,19 +810,38 @@ class MixtureCategoryProjectionTest(unittest.TestCase):
         # (claude-opus-5-5, medium) heads writing -- capable shares that head
         # and loses the label to the earlier category (accepted collision).
         contracts = {
-            "gpt-6-astra": ("openai", "xhigh", "ultrabrain", "openai", "anthropic"),
-            "gpt-6.1-sol": ("openai", "high", "deep", "openai", "anthropic"),
-            "deepseek-v4.1-flash": ("deepseek", "low", "unspecified-low", "deepseek", "anthropic"),
+            # Astra at xhigh heads forensics alone since 2026-11-09 (GPT-6.2
+            # Astra since 2026-11-18), and Sol at high sits in deep (GPT-6.2
+            # Sol since 2026-11-18).
+            "gpt-6.2-astra": ("openai", "xhigh", "forensics", "openai", "anthropic"),
+            "gpt-6.2-sol": ("openai", "high", "deep", "openai", "anthropic"),
+            "deepseek-v4.1-flash": ("deepseek", "low", "swarm", "deepseek", "anthropic"),
             "claude-opus-5-5": ("anthropic", "medium", "writing", "anthropic", "openai"),
             "claude-sonnet-5-5": ("anthropic", "medium", "writing", "anthropic", "openai"),
             "claude-haiku-5-5": ("anthropic", "low", "simple-work", "anthropic", "openai"),
+            # Fable at `xhigh` heads ultrabrain since 2026-11-09 (Fable 5.2
+            # since 2026-11-10).
+            "claude-fable-5-2": ("anthropic", "xhigh", "ultrabrain", "anthropic", "openai"),
         }
         # A contract in no shipped chain, named by no provider-family row,
         # has nothing for its aliases to inherit. Jev is that case by
         # decision -- a non-generative model is never a chain member -- so it
         # is listed here rather than given invented chain metadata. Sonnet
         # 5.5 left this set on 2026-10-13, when the owner's table placed it.
-        unchained = {"jev-1.13.0"}
+        # GPT-6.1 Terra (onboarded 2026-10-27) is in no shipped chain yet; its
+        # own test above checks pricing, provider eligibility, and `-pro`.
+        # GPT-6 Cyber (2026-11-06) is access-gated and never chained; its own
+        # test above checks the same three things.
+        # Claude Fable 5.1 left every shipped chain on 2026-11-10, and GPT-6
+        # Astra and GPT-6.1 Sol on 2026-11-18 (with them their declared
+        # `-pro` / `-fast` / `-flex` aliases); their recognition-only provider
+        # rows are checked in test_provider_entitlements.
+        # Qwen4-Max (onboarded 2026-11-19) is in no shipped chain and has no
+        # provider row, on the Qwen 3.8 terms checked in the catalog-sync test.
+        unchained = {
+            "jev-1.13.0", "gpt-6.1-terra", "gpt-6-cyber", "claude-fable-5-1", "gpt-6-astra", "gpt-6.1-sol",
+            "qwen4-max",
+        }
         for model_id in (*contracts, *expected):
             contract_id = expected.get(model_id, (model_id,))[0]
             if contract_id in unchained:
@@ -571,11 +868,50 @@ class MixtureCategoryProjectionTest(unittest.TestCase):
         unknown = "openai/gpt-6-astra-pro-turbo"
         self.assertEqual(mixture_category_for(unknown, "xhigh", parent_model="kimi-k3"), "")
         self.assertIsNone(provider_serves_alias(unknown, "openai"))
-        # Both DeepSeek spellings label both DeepSeek slots at their efforts;
-        # the vendor-routed legacy id is not a declared alias and stays bare.
-        for spelling in ("deepseek-flash", "deepseek/deepseek-v4.1-flash"):
-            self.assertEqual(mixture_category_for(spelling, "low", parent_model="kimi-k3"), "unspecified-low")
+        # Both DeepSeek spellings label the DeepSeek slots at their effort --
+        # swarm since 2026-10-28, whose head it is; the vendor-routed legacy
+        # id is not a declared alias and stays bare.
+        for spelling in ("deepseek-flash", "deepseek/deepseek-v4.1-flash", "deepseek/deepseek-v4.1-flash-1017"):
+            self.assertEqual(mixture_category_for(spelling, "low", parent_model="kimi-k3"), "swarm")
+        # The 1017 spelling reaches the pointer because its declared row is the
+        # pointer's own row; a mode or tier variant still does not.
+        self.assertEqual(
+            mixture_category_for(
+                "deepseek/deepseek-v4.1-flash-1017", "low", parent_model="kimi-k3",
+                chains={"swarm": (("deepseek-flash", "low"),)},
+            ),
+            "swarm",
+        )
         self.assertEqual(mixture_category_for("deepseek/deepseek-v4-flash", "high", parent_model="kimi-k3"), "")
+
+    def test_only_a_declared_row_equal_to_a_pointer_row_reaches_the_pointer(self):
+        from unittest import mock
+
+        candidates = hermes_delegation_module._model_alias_candidates
+        shared = hermes_delegation_module._shared_model_aliases
+        chains = {"swarm": (("deepseek-flash", "low"),)}
+        self.assertIn("deepseek-flash", candidates("deepseek-v4.1-flash-1017"))
+        # Hypothetical mode and tier variants of the same contract: declared
+        # rows whose mode or tier differs from the pointer's never reach it.
+        variants = {
+            "deepseek-v4.1-flash-fast": ("deepseek-v4.1-flash", "thinking", "fast"),
+            "deepseek-v4.1-flash-nothink": ("deepseek-v4.1-flash", "none", "standard"),
+        }
+        with mock.patch.dict(hermes_delegation_module.DECLARED_MODEL_ALIAS_PROJECTIONS, variants):
+            for alias in variants:
+                with self.subTest(alias=alias):
+                    self.assertNotIn("deepseek-flash", candidates(alias))
+                    self.assertEqual(
+                        mixture_category_for(alias, "low", parent_model="kimi-k3", chains=chains), ""
+                    )
+        # The served-model attestation reads the same list: the pointer and
+        # the snapshot it serves agree; another model or tier does not.
+        self.assertTrue(shared("deepseek-flash", "deepseek-v4.1-flash-1017"))
+        self.assertTrue(shared("deepseek-v4.1-flash-1017", "deepseek-flash"))
+        for answering in ("deepseek-v4-pro", "deepseek-v4.1-flash-ultrafast", "deepseek-v4.1-flash-1118"):
+            with self.subTest(answering=answering):
+                self.assertEqual(shared("deepseek-v4.1-flash-1017", answering), [])
+        self.assertEqual(shared("gpt-6-cyber", "gpt-6-astra"), [])
 
     def test_reverse_projection_is_limited_to_pointer_aliases(self):
         from omh.coding.model_contracts import EXACT_CONTRACT_POINTER_ALIASES as source_pointers
@@ -635,39 +971,40 @@ class MixtureCategoryProjectionTest(unittest.TestCase):
                 )
 
     def test_dated_snapshot_labels_its_base_category_price_and_provider(self) -> None:
-        # GPT-6.1 Sol sits in the shipped deep chain; a provider that serves only
+        # GPT-6.2 Sol sits in the shipped deep chain; a provider that serves only
         # a dated id (a shape reported for GPT-5.6 Terra on 2026-09-11; Terra
         # left the shipped chains on 2026-09-23) must label the same category,
         # price, and provider family as the base, while an unknown base with a
         # date gains nothing.
-        for spelling in ("gpt-6.1-sol-2026-09-29", "openai/gpt-6.1-sol-2026-09-29"):
+        for spelling in ("gpt-6.2-sol-2026-11-17", "openai/gpt-6.2-sol-2026-11-17"):
             with self.subTest(spelling=spelling):
                 self.assertEqual(
                     mixture_category_for(spelling, "high", parent_model="kimi-k3"),
-                    mixture_category_for("gpt-6.1-sol", "high", parent_model="kimi-k3"),
+                    mixture_category_for("gpt-6.2-sol", "high", parent_model="kimi-k3"),
                 )
                 self.assertEqual(mixture_category_for(spelling, "high", parent_model="kimi-k3"), "deep")
                 self.assertEqual(
                     hermes_delegation_module._approximate_cost_usd(spelling, 1000.0, 1000.0, 100.0),
-                    hermes_delegation_module._approximate_cost_usd("gpt-6.1-sol", 1000.0, 1000.0, 100.0),
+                    hermes_delegation_module._approximate_cost_usd("gpt-6.2-sol", 1000.0, 1000.0, 100.0),
                 )
                 self.assertIs(provider_serves_alias(spelling, "openai"), True)
                 self.assertIs(provider_serves_alias(spelling, "anthropic"), False)
-        # A snapshot of the exact id reaches the served pointer the chain names.
+        # A snapshot of the exact id reaches the served pointer the chain names
+        # (the swarm head since 2026-10-28).
         self.assertEqual(
             mixture_category_for("deepseek/deepseek-v4.1-flash-2026-09-01", "low", parent_model="kimi-k3"),
-            "unspecified-low",
+            "swarm",
         )
         # The exact-contract label follows the snapshot too.
         self.assertEqual(
-            mixture_category_for("gpt-6-astra-2026-08-01", "xhigh", parent_model="kimi-k3"),
-            mixture_category_for("gpt-6-astra", "xhigh", parent_model="kimi-k3"),
+            mixture_category_for("gpt-6.2-astra-2026-11-17", "xhigh", parent_model="kimi-k3"),
+            mixture_category_for("gpt-6.2-astra", "xhigh", parent_model="kimi-k3"),
         )
         # A child on a dated snapshot of the parent's model is on the parent's
         # model; the parent's own id is the base the reader knows, so this
         # holds for an alias no table describes as well.
         self.assertEqual(
-            mixture_category_for("gpt-6.1-sol-2026-09-29", "high", parent_model="gpt-6.1-sol"), "inherit"
+            mixture_category_for("gpt-6.2-sol-2026-11-17", "high", parent_model="gpt-6.2-sol"), "inherit"
         )
         self.assertEqual(
             mixture_category_for("zzz-mystery-2026-08-01", "high", parent_model="zzz-mystery"), "inherit"
@@ -676,10 +1013,10 @@ class MixtureCategoryProjectionTest(unittest.TestCase):
         # child under a date-pinned parent, or a different date, is not the
         # parent's run and falls through to the chain match.
         self.assertEqual(
-            mixture_category_for("gpt-6.1-sol", "high", parent_model="openai/gpt-6.1-sol-2026-09-29"), "deep"
+            mixture_category_for("gpt-6.2-sol", "high", parent_model="openai/gpt-6.2-sol-2026-11-17"), "deep"
         )
         self.assertEqual(
-            mixture_category_for("gpt-6.1-sol-2026-10-01", "high", parent_model="gpt-6.1-sol-2026-09-29"), "deep"
+            mixture_category_for("gpt-6.2-sol-2026-11-20", "high", parent_model="gpt-6.2-sol-2026-11-17"), "deep"
         )
         self.assertEqual(
             mixture_category_for("zzz-mystery-2026-08-01", "high", parent_model="zzz-mystery-2026-07-09"), ""
@@ -1456,7 +1793,7 @@ class HermesNativeSubagentReaderTest(unittest.TestCase):
                 "effort": "high",
                 "started_at": NOW - 60,
                 "usage": {
-                    "model": "claude-fable-5-1",
+                    "model": "claude-fable-5-2",
                     "input_tokens": 10_000,
                     "output_tokens": 4_000,
                     "last_seen": NOW - 5,
@@ -1469,7 +1806,7 @@ class HermesNativeSubagentReaderTest(unittest.TestCase):
         # Then: the label names the observed model instead of the bare
         # `:high` the empty recording used to produce, and everything keyed
         # off the model follows it -- category here, and pricing below.
-        self.assertEqual(row["model"], "claude-fable-5-1")
+        self.assertEqual(row["model"], "claude-fable-5-2")
         self.assertEqual(row["effort"], "high")
         self.assertEqual(row["category"], "visual-engineering")
         self.assertTrue(row["cost_approximate"])
@@ -2542,6 +2879,18 @@ class ServedModelAttestationTest(unittest.TestCase):
         # name is added; `resolved` appears only when neither side names it.
         self.assertNotIn("resolved", attestation)
 
+    def test_fable_dotted_gateway_spelling_agrees_with_the_exact_id(self):
+        # Declared like the 5.5 dotted rows, so the sides agree as theirs do.
+        for requested, answering in (
+            ("claude-opus-5-5", "anthropic/claude-opus-5.5"),
+            ("claude-fable-5-1", "anthropic/claude-fable-5.1"),
+            ("claude-fable-5-1", "claude-fable-5.1"),
+        ):
+            with self.subTest(answering=answering):
+                attestation = served_model_attestation(requested, answering, request_attested=True)
+                self.assertEqual(attestation["verdict"], "agreement")
+                self.assertEqual(attestation["basis"], "resolved_match")
+
     def test_a_shared_identity_neither_side_spells_is_named_on_its_own(self):
         # Two speed tiers of one model: the sides agree on `glm-5.3`, and
         # neither the requested nor the answering spelling says so.
@@ -2801,8 +3150,8 @@ class HudMergeTest(unittest.TestCase):
                 [
                     {
                         "id": "20260818_100100_eeee55",
-                        "model": "gpt-6.1-sol",
-                        "prompt_model": "gpt-6.1-sol",
+                        "model": "gpt-6.2-sol",
+                        "prompt_model": "gpt-6.2-sol",
                         "effort": "high",
                         "started_at": time.time() - 30,
                         "usage": {
@@ -2822,9 +3171,10 @@ class HudMergeTest(unittest.TestCase):
             rows = payload["subagents"]["rows"]
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["role"], "hermes-native")
-            # gpt-6.1-sol:high sits second in the deep chain (behind Opus 5.5
-            # since 2026-10-13), heads no chain, and differs from the parent
-            # model, so the projected category is visible in the HUD row.
+            # gpt-6.2-sol:high sits second in the deep chain (behind Opus 5.5
+            # since 2026-10-13; 6.2 Sol since 2026-11-18), heads no chain, and
+            # differs from the parent model, so the projected category is
+            # visible in the HUD row.
             self.assertEqual(rows[0]["category"], "deep")
             # Nothing was dropped, so the disclosed hidden-row count is zero.
             self.assertEqual(payload["subagents"]["hidden_rows"], 0)

@@ -27,16 +27,22 @@ class SearchHookTests(unittest.TestCase):
                       and re.search("[\u1100-\u11ff\u3000-\u9fff\uac00-\ud7af]", node.value))
         # Frozen from HEAD before the helper: covers the whole CJK literal
         # inventory, stronger than checking only a few named cue tables.
-        self.assertEqual(len(rows), 1352)
+        # 1352 -> 1296: the 56 removed literals were all cue words of the
+        # bundle's own workflow-intent classifier copies, deleted when awareness
+        # began importing the shared `workflow_intent` (which carries the
+        # router's cue tables); no literal was added.
+        # 1296 -> 1297: the code-review hint helper's docstring quotes one Korean
+        # fix request as an example; no cue word was added.
+        self.assertEqual(len(rows), 1297)
         digest = hashlib.sha256(json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
-        self.assertEqual(digest, "9f627e49c658fedf38e21275dbc7d6583cee6dbf43d9661059391455f20de2c1")
+        self.assertEqual(digest, "4ed830415a38240546f1976108d42ade7786b6954f76c3c441d2b861fcaa71eb")
 
     def test_disabled_awareness_uninstalled_research_and_ambiguous_requests_add_nothing(self):
         from omh.plugin_bundle.omh.hooks import llm_hooks
 
         request = "find datasets for browser agent benchmarks"
         self.assertNotIn("[OMH Search]", self.hook(request, include_omh_awareness=False).get("context", ""))
-        with patch.object(llm_hooks, "installed_skill_names", return_value=frozenset()):
+        with patch.object(llm_hooks, "hermes_loadable_skill_names", return_value=frozenset()):
             self.assertNotIn("[OMH Search]", self.hook(request).get("context", ""))
         for request in ("관련 자료와 데이터를 찾아줘", "문제 해결에 참고할 자료/데이터 찾아줘"):
             self.assertNotIn("[OMH Search]", self.hook(request).get("context", ""))

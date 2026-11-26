@@ -170,8 +170,8 @@ class UpdateConfigDisciplineTests(unittest.TestCase):
                 return set_memory_provider(text, "omh")
 
             # Neutralise exactly the compare and nothing else: the guard
-            # is `config_file_signature(path) == signature`, so answering it
-            # with the signature this attempt read makes it always true.
+            # is `config_unchanged_since(path, signature, text)`, so
+            # answering it True makes it always pass.
             seen: list[object] = []
             real_snapshot = read_config_snapshot
 
@@ -184,8 +184,8 @@ class UpdateConfigDisciplineTests(unittest.TestCase):
                 "omh.plugin_bundle.omh.delegation_routing.read_config_snapshot",
                 _recording_snapshot,
             ), mock.patch(
-                "omh.plugin_bundle.omh.delegation_routing.config_file_signature",
-                lambda _path: seen[-1],
+                "omh.plugin_bundle.omh.delegation_routing.config_unchanged_since",
+                lambda _path, _signature, _text: True,
             ):
                 update = update_config(home.config, _claim, omh_home=home.omh)
 
@@ -436,13 +436,11 @@ class UpdateConfigDisciplineTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             home = _Home(Path(tmp))
             real = self._symlinked_config(home)
-            original = getattr(os, "O_NOFOLLOW", 0)
-            try:
-                os.O_NOFOLLOW = 0  # type: ignore[attr-defined]
+            # `create=True` removes the name again where it did not exist
+            # (Windows). Leaving it defined there made `hasattr(os,
+            # "O_NOFOLLOW")` true for every later test in the same worker.
+            with mock.patch.object(os, "O_NOFOLLOW", 0, create=True):
                 self._assert_symlink_refused(home, real)
-            finally:
-                if hasattr(os, "O_NOFOLLOW"):
-                    os.O_NOFOLLOW = original  # type: ignore[attr-defined]
 
     @unittest.skipUnless(hasattr(os, "symlink"), "needs symlink support")
     def test_the_symlink_refusal_precedes_the_compare_rather_than_following_it(self) -> None:
@@ -842,6 +840,39 @@ def outer_b():
             "stale whole-file copy that the signature compare cannot detect, "
             f"because the file has not moved since this writer read it (#1742): {discarding}",
         )
+
+
+class OsFlagModellingGateTests(unittest.TestCase):
+    """A test that models a missing `os` flag must not define it for later tests."""
+
+    def test_no_test_assigns_an_os_open_flag_by_hand(self) -> None:
+        """`os.O_NOFOLLOW = 0` in a try/finally cannot undo itself on Windows.
+
+        The name does not exist there, so "restore the original" leaves it
+        defined as 0 for the rest of the worker process, and a later test
+        that branches on `hasattr(os, "O_NOFOLLOW")` takes the POSIX branch.
+        `mock.patch.object(os, "O_...", value, create=True)` deletes the name
+        again on exit.
+        """
+        offenders: list[str] = []
+        for path in sorted((REPO_ROOT / "tests").rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Assign):
+                    targets = node.targets
+                elif isinstance(node, (ast.AugAssign, ast.AnnAssign)):
+                    targets = [node.target]
+                else:
+                    continue
+                for target in targets:
+                    if (
+                        isinstance(target, ast.Attribute)
+                        and isinstance(target.value, ast.Name)
+                        and target.value.id == "os"
+                        and target.attr.startswith("O_")
+                    ):
+                        offenders.append(f"{path.relative_to(REPO_ROOT).as_posix()}:{node.lineno}")
+        self.assertEqual(offenders, [], f"assign os.O_* through mock.patch.object(..., create=True): {offenders}")
 
 
 if __name__ == "__main__":

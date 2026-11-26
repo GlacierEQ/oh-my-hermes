@@ -74,6 +74,10 @@ MECHANISM_POINTERS: dict[str, tuple[str, str]] = {
         "references/session-forensics.md",
         "references/session-forensics.md",
     ),
+    "source-finder": (
+        "references/literature-retrieval.md",
+        "references/literature-retrieval.md",
+    ),
 }
 
 # The named artifacts each mechanism is built from. A reference that keeps its
@@ -93,7 +97,7 @@ MECHANISM_TOKENS: dict[str, tuple[str, ...]] = {
         "Clear",            # the three per-category coverage states
         "Partial",
         "Missing",
-        "five questions asked",  # the session cap
+        "round budget spent",  # the session cap
         "write",            # the write-back target, the thing OMH lacked
     ),
     "ultrawork": (
@@ -162,6 +166,13 @@ MECHANISM_TOKENS: dict[str, tuple[str, ...]] = {
         "not computed",                   # what an uncomputed figure is written as
         "distinct `tool_call_id`",        # the count compaction does not inflate
         "--confirm-export",               # sharing waits for the user's review
+    ),
+    "source-finder": (
+        "OpenAlex",                       # the corpus the routing table names for cross-field search
+        "PubMed",                         # the biomedical corpus
+        "S4306402567",                    # the OpenAlex source id that scopes a search to bioRxiv
+        "Difficulty",                     # the stated level that scales follow-up rounds
+        "link_observed",                  # the rule that an id a host result did not return is not cited
     ),
 }
 

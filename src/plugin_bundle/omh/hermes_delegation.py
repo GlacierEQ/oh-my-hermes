@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from . import runtime_paths
 from .live_session import conversation_segments
-from .provider_detection import detect_linked_providers, env_row_is_covered
+from .provider_detection import detect_linked_providers, env_row_is_covered, route_only_provider_ids
 from .sqlite_readonly import connect_readonly
 
 import json
@@ -52,21 +52,27 @@ HERMES_MIXTURE_CATEGORY_CHAINS: dict[str, tuple[tuple[str, str], ...]] = {
     # where a comment cites a measurement. Superseded generations leave every
     # shipped chain (owner decision, 2026-09-11): on 2026-10-13 Claude Haiku
     # 4.5 left behind Haiku 5.5, and the 2025 Qwen3-Coder left with no Qwen
-    # successor. A machine whose provider still serves only an older id keeps
+    # successor; on 2026-11-18 GPT-6 Astra and GPT-6.1 Sol left behind GPT-6.2
+    # Astra and GPT-6.2 Sol, each successor at the slot and effort its
+    # predecessor held, so every projection label moved with its pair. A machine whose provider still serves only an older id keeps
     # it through ~/.omh/routing/model-chains.json, not through the public
     # table.
     #
     # Claude vendor order (owner decision, 2026-10-13): Opus 5.5 before Fable
-    # 5.1 inside any chain, reversing the 2026-09-06 Fable -> Opus rule.
-    # Claude Mythos 5.1 is Fable 5.1 under Project Glasswing access, so no
-    # shipped chain names it; it stays recognized, priced, and routable for a
-    # user who asks for it by name.
+    # inside any chain, reversing the 2026-09-06 Fable -> Opus rule.
+    # `ultrabrain` and `visual-engineering` are the exceptions (below). Fable 5.2 took every Fable
+    # 5.1 slot at the same effort on 2026-11-10 (owner decision), and Fable
+    # 5.1 left the shipped chains under the superseded-generation rule.
+    # Claude Mythos 5.1 and 5.2 are their Fable siblings served only to
+    # organizations Anthropic has verified, so no shipped chain names them;
+    # they stay recognized, priced, and routable for a user who asks by name.
     #
     # Two heads collide in `mixture_category_for`, which labels a child by the
     # first category in canonical order whose head matches (model, effort).
-    # The owner accepted both (2026-10-13):
-    #   (claude-opus-5-5, high)   heads deep and visual-engineering -> "deep"
-    #   (claude-opus-5-5, medium) heads writing and capable         -> "writing"
+    # The owner accepted the collision (2026-10-13):
+    #   (claude-opus-5-5, medium) heads writing and capable -> "writing"
+    # (claude-opus-5-5, high) headed deep and visual-engineering too, labelled
+    # "deep", until Fable 5.2 took visual-engineering's head on 2026-11-10.
     # Routing is unaffected, and so is a lane routed through
     # `omh_delegate_route`: its route-provenance record overrides the
     # projection (see the reader below), so that row keeps the lane's own
@@ -74,22 +80,46 @@ HERMES_MIXTURE_CATEGORY_CHAINS: dict[str, tuple[tuple[str, str], ...]] = {
     # projection.
     # Non-head entries move the same way: (claude-opus-5-5, medium) projects
     # to writing, which covers unspecified-high's second entry and the
-    # last_resort head; (kimi-k3.1-pro, high) projects to deep from
-    # visual-engineering and artistry; (gpt-6-luna, low) and
-    # (claude-haiku-5-5, low) reached through quick project to simple-work.
-    "ultrabrain": (("gpt-6-astra", "xhigh"),),
+    # last_resort head; (kimi-k3.1-pro, high) from visual-engineering and
+    # artistry projects to x-search since 2026-10-28 (to deep before), where
+    # it sits second; (gpt-6-luna, low) and (claude-haiku-5-5, low) reached
+    # through quick project to simple-work.
+    # Fable heads ultrabrain ahead of Astra (owner decision, 2026-11-09, for
+    # Fable 5.1; Fable 5.2 took the head on 2026-11-10): the chain was Astra
+    # alone, so a user without OpenAI access fell straight back to the parent
+    # model, against the cross-ecosystem rule (2026-08-19, below). This is an
+    # explicit choice for this category; it does not change the 2026-10-13
+    # Opus 5.5 -> Fable order elsewhere (visual-engineering is the other
+    # exception, 2026-11-10). Claude Mythos stays out of every shipped chain
+    # (above).
+    # Over the shipped chains, (claude-fable-5-2, xhigh) heads ultrabrain and
+    # labels "ultrabrain" (Fable at xhigh projected to architect, where it
+    # sits third, before 2026-11-09); Astra at xhigh now heads only
+    # forensics and labels
+    # "forensics" (see forensics below). Opus 5.5 at xhigh, third here, keeps
+    # the architect label of the chain it heads. No other shipped pair's
+    # label moves. The reader labels against the effective chains, which
+    # entitlement shaping reorders: where the recorded providers serve OpenAI
+    # but not Anthropic, shaped ultrabrain leads with Astra, so Astra at
+    # xhigh still labels "ultrabrain" there.
+    "ultrabrain": (
+        ("claude-fable-5-2", "xhigh"),
+        ("gpt-6.2-astra", "xhigh"),
+        ("claude-opus-5-5", "xhigh"),
+    ),
     # DeepSeek V4.1 Flash left `deep`: a Flash budget model does not fit the
     # strong tier, and Opus 5.5 and Kimi K3.1 Pro now carry its cross-ecosystem
-    # fallback. visual-engineering children are labelled "deep" (above).
-    "deep": (("claude-opus-5-5", "high"), ("gpt-6.1-sol", "high"), ("kimi-k3.1-pro", "high")),
+    # fallback. (claude-opus-5-5, high), second in visual-engineering, labels
+    # "deep".
+    "deep": (("claude-opus-5-5", "high"), ("gpt-6.2-sol", "high"), ("kimi-k3.1-pro", "high")),
     # Architecture/system-design lanes: full-depth effort across three
-    # provider ecosystems. Astra at xhigh stays labeled ultrabrain (its
-    # canonical head), which is the honest projection when the chain falls
-    # through to it.
+    # provider ecosystems. A fall-through child is labelled by the chain its
+    # pair heads: Astra at xhigh projects to forensics and Fable at xhigh to
+    # ultrabrain (both since 2026-11-09).
     "architect": (
         ("claude-opus-5-5", "xhigh"),
-        ("gpt-6-astra", "xhigh"),
-        ("claude-fable-5-1", "xhigh"),
+        ("gpt-6.2-astra", "xhigh"),
+        ("claude-fable-5-2", "xhigh"),
         ("kimi-k3.1-pro", "xhigh"),
     ),
     # The one placement here backed by a measurement, of its predecessor: on
@@ -97,10 +127,11 @@ HERMES_MIXTURE_CATEGORY_CHAINS: dict[str, tuple[tuple[str, str], ...]] = {
     # routing passed 18/30 with gpt-5.6-sol at this head and 12/30 with
     # kimi-k3-ultrafast here (the other 24 tasks routed to the quick head in
     # both arms); Kimi passed 0/6 of the six search tasks `exhaustive_search`
-    # lifts here. GPT-6.1 Sol carries the GPT slot by the superseded-generation
-    # rule and is itself unmeasured on that corpus.
+    # lifts here. GPT-6.2 Sol carries the GPT slot by the superseded-generation
+    # rule (after GPT-6 Sol and GPT-6.1 Sol) and is itself unmeasured on that
+    # corpus.
     "unspecified-high": (
-        ("gpt-6.1-sol", "medium"),
+        ("gpt-6.2-sol", "medium"),
         ("claude-opus-5-5", "medium"),
         ("kimi-k3.1-pro", "medium"),
     ),
@@ -111,10 +142,10 @@ HERMES_MIXTURE_CATEGORY_CHAINS: dict[str, tuple[tuple[str, str], ...]] = {
     "unspecified-low": (
         ("glm-5.3", "low"),
         ("deepseek-flash", "low"),
-        ("gpt-6.1-sol", "low"),
+        ("gpt-6.2-sol", "low"),
         ("claude-sonnet-5-5", "low"),
     ),
-    # Fable 5.1 left the tail for the same cost-order reason; Haiku 5.5 is
+    # Fable left the tail for the same cost-order reason; Haiku 5.5 is
     # the Claude entry at this tier.
     "quick": (
         ("glm-5.3-flash", "low"),
@@ -128,19 +159,23 @@ HERMES_MIXTURE_CATEGORY_CHAINS: dict[str, tuple[tuple[str, str], ...]] = {
         ("claude-opus-5-5", "medium"),
         ("claude-sonnet-5-5", "medium"),
         ("kimi-k3.1-pro", "medium"),
-        ("gemini-3.1-pro", "medium"),
+        ("gemini-4-argon", "medium"),
     ),
-    # Labelled "deep" by projection: its head is deep's (accepted collision).
+    # Fable 5.2 heads visual-engineering ahead of Opus 5.5 (owner decision,
+    # 2026-11-10), the second exception to the Opus 5.5 -> Fable order. No
+    # other chain heads (claude-fable-5-2, high), so it labels
+    # "visual-engineering" (it did before too, from second place); Opus 5.5
+    # at high, now second here, keeps deep's label.
     "visual-engineering": (
+        ("claude-fable-5-2", "high"),
         ("claude-opus-5-5", "high"),
-        ("claude-fable-5-1", "high"),
-        ("gemini-3.1-pro", "high"),
+        ("gemini-4-argon", "high"),
         ("kimi-k3.1-pro", "high"),
     ),
     "artistry": (
-        ("gemini-3.1-pro", "high"),
+        ("gemini-4-argon", "high"),
         ("claude-opus-5-5", "high"),
-        ("claude-fable-5-1", "high"),
+        ("claude-fable-5-2", "high"),
         ("kimi-k3.1-pro", "high"),
     ),
     # The three categories below were added on 2026-09-11 and are APPENDED
@@ -154,8 +189,8 @@ HERMES_MIXTURE_CATEGORY_CHAINS: dict[str, tuple[tuple[str, str], ...]] = {
     # collision).
     "capable": (
         ("claude-opus-5-5", "medium"),
-        ("gpt-6.1-sol", "medium"),
-        ("claude-fable-5-1", "medium"),
+        ("gpt-6.2-sol", "medium"),
+        ("claude-fable-5-2", "medium"),
         ("kimi-k3.1-pro", "medium"),
     ),
     # simple-work: small tasks rather than fast ones. It leads with the GPT
@@ -175,7 +210,70 @@ HERMES_MIXTURE_CATEGORY_CHAINS: dict[str, tuple[tuple[str, str], ...]] = {
     # deep's, and because a head match resolves in canonical order deep-work
     # would be a label nothing could ever carry. `max` is a documented rung of
     # both entries' ladders.
-    "deep-work": (("claude-opus-5-5", "max"), ("gpt-6.1-sol", "max")),
+    "deep-work": (("claude-opus-5-5", "max"), ("gpt-6.2-sol", "max")),
+    # The six routing-recipe categories (owner recipe, 2026-10-28), appended
+    # after deep-work for the same tie-break reason. Heads are the owner's;
+    # each tail crosses into another provider ecosystem (owner rule above).
+    # They are opt-in: no role or scale names them.
+    #
+    # One head collides with an earlier category's head. The owner kept it
+    # (2026-10-28), so the earlier category keeps the label:
+    #   (claude-opus-5-5, xhigh) heads architect and synthesize  -> "architect"
+    # Routing is unaffected, and a lane routed through `omh_delegate_route`
+    # keeps its own category through the route-provenance record; only a
+    # child with no matching record is labelled by projection, so synthesize
+    # is a label only a routed lane carries. Astra at xhigh collided
+    # with ultrabrain's head the same way until 2026-11-09, when Fable
+    # took that head; forensics now carries the Astra xhigh label.
+    # Six projections move (diffed over every shipped (model, effort) pair):
+    # (deepseek-flash, low) unspecified-low -> swarm and (gemini-4-argon,
+    # medium) writing -> google-search, because each now heads a chain;
+    # Sol at xhigh (then gpt-6.1-sol, gpt-6.2-sol since 2026-11-18) and
+    # (grok-4.7, high) had no label and now head
+    # review and x-search; (kimi-k3.1-pro, high) deep -> x-search and
+    # (kimi-k3.1-pro, xhigh) architect -> review, because the shallower
+    # chain position wins (second in x-search against third in deep; third
+    # in review against fourth in architect).
+    "google-search": (
+        ("gemini-4-argon", "medium"),
+        ("gpt-6.2-sol", "medium"),
+        ("claude-opus-5-5", "medium"),
+    ),
+    # Grok 4.7 is a separate entry from the x_platform_data affinity, which
+    # keeps Grok Build 0.1.
+    "x-search": (
+        ("grok-4.7", "high"),
+        ("kimi-k3.1-pro", "high"),
+        ("gemini-4-argon", "high"),
+    ),
+    # A category, not the `review` role: the role still resolves through
+    # unspecified-high/unspecified-low and never reaches this chain.
+    "review": (
+        ("gpt-6.2-sol", "xhigh"),
+        ("claude-opus-5-5", "xhigh"),
+        ("kimi-k3.1-pro", "xhigh"),
+    ),
+    "swarm": (
+        ("deepseek-flash", "low"),
+        ("glm-5.3-flash", "low"),
+        ("gpt-6-luna", "low"),
+    ),
+    # Since 2026-11-09 its head no longer collides in the shipped chains:
+    # (gpt-6.2-astra, xhigh) labels "forensics" (gpt-6-astra did until it
+    # retired on 2026-11-18 and now labels nothing), including a child that fell
+    # through ultrabrain or architect to Astra, unless the machine's recorded
+    # providers shape ultrabrain so that Astra leads it (see ultrabrain).
+    "forensics": (
+        ("gpt-6.2-astra", "xhigh"),
+        ("claude-opus-5-5", "xhigh"),
+        ("kimi-k3.1-pro", "xhigh"),
+    ),
+    # Labelled "architect" by projection: its head is architect's.
+    "synthesize": (
+        ("claude-opus-5-5", "xhigh"),
+        ("gpt-6.2-sol", "xhigh"),
+        ("gemini-4-argon", "high"),
+    ),
 }
 
 # User-editable chain overrides. The document replaces only the chains of the
@@ -315,10 +413,13 @@ def effective_mixture_category_chains(
 # the operator declined to say (treated as a gateway, so nothing is demoted
 # on a guess). `subscription_clis` lists the external coding CLIs whose
 # subscription the operator confirmed and that only the Maestro lane can
-# spend. Claude Code is the one such CLI today: Hermes has no way to use a
-# Claude subscription, so the answer's only effect is the Claude Code
-# `--model` preference. A Codex login is spent by Hermes' own openai-codex
-# provider and therefore belongs under `providers`, not here.
+# spend. Claude Code is the one such CLI today, and the answer's only effect
+# is the Claude Code `--model` preference. Hermes itself spends a Claude
+# subscription's plan allowance only through an installed provider plugin
+# (`claude-subscription-directsdk-experimental`), which detection counts
+# under `providers` as `anthropic`; Hermes' own Anthropic OAuth login draws
+# on extra-usage credits instead. A Codex login is spent by Hermes' own
+# openai-codex provider and therefore belongs under `providers`, not here.
 PROVIDER_ENTITLEMENTS_SCHEMA_VERSION = "provider_entitlements/v1"
 PROVIDER_KIND_GATEWAY = "gateway"
 PROVIDER_KIND_UNKNOWN = "unknown"
@@ -374,26 +475,64 @@ HERMES_MIXTURE_ALIAS_PROVIDER_FAMILIES: dict[str, tuple[str, ...]] = {
     # No family is claimed for a relay nobody observed serving it.
     "kimi-k3.1-pro": ("kimi-coding", "openrouter", "opencode"),
     "claude-opus-5-5": ("ccapi", "anthropic", "openrouter"),
-    "claude-fable-5-1": ("ccapi", "anthropic", "openrouter"),
+    "claude-fable-5-2": ("ccapi", "anthropic", "openrouter"),
     "claude-sonnet-5-5": ("ccapi", "anthropic", "openrouter"),
     "claude-haiku-5-5": ("ccapi", "anthropic", "openrouter"),
     # Recognition-only: no shipped chain names Claude Mythos 5.1, but a user
     # who asks for it still deserves "which of my providers serves this"
     # answered rather than unknown. The parity gate lists it explicitly.
     "claude-mythos-5-1": ("ccapi", "anthropic", "openrouter"),
+    # Recognition-only on the same terms: Claude Mythos 5.2 is Fable 5.2
+    # served only to verified organizations (2026-11-10).
+    "claude-mythos-5-2": ("ccapi", "anthropic", "openrouter"),
     # Recognition-only: no shipped chain names the Highspeed tier. Moonshot's
     # own API (`kimi-coding` in Hermes) is the one family observed serving it
     # (2026-10-24); OpenRouter and OpenCode list only the base id.
     "kimi-k3.1-pro-highspeed": ("kimi-coding",),
     # Recognition-only, retired 2026-10-24 behind kimi-k3.1-pro.
     "kimi-k3": ("apitopia", "kimi-coding", "openrouter", "opencode"),
+    # GPT-6.2 Astra and GPT-6.2 Sol (released 2026-11-17) hold every slot
+    # GPT-6 Astra and GPT-6.1 Sol held (owner decision, 2026-11-18). The
+    # families are the vendor's statement: the API serves both ids, and the
+    # Codex client's served catalog (0.169.0, read 2026-11-18) lists both.
+    "gpt-6.2-astra": ("openai-codex", "openai"),
+    "gpt-6.2-sol": ("openai-codex", "openai"),
+    # Recognition-only, retired 2026-11-18 behind gpt-6.2-astra and
+    # gpt-6.2-sol under the superseded-generation rule.
     "gpt-6-astra": ("openai-codex", "openai"),
     "gpt-6.1-sol": ("openai-codex", "openai"),
+    # Recognition-only until an owner places it (released 2026-10-26).
+    # Families observed serving the exact id on 2026-10-27: the Codex
+    # subscription route (a live one-shot on this maintainer host), the
+    # OpenAI API catalog, and OpenRouter (`openai/gpt-6.1-terra`).
+    "gpt-6.1-terra": ("openai-codex", "openai", "openrouter"),
     "gpt-6-luna": ("openai-codex", "openai"),
+    # Recognition-only, access-gated, never chained (onboarded 2026-11-06).
+    # Families are the vendor's statement, not an observation: OpenAI serves
+    # GPT-6 Cyber through the API and the Codex app to approved Daybreak Red
+    # organizations (model page; the system card says "when accessing GPT-6
+    # Cyber through the Codex app", though learn.chatgpt.com/docs/models, read
+    # 2026-11-06, does not list it). The Codex subscription route on this
+    # maintainer host refused both Cyber ids with HTTP 400 on 2026-11-06, in
+    # the same wording a made-up id gets, so that probe says nothing about
+    # gating or about this row. No relay is claimed.
+    "gpt-6-cyber": ("openai-codex", "openai"),
+    # GPT-5.6 Cyber and GPT-6 Rosalind have no row, so every provider answers
+    # unknown. A row answers False for each family it omits, and no vendor
+    # page says whether Codex serves them: the pages name the API, none denies
+    # Codex, and Daybreak access depends on the "allowed product surface"
+    # (learn.chatgpt.com/codex/cyber-safety, read 2026-11-06). An approved
+    # account on Codex must not be refused on a guess. The cost of having no
+    # row: `openai` is not offered as a known server, and a vendor provider
+    # that cannot serve them answers with its own rejection instead of ours.
     "deepseek-flash": ("deepseek", "openrouter", "opencode"),
     # Recognition-only: the versioned spelling of the Flash pointer above
     # (the gateway id `deepseek/deepseek-v4.1-flash` arrives this way).
     "deepseek-v4.1-flash": ("deepseek", "openrouter", "opencode"),
+    # Recognition-only, in no shipped chain (catalog sync, 2026-10-28):
+    # DeepSeek's pricing page lists the served id and OpenRouter lists
+    # `deepseek/deepseek-v4-pro`; no OpenCode serving was observed.
+    "deepseek-v4-pro": ("deepseek", "openrouter"),
     # Recognition-only, retired generations (left the shipped chains on
     # 2026-09-11): a machine-level chain override may still name them, and
     # that operator deserves "which of my providers serves this" answered.
@@ -410,12 +549,60 @@ HERMES_MIXTURE_ALIAS_PROVIDER_FAMILIES: dict[str, tuple[str, ...]] = {
     "gpt-5.6-terra": ("openai-codex", "openai"),
     "glm-5.3": ("zai", "openrouter", "opencode"),
     "glm-5.3-flash": ("zai", "openrouter", "opencode"),
+    # Recognition-only, in no shipped chain (2026-11-23): Z.ai opened GLM-5.4
+    # to every GLM Coding Plan user; no OpenRouter or OpenCode listing was
+    # observed, so no relay family. No page or price published yet.
+    "glm-5.4": ("zai",),
+    # Recognition-only, in no shipped chain (catalog sync, 2026-10-28): Z.ai's
+    # pricing page lists it and OpenRouter lists `z-ai/glm-5.3-flashx`; no
+    # OpenCode serving was observed.
+    "glm-5.3-flashx": ("zai", "openrouter"),
+    # Recognition-only, in no shipped chain (onboarded 2026-11-06): Z.ai's
+    # pricing page lists the legal-domain sibling. A third party reports an
+    # OpenRouter listing from 2026-11-02; not checked, so no relay family.
+    "glm-5.3-flashx-legal": ("zai",),
     "grok-build-0.1": ("xai", "openrouter"),
     # Retired on 2026-10-01: xAI lists it as an alias of grok-build-0.1.
     "grok-code-fast": ("xai", "openrouter"),
+    # Each has its own docs.x.ai model page and an OpenRouter `x-ai/<id>`
+    # listing (catalog sync, 2026-10-28). Grok 4.7 heads x-search since the
+    # routing recipe of the same day; the older three stay recognition-only.
+    "grok-4.7": ("xai", "openrouter"),
+    "grok-4.6": ("xai", "openrouter"),
+    "grok-4.5": ("xai", "openrouter"),
+    "grok-4.3": ("xai", "openrouter"),
     # Retired on 2026-10-01 under the same rule (superseded by gpt-6.1-sol).
     "gpt-6-sol": ("openai-codex", "openai"),
+    # Gemini 4 Argon holds every former Gemini 3.1 Pro slot since 2026-10-28.
+    # Google's own API serves it (`google` / `gemini` in Hermes), and
+    # OpenRouter lists `google/gemini-4-argon` (catalog snapshot, 2026-10-28).
+    "gemini-4-argon": ("google", "gemini", "openrouter"),
+    # Recognition-only, in no shipped chain (catalog sync, 2026-11-11):
+    # Google's own API serves `gemini-4-carbon` (aistudio.google.com/docs/
+    # models/gemini-4-carbon, GA 2026-11-10), and OpenRouter lists
+    # `google/gemini-4-carbon` (catalog snapshot, 2026-11-11).
+    "gemini-4-carbon": ("google", "gemini", "openrouter"),
+    # Recognition-only, in no shipped chain (catalog sync, 2026-11-13):
+    # Google's own API serves `gemini-4-hydrogen` (aistudio.google.com/docs/
+    # models/gemini-4-hydrogen, stable), and OpenRouter lists
+    # `google/gemini-4-hydrogen` (catalog snapshot, 2026-11-13).
+    "gemini-4-hydrogen": ("google", "gemini", "openrouter"),
+    # Recognition-only, in no shipped chain (catalog sync, 2026-11-20):
+    # Google's own API serves `gemini-4-neon` (aistudio.google.com/docs/
+    # models/gemini-4-neon, stable), and OpenRouter lists
+    # `google/gemini-4-neon` (catalog snapshot, 2026-11-20).
+    "gemini-4-neon": ("google", "gemini", "openrouter"),
+    # Retired on 2026-10-28 under the same rule (superseded by gemini-4-argon).
     "gemini-3.1-pro": ("google", "gemini", "openrouter"),
+    # Recognition-only, in no shipped chain (catalog sync, 2026-10-28): the
+    # Gemini API pricing page lists each id and OpenRouter lists
+    # `google/<id>`. Gemini 3.7 Flash and 3.5 Flash were deprecated on
+    # 2026-10-08 and route to 3.8 Flash and 3.6 Flash; they get no row.
+    "gemini-3.8-flash": ("google", "gemini", "openrouter"),
+    "gemini-3.6-flash": ("google", "gemini", "openrouter"),
+    "gemini-3.5-flash-lite": ("google", "gemini", "openrouter"),
+    # Recognition-only, retired 2026-11-10 behind claude-fable-5-2.
+    "claude-fable-5-1": ("ccapi", "anthropic", "openrouter"),
     # Retired on 2026-10-13 under the same rule: Claude Haiku 4.5 behind
     # claude-haiku-5-5, and the 2025 Qwen3-Coder with no Qwen successor.
     "claude-haiku-4-5": ("ccapi", "anthropic", "openrouter"),
@@ -427,8 +614,12 @@ HERMES_MIXTURE_ALIAS_PROVIDER_FAMILIES: dict[str, tuple[str, ...]] = {
 # stale provider/category metadata until its own rows are added here.
 EXACT_MODEL_CONTRACT_ALIASES: frozenset[str] = frozenset(
     {
-        "gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6-luna", "claude-opus-5-5", "claude-sonnet-5-5",
-        "claude-haiku-5-5", "deepseek-v4.1-flash", "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed",
+        "gpt-6-astra", "gpt-6-sol", "gpt-6.1-sol", "gpt-6.2-astra", "gpt-6.2-sol", "gpt-6.1-terra",
+        "gpt-6-cyber", "gpt-6-luna",
+        "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5", "claude-fable-5-1", "claude-fable-5-2",
+        "deepseek-v4.1-flash",
+        "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed", "gemini-4-argon", "grok-4.7",
+        "qwen4-max",
         "jev-1.13.0",
     }
 )
@@ -445,11 +636,21 @@ DECLARED_MODEL_ALIAS_PROJECTIONS: dict[str, tuple[str, str, str]] = {
     "gpt-6-astra-pro-flex": ("gpt-6-astra", "pro", "flex"),
     # GPT-6.1 Sol's pro reasoning mode; no `-fast` / `-flex` row.
     "gpt-6.1-sol-pro": ("gpt-6.1-sol", "pro", "standard"),
+    # GPT-6.1 Terra's pro reasoning mode, on the same terms.
+    "gpt-6.1-terra-pro": ("gpt-6.1-terra", "pro", "standard"),
     # DeepSeek's first-party API names the current Flash generation
     # `deepseek-flash` (api-docs.deepseek.com, 2026-09-10); today that is
     # DeepSeek-V4.1-Flash. The pointer moves with the next Flash release, so
     # it is a declared projection with a read date, not an exact contract.
     "deepseek-flash": ("deepseek-v4.1-flash", "thinking", "standard"),
+    # The 2026-10-17 upgrade the pointer now serves, under a relay's
+    # spelling (DeepSeek accepts no such model name); same contract, price,
+    # and calibration. Its row equals the pointer's, so it also labels the
+    # pointer's category; it is not a pointer itself, so nothing reaches it.
+    # It inherits the base's provider families, DeepSeek's own API included,
+    # as `deepseek-v4.1-flash` already does although DeepSeek rejects both
+    # spellings.
+    "deepseek-v4.1-flash-1017": ("deepseek-v4.1-flash", "thinking", "standard"),
     # Claude Opus 5.5's Bedrock id (the contract's `served_ids.bedrock`) and
     # its dotted gateway spelling (OpenRouter's live listing, 2026-09-23):
     # second spellings of the same model at the contract's mode and tier.
@@ -459,6 +660,11 @@ DECLARED_MODEL_ALIAS_PROJECTIONS: dict[str, tuple[str, str, str]] = {
     "claude-sonnet-5.5": ("claude-sonnet-5-5", "thinking", "standard"),
     "anthropic.claude-haiku-5-5": ("claude-haiku-5-5", "thinking", "standard"),
     "claude-haiku-5.5": ("claude-haiku-5-5", "thinking", "standard"),
+    # Claude Fable 5.1's dotted spelling (Hermes' static model catalog,
+    # 2026-11-08), on the same terms.
+    "claude-fable-5.1": ("claude-fable-5-1", "thinking", "standard"),
+    # Claude Fable 5.2's dotted spelling, on the same terms (2026-11-10).
+    "claude-fable-5.2": ("claude-fable-5-2", "thinking", "standard"),
     # TypeSafe publishes two aliases for Jev (docs.typesafe.ai/models,
     # 2026-09-21); both point at `jev-1.13.0` today and both move on the next
     # release, so each is a declared projection with a read date.
@@ -611,12 +817,13 @@ def parse_provider_entitlements(raw: object) -> tuple[dict[str, Any] | None, str
 
 PROVIDER_ENTITLEMENT_SOURCE_RECORDED = "recorded"
 # Display order for the providers a surface lists: the operator's own word
-# first, then a login, a config key, a variable name.
+# first, then a login, a config key, a provider plugin, a variable name.
 _PROVIDER_SOURCE_RANK: dict[str, int] = {
     PROVIDER_ENTITLEMENT_SOURCE_RECORDED: 0,
     "login": 1,
     "config": 2,
-    "env": 3,
+    "plugin": 3,
+    "env": 4,
 }
 
 
@@ -632,9 +839,9 @@ def effective_provider_entitlements(
     branch. ``document_status`` is `load_provider_entitlements`' own status,
     unchanged, so a surface can still say whether the operator answered.
     ``providers`` lists every provider counted, one row per id, with the
-    `source` it came from (`recorded`, `login`, `config`, `env`) and the
-    `evidence` (the document, a section of `auth.json`, a config key, a
-    variable NAME).
+    `source` it came from (`recorded`, `login`, `config`, `plugin`, `env`)
+    and the `evidence` (the document, a section of `auth.json`, a config
+    key, a plugin directory, a variable NAME).
 
     Detection (`provider_detection`) is the baseline: a provider Hermes can
     already use counts the moment it is linked, without a second interview.
@@ -647,6 +854,11 @@ def effective_provider_entitlements(
     disk says a CLI subscription is held. Beyond that neither side removes
     the other's providers: the serving rule only ever moves a served entry
     forward, so more evidence can promote, never demote.
+
+    A route-only relay this home holds (`route_only_provider_ids`, minus the
+    exclusions) is listed under ``route_only_providers`` when there is one,
+    never under ``providers``: it serves exactly the aliases a routes
+    document sends to it, and no kind is inferred for the rest.
     """
     recorded, status = load_provider_entitlements(omh_home)
     excluded = set(recorded.get("excluded_providers", [])) if recorded is not None else set()
@@ -669,7 +881,10 @@ def effective_provider_entitlements(
     if recorded is None and not rows:
         return None, status, ()
     ordered = tuple(sorted(rows.values(), key=lambda row: (_PROVIDER_SOURCE_RANK.get(row["source"], 9), row["id"])))
-    entitlements = {"providers": {row["id"]: row["kind"] for row in ordered}, "subscription_clis": clis}
+    entitlements: dict[str, Any] = {"providers": {row["id"]: row["kind"] for row in ordered}, "subscription_clis": clis}
+    route_only = sorted(route_only_provider_ids(hermes_home) - excluded)
+    if route_only:
+        entitlements["route_only_providers"] = route_only
     return entitlements, status, ordered
 
 
@@ -681,8 +896,9 @@ def alias_is_served(
     """Whether a confirmed provider can serve ``alias``. Fails open.
 
     An explicit route in model-providers.json decides first: the alias is
-    served when its provider is one the operator confirmed, and unserved when
-    the route names a provider they did not. Without a route, a multi-vendor
+    served when its provider is one the operator confirmed or a route-only
+    relay they hold (``route_only_providers``), and unserved when the route
+    names a provider they did not. Without a route, a multi-vendor
     provider serves every alias, a vendor provider serves the aliases whose
     catalog families name it, and an alias the catalog never described (or a
     machine with no providers recorded at all) is served — nothing is
@@ -693,7 +909,7 @@ def alias_is_served(
         return True
     route_key = _route_key_for(alias, routes)
     if routes and route_key is not None:
-        return routes[route_key][0] in providers
+        return routes[route_key][0] in providers or routes[route_key][0] in entitlements.get("route_only_providers", ())
     kinds = set(str(kind) for kind in providers.values())
     if kinds & MULTI_VENDOR_PROVIDER_KINDS:
         return True
@@ -761,6 +977,7 @@ def routes_to_unknown_providers(
     providers = (entitlements or {}).get("providers", {})
     if not isinstance(providers, Mapping) or not providers:
         return ()
+    route_only = (entitlements or {}).get("route_only_providers", ())
     effective_chains = chains if chains is not None else HERMES_MIXTURE_CATEGORY_CHAINS
     chain_aliases = sorted({model for chain in effective_chains.values() for model, _effort in chain})
     reached: dict[str, list[str]] = {}
@@ -770,7 +987,7 @@ def routes_to_unknown_providers(
             reached.setdefault(key, []).append(alias)
     rows: list[dict[str, str]] = []
     for key, (provider, _model) in routes.items():
-        if provider in providers:
+        if provider in providers or provider in route_only:
             continue
         for alias in reached.get(key, []):
             rows.append({"alias": alias, "route": key, "provider": provider, "effect": UNKNOWN_ROUTE_EFFECT_CHAIN})
@@ -846,10 +1063,62 @@ def provider_family_for(provider_id: str, entitlements: Mapping[str, Any] | None
         return ""
     providers = (entitlements or {}).get("providers", {})
     if isinstance(providers, Mapping):
-        recorded = providers.get(key)
-        if isinstance(recorded, str) and recorded:
-            return recorded
+        # Hermes names a `providers.<name>` block `custom:<name>` at runtime
+        # (`model.provider: custom:cliproxy`), while detection and the setup
+        # interview record the bare block name. Both spellings are one
+        # provider, so each is looked up under the other too; without this a
+        # session on `custom:<name>` read as a provider nothing records.
+        for spelling in _provider_id_spellings(key):
+            recorded = providers.get(spelling)
+            if isinstance(recorded, str) and recorded:
+                return recorded
     return key if key in PROVIDER_FAMILY_VOCABULARY else ""
+
+
+def _provider_id_spellings(provider_id: str) -> tuple[str, ...]:
+    """``provider_id`` first, then its other `custom:` spelling, if it has one."""
+    if provider_id.startswith("custom:") and len(provider_id) > len("custom:"):
+        return (provider_id, provider_id[len("custom:"):])
+    if provider_id and ":" not in provider_id:
+        return (provider_id, f"custom:{provider_id}")
+    return (provider_id,)
+
+
+def provider_block_name(provider_id: str) -> str:
+    """The `providers.<name>` key a provider id runs from: `custom:<name>` -> `<name>`."""
+    key = str(provider_id or "").strip()
+    return key[len("custom:"):] if key.startswith("custom:") else key
+
+
+def providers_known_to_serve_alias(
+    alias: str,
+    entitlements: Mapping[str, Any] | None,
+) -> tuple[str, ...]:
+    """The operator's provider ids whose vendor family the catalog says serves ``alias``.
+
+    Narrower than `providers_serving_alias`: a multi-vendor relay is left
+    out, because "a relay serves everything" is a fail-open default, not
+    evidence. This is the set a route may pin on its own when the provider a
+    child would inherit cannot serve the model -- a known server, never a
+    guess.
+    """
+    providers = (entitlements or {}).get("providers", {})
+    if not isinstance(providers, Mapping):
+        return ()
+    projected_key, _tier = _projected_model_alias(alias)
+    families = HERMES_MIXTURE_ALIAS_PROVIDER_FAMILIES.get(projected_key)
+    if not families:
+        return ()
+    return tuple(
+        sorted(
+            provider_id
+            for provider_id, kind in providers.items()
+            if isinstance(provider_id, str)
+            and isinstance(kind, str)
+            and kind not in MULTI_VENDOR_PROVIDER_KINDS
+            and kind in families
+        )
+    )
 
 
 def provider_serves_alias(
@@ -949,7 +1218,7 @@ def load_model_provider_routes(
         raw = _strict_json_loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}, "absent"
-    except (OSError, UnicodeDecodeError, ValueError):
+    except (OSError, UnicodeDecodeError, ValueError, RecursionError):
         return {}, "invalid: unreadable JSON"
     return parse_model_provider_routes(raw)
 
@@ -1101,6 +1370,17 @@ def _valid_provenance_record(record: object) -> dict[str, Any] | None:
         if not isinstance(value, str) or len(value) > 160:
             return None
         cleaned[field] = value
+    # `identity`/`identity_digest` name the `omh_identity_profiles/v1` profile
+    # and identities.json digest a route was prepared under — additive-optional
+    # like `session_id`: old records carry neither, and a reader that predates
+    # the fields keeps only the bounded strings it knows. `identity_digest`
+    # never holds prompt text; it is the document's own sha256 prefix.
+    for field in ("identity", "identity_digest"):
+        value = record.get(field, "")
+        if not isinstance(value, str) or len(value) > 160:
+            return None
+        if value:
+            cleaned[field] = value
     # `session_id` names the Hermes session that prepared this route, and is
     # additive-optional inside `delegation_route_provenance/v1`: the key is
     # kept only when non-empty, so a writer that cannot name its session
@@ -1112,6 +1392,17 @@ def _valid_provenance_record(record: object) -> dict[str, Any] | None:
         return None
     if owner:
         cleaned["session_id"] = owner
+    # The in-child fallback chain OMH wrote into `delegation.fallback_providers`
+    # (`delegation_routing.encode_fallback_chain` text; never a chain the
+    # person owns) and the alias of its last position, so `fallback` advances
+    # past what the child walked. Additive-optional like `session_id`: kept
+    # only when non-empty.
+    for field, limit in (("fallback_providers", 4096), ("fallback_through", 160), ("fallback_through_index", 8)):
+        value = record.get(field, "")
+        if not isinstance(value, str) or len(value) > limit:
+            return None
+        if value:
+            cleaned[field] = value
     return cleaned
 
 
@@ -1303,6 +1594,8 @@ APPROX_PRICE_PER_MTOK: dict[str, tuple[float, float]] = {
     # 2026-09): 10/50; cached input 1 (the default tenth). The $12.5 cache
     # write and the 2x/1.5x multiplier above 272K input have no column in
     # this table and stay documented in `src/coding/model_contracts.py`.
+    # The id left the shipped chains on 2026-11-18 (superseded by
+    # gpt-6.2-astra) and stays priced for overrides.
     "gpt-6-astra": (10.0, 50.0),
     # OpenAI list price (developers.openai.com/api/docs/models/gpt-5.6-terra,
     # read 2026-09-23): 2/12, cached input 0.20. The earlier 1.25/10 did not
@@ -1331,8 +1624,37 @@ APPROX_PRICE_PER_MTOK: dict[str, tuple[float, float]] = {
     # Cache write, long-context, and service-tier rates stay documented in
     # `src/coding/model_contracts.py`. `gpt-6.1-sol-pro` has no row: it
     # inherits this one through its declared projection (pro mode bills at
-    # the selected model's standard rates).
+    # the selected model's standard rates). The id left the shipped chains on
+    # 2026-11-18 (superseded by gpt-6.2-sol) and stays priced for overrides.
     "gpt-6.1-sol": (2.0, 10.0),
+    # OpenAI list price (developers.openai.com/api/docs/models/gpt-6.1-terra
+    # and /api/docs/pricing, read 2026-10-27): 1/5, no promotion mark; cached
+    # input 0.05 is 5% of input (APPROX_CACHE_READ_RATIO). Cache write,
+    # long-context, and service-tier rates stay documented in
+    # `src/coding/model_contracts.py`. GPT-5.6 Terra keeps its own 2/12 row.
+    "gpt-6.1-terra": (1.0, 5.0),
+    # OpenAI list prices (developers.openai.com/api/docs/models/gpt-6.2-astra,
+    # /gpt-6.2-sol, and /api/docs/pricing, read 2026-11-18): Astra 8/40 and
+    # Sol 2/10, no promotion mark; cached input is 5% of input on both
+    # (APPROX_CACHE_READ_RATIO). Cache writes (30-minute and 12-hour), the
+    # >272K long-context multiplier, Batch, Fast, and the dated Ultrafast
+    # multipliers stay documented in `src/coding/model_contracts.py`. The
+    # retired gpt-6-astra and gpt-6.1-sol keep their own rows above.
+    "gpt-6.2-astra": (8.0, 40.0),
+    "gpt-6.2-sol": (2.0, 10.0),
+    # OpenAI list prices for the access-gated models (developers.openai.com
+    # /api/docs/pricing and each model page, read 2026-11-06), in no shipped
+    # chain. GPT-6 Cyber 20/100, cached input 2 (the default tenth); only a
+    # short-context rate is published, and its cache writes (25 for 30
+    # minutes, 50 for 12 hours) stay in `src/coding/model_contracts.py`.
+    # GPT-5.6 Cyber 12.5/75, cached input 1.25, and 2x input / 1.5x output
+    # for a prompt over 272K input tokens (model page). GPT-6 Rosalind 15/75,
+    # cached input 1.5, on a short-context card; its long-context card is
+    # 30/112.5. Like the Haiku 5.5 row, the table carries the lower card. Its
+    # model page returns 404, so there is no contract to hold the rest.
+    "gpt-6-cyber": (20.0, 100.0),
+    "gpt-5.6-cyber": (12.5, 75.0),
+    "gpt-6-rosalind": (15.0, 75.0),
     # Anthropic first-party list prices (docs.claude.com pricing, 2026-09):
     # Opus 5 5/25, Sonnet 5 2/10, Fable 5 and 5.1 10/50; Mythos 5.1 shares
     # Fable 5.1's per-token price. Earlier entries here were stale.
@@ -1344,6 +1666,10 @@ APPROX_PRICE_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-fable-5": (10.0, 50.0),
     "claude-fable-5-1": (10.0, 50.0),
     "claude-mythos-5-1": (10.0, 50.0),
+    # Anthropic list price (the Fable 5.2 what's-new page, read 2026-11-10):
+    # Fable 5.2 and Mythos 5.2 share 8/40, below the 5.1 generation's 10/50.
+    "claude-fable-5-2": (8.0, 40.0),
+    "claude-mythos-5-2": (8.0, 40.0),
     "claude-sonnet-5": (2.0, 10.0),
     # Anthropic list price (platform.claude.com pricing, read 2026-10-01):
     # Sonnet 5.5 2/10. The same page says Sonnet 5's 2/10 launch price is now
@@ -1377,13 +1703,30 @@ APPROX_PRICE_PER_MTOK: dict[str, tuple[float, float]] = {
     # hour) stay on the contracts.
     "kimi-k3.1-pro": (2.0, 10.0),
     "kimi-k3.1-pro-highspeed": (4.0, 20.0),
-    # Zhipu AI list price (docs.z.ai pricing, 2026-08):
-    "glm-5.2": (0.6, 2.2),
+    # Z.ai list price (docs.z.ai/guides/overview/pricing, read 2026-10-28):
+    # GLM-5.2 1.4/4.4, cached input 0.26 (APPROX_CACHE_READ_RATIO). The
+    # earlier 0.6/2.2 was the GLM-4.7/4.6/4.5 rate on the same page and
+    # under-reported GLM-5.2 input 2.3x and output 2x.
+    "glm-5.2": (1.4, 4.4),
     # Z.ai list price for the 5.3 generation (docs.z.ai pricing, 2026-08).
     # 5.3 always reasons and bills the reasoning inside output tokens, so the
     # output side dominates real spend; still an approximation, not billing.
     "glm-5.3": (1.4, 4.4),
     "glm-5.3-flash": (0.15, 0.5),
+    # Z.ai list price (docs.z.ai/guides/overview/pricing, read 2026-10-28):
+    # GLM-5.3-FlashX 0.37/1.25, cached input 0.075 (APPROX_CACHE_READ_RATIO).
+    # The id is listed on the glm-5.3-flash model page (it has no page of its
+    # own): 1M context, 128K output, thinking `enabled` only. Recognition-only,
+    # in no shipped chain.
+    "glm-5.3-flashx": (0.37, 1.25),
+    # Z.ai list price (docs.z.ai/guides/overview/pricing, read 2026-11-06):
+    # GLM-5.3-FlashX-Legal 0.37/1.25, cached input 0.075, the FlashX card.
+    # It is GLM-5.3-FlashX with legal-domain mid- and post-training (the
+    # glm-5.3-flash model page, which lists it under one model code with
+    # Flash and FlashX; thinking `enabled` only). The vendor's own blog dates
+    # it 2026-10-29; the docs give no API release date. Recognition-only, in
+    # no shipped chain: a legal specialist, not a coding model.
+    "glm-5.3-flashx-legal": (0.37, 1.25),
     # Z.ai publishes no separate rate for the 5.3-generation Ultrafast serving
     # (observed 2026-09-24), so this row carries the generation's own
     # documented list price (docs.z.ai pricing, 2026-08) rather than the
@@ -1407,18 +1750,36 @@ APPROX_PRICE_PER_MTOK: dict[str, tuple[float, float]] = {
     # the rate -- and, like the GLM tier above, it gets no provider-family row:
     # the tier was observed on a gateway and no vendor catalog lists it.
     "deepseek-v4.1-flash-ultrafast": (0.30, 1.20),
-    # DeepSeek list price (api-docs.deepseek.com/quick_start/pricing, 2026-09):
-    # peak-hour cache-miss input 0.30 / output 1.20; cache-hit input 0.006
-    # (the 0.02 ratio below); every rate halves off-peak (outside 01:00-04:00
-    # and 06:00-10:00 UTC, Monday-Friday). Peak is the honest approximation
-    # because a fanout wave has no off-peak guarantee.
+    # DeepSeek list price (api-docs.deepseek.com/quick_start/pricing, 2026-09,
+    # re-read 2026-10-28): peak-hour cache-miss input 0.30 / output 1.20;
+    # cache-hit input 0.006 (the 0.02 ratio below); every rate halves
+    # off-peak. Peak is 01:00-04:00 and 06:00-10:00 UTC, Monday-Friday,
+    # excluding Chinese public holidays; every other hour, weekends, and
+    # those holidays are off-peak. Peak is the honest approximation because a
+    # fanout wave has no off-peak guarantee. Since 2026-10-17 the
+    # `deepseek-flash` pointer serves DeepSeek-V4.1-Flash-1017 at unchanged
+    # prices.
     "deepseek-v4.1-flash": (0.30, 1.20),
+    # DeepSeek list price (api-docs.deepseek.com/quick_start/pricing, read
+    # 2026-10-28): peak cache-miss input 1.32 / output 3.96, cache-hit input
+    # 0.044 (APPROX_CACHE_READ_RATIO); every rate halves off-peak under the
+    # V4.1 Flash rule above. The served id carries no `-0813` suffix: that is
+    # the version name (DeepSeek-V4-Pro-0813, GA 2026-08-13). 1M context and
+    # 384K output (the page's shared limits cell); effort `low`/`high`/`max`
+    # (default `high`) with V4.1 Flash's mapping. No V4.1 Pro exists.
+    # Recognition-only, in no shipped chain.
+    "deepseek-v4-pro": (1.32, 3.96),
     # DeepSeek list price (api-docs.deepseek.com pricing, 2026-08); the id
     # left the shipped chains on 2026-09-11 but a machine-level override may
     # still route it, so the row stays.
     "deepseek-v3.2": (0.28, 0.42),
-    # Zhipu AI speed-tier ballpark (docs.z.ai pricing, 2026-08):
-    "glm-5.2-ultrafast": (0.3, 1.2),
+    # Z.ai publishes no separate rate for the GLM-5.2 Ultrafast serving, so
+    # this row carries the base model's documented list price
+    # (docs.z.ai/guides/overview/pricing, read 2026-10-28) -- the
+    # `glm-5.3-ultrafast` shape. It moved on 2026-10-28 from a halved
+    # ballpark (0.3/1.2) of the stale 0.6/2.2 base, together with the
+    # corrected base row, as `kimi-k3-ultrafast` did on 2026-10-01.
+    "glm-5.2-ultrafast": (1.4, 4.4),
     # The Ultrafast serving of K3 (a gateway tier, not a Moonshot product)
     # publishes no tier rate, so
     # this row carries the base model's documented list price
@@ -1429,13 +1790,160 @@ APPROX_PRICE_PER_MTOK: dict[str, tuple[float, float]] = {
     # Google list price (ai.google.dev/gemini-api/docs/pricing, read
     # 2026-10-01): Gemini 3.1 Pro Preview 2/12 up to 200K prompt tokens, 4/18
     # above. The earlier 1.25/10 was Gemini 2.5 Pro's rate on the same page.
+    # The id left the shipped chains on 2026-10-28 and stays priced for
+    # overrides.
     "gemini-3.1-pro": (2.0, 12.0),
+    # Google list price (aistudio.google.com/docs/pricing, re-read
+    # 2026-11-18), Standard paid tier, no prompt-size tier: Gemini 4 Argon
+    # 2/10 through 2026-11-30, cached input 0.10 (APPROX_CACHE_READ_RATIO).
+    # From 2026-12-01 the card is 4/20 (cache 0.20, the same 0.05 ratio); a
+    # scheduled job re-reads the page that day and moves this row. Batch is
+    # half. GA 2026-10-13; 1,048,576-token unified context, 65,536 output per
+    # synchronous request.
+    # Thinking `low`/`medium`/`high` (default `medium`), never off.
+    "gemini-4-argon": (2.0, 10.0),
+    # Google list price (aistudio.google.com/docs/pricing, re-read
+    # 2026-11-18), paid tier only, no prompt-size tier: Gemini 4 Carbon 2/10
+    # through 2026-11-30, cached input 0.10 (APPROX_CACHE_READ_RATIO),
+    # implicit caching only. From 2026-12-01 the card is 4/20 (cache 0.20,
+    # the same 0.05 ratio); the same scheduled job moves this row. GA
+    # 2026-11-10.
+    "gemini-4-carbon": (2.0, 10.0),
+    # Google list price (aistudio.google.com/docs/pricing, re-read
+    # 2026-11-18), Standard paid tier, no prompt-size tier and no dated
+    # change on the card: Gemini 4 Hydrogen 1.50/7.50, cached input 0.075
+    # (APPROX_CACHE_READ_RATIO), implicit caching only. The model page lists
+    # a stable `gemini-4-hydrogen` with a 1,048,576-token unified context and
+    # 65,536 output per synchronous request. Recognition-only, in no shipped
+    # chain.
+    "gemini-4-hydrogen": (1.5, 7.5),
+    # Google list price (aistudio.google.com/docs/pricing, read 2026-11-20),
+    # Standard paid tier, no prompt-size tier and no dated change on the
+    # card: Gemini 4 Neon 3/15, cached input 0.15 (APPROX_CACHE_READ_RATIO),
+    # implicit caching only. The model page lists a stable `gemini-4-neon`
+    # with a 1,048,576-token unified context and 65,536 output per
+    # synchronous request. Recognition-only, in no shipped chain.
+    "gemini-4-neon": (3.0, 15.0),
+    # Google list price (aistudio.google.com/docs/pricing, re-read
+    # 2026-11-18), paid tier, no prompt-size tier: Gemini 3.8 Flash and 3.6
+    # Flash 0.75/3.75, cached input 0.075 (the default tenth). Both are an
+    # introductory price through 2026-12-31; from 2027-01-01 they are
+    # 1.50/7.50 (cache 0.15), and a scheduled job re-reads the page that day
+    # and moves both rows. 3.8 Flash went GA 2026-09-02 and 3.6 Flash
+    # 2026-07-21; both take 1,048,576 input and 65,536 output tokens. Thinking levels: 3.8 Flash `low`/`medium`/
+    # `high` (default `medium`, `minimal` errors), 3.6 Flash `minimal` to
+    # `high` (default `medium`). Gemini 3.7 Flash and 3.5 Flash were
+    # deprecated on 2026-10-08 and route to 3.8 Flash and 3.6 Flash; neither
+    # has a price on the page, so neither has a row. Recognition-only, in no
+    # shipped chain.
+    "gemini-3.8-flash": (0.75, 3.75),
+    "gemini-3.6-flash": (0.75, 3.75),
+    # Google list price (the same page, read 2026-10-28): Gemini 3.5
+    # Flash-Lite 0.30/2.50, cached input 0.03 (the default tenth), no
+    # introductory mark. GA 2026-07-21; thinking `minimal` to `high`, default
+    # `minimal`. Recognition-only, in no shipped chain.
+    "gemini-3.5-flash-lite": (0.30, 2.50),
     # Alibaba Cloud Model Studio list price (alibabacloud.com pricing, 2026-08).
     # The id left the shipped chains on 2026-10-13 and stays priced for
     # overrides.
     "qwen3-coder": (0.4, 1.6),
-    # Upstage list price (upstage.ai pricing, 2026-08):
+    # Alibaba Cloud Model Studio list price
+    # (alibabacloud.com/help/en/model-studio/model-pricing, Singapore region,
+    # read 2026-10-28): Qwen3.8-Max 2/6 and Qwen3.8-Flash 0.15/0.47, one tier
+    # up to 1M input tokens. The page publishes no per-model cache-hit rate,
+    # so the default tenth applies and is unverified; Alibaba's general
+    # context-cache rule bills an explicit hit at 10% of input and an
+    # implicit hit at 20%, so the tenth may under-report implicit hits.
+    # China and global deployments bill 1.65/4.951 (Max) and 0.113/0.382
+    # (Flash). Alibaba also serves the snapshot `qwen3.8-max-0902` (MMDD),
+    # which this row does not cover: only `-YYYY-MM-DD` snapshots project
+    # onto a base. No provider row: the vocabulary holds no first-party
+    # family observed serving either id (`qwen-oauth`'s served list is
+    # undocumented). OpenRouter lists `qwen/qwen3.8-flash`, but a relay-only
+    # row would claim that every first-party provider does not serve it.
+    # Recognition-only, in no shipped chain.
+    "qwen3.8-max": (2.0, 6.0),
+    "qwen3.8-flash": (0.15, 0.47),
+    # QwenCloud list price (docs.qwencloud.com/developer-guides/getting-started/
+    # model-prices and /run-and-scale/explicit-cache-qwen4, Singapore
+    # (International), "Non-thinking and thinking modes", one tier up to 1M
+    # input tokens, read 2026-11-19): Qwen4-Max 1.50/4.50. Unlike Qwen3.8,
+    # Qwen4-Max publishes its own cache rates, so its ratio row below is
+    # documented rather than the default tenth. Beijing and Global bill
+    # 1.413/4.24 with a 0.071 cache read; cache-write rates (5m 1.875, 1h
+    # 3.00) stay in `src/coding/model_contracts.py`. `qwen4-max-preview` is
+    # Token Plan only with no per-token price, so it has no row. No provider
+    # row, on the Qwen 3.8 terms above. Recognition-only, in no shipped chain.
+    "qwen4-max": (1.5, 4.5),
+    # Upstage list price (upstage.ai pricing, 2026-08): every Solar Pro 2
+    # version reached end of service on 2026-10-30 KST, and Upstage
+    # recommends Solar Pro 4 (upstage.ai/pricing and
+    # console.upstage.ai/docs/models/solar-pro-2, read 2026-10-28;
+    # console.upstage.ai/docs/models/history marks `solar-pro2-251215`
+    # deprecated on 2026-10-30 and says to upgrade to `solar-pro4`, read
+    # 2026-11-06). The row stays because a machine-level override may still
+    # name the id.
     "solar-pro2": (0.15, 0.60),
+    # Upstage list price (upstage.ai/pricing and
+    # console.upstage.ai/docs/models/solar-pro-4, read 2026-10-28): 0.30/1.20,
+    # cached input 0.06 (APPROX_CACHE_READ_RATIO), excluding VAT. The pricing
+    # page also shows a time-limited promotional rate; this is the standard
+    # one. `solar-pro4` is the served alias of `solar-pro4-260806`; 512K
+    # context, 128K output. No provider row: the vocabulary has no Upstage
+    # family (the `solar-pro2` precedent). OpenRouter lists
+    # `upstage/solar-pro4`, but a relay-only row would claim that every
+    # first-party provider does not serve it. Recognition-only, in no shipped
+    # chain.
+    "solar-pro4": (0.30, 1.20),
+    # Upstage list price (upstage.ai/pricing, read 2026-11-06): Solar Mini 4
+    # 0.10/0.40, cached input 0.01 (the default tenth), excluding VAT.
+    # `solar-mini4` is the alias of `solar-mini4-260922` (released
+    # 2026-09-22, console.upstage.ai/docs/models/history): 512K context, 128K
+    # output, reasoning and tool calling. Upstage marks `solar-mini-250422`
+    # deprecated on 2026-10-30 and says to upgrade to `solar-mini4`. No provider row, on the `solar-pro4`
+    # terms. Recognition-only, in no shipped chain.
+    "solar-mini4": (0.10, 0.40),
+    # Upstage list price (console.upstage.ai/docs/models/solar-pro-4 and
+    # /docs/models/history, read 2026-11-26): `solar-pro-4-contributor`, the
+    # alias of `solar-pro-4-260806-contributor` (released 2026-11-23), is
+    # 0.09/0.36 with cached input 0.018 (APPROX_CACHE_READ_RATIO), excluding
+    # VAT: 70% off Solar Pro 4's list for the same model. It is a data-handling
+    # variant, not a cheaper tier: Upstage stores every request and response
+    # for a year and trains on them (console.upstage.ai/docs/guides/
+    # contributor-mode), and it answers 403 until the organization owner opts
+    # in. No provider row, on the `solar-pro4` terms. Recognition-only, in no
+    # shipped chain.
+    "solar-pro-4-contributor": (0.09, 0.36),
+    # Mistral list price (docs.mistral.ai/models/mistral-large-4-0, read
+    # 2026-11-06): Mistral Large 4 0.70/2.10, cached input 0.07 (the default
+    # tenth). The card carries no promotion mark; the 2026-10-06 changelog's
+    # "Launch pricing: 50% off for 2 weeks" names no figures, and two weeks
+    # have passed, though no dated page says the card is the full rate. Released in Public Preview on 2026-10-06 as
+    # `mistral-large-4` and `mistral-large-4-0` (both spellings in the
+    # reasoning guide), 1M context, max output not published. Its
+    # `reasoning_effort` takes `low`, `medium`, and `high` only: "Mistral
+    # Large 4 does not accept `none`, `minimal`, `xhigh`, or `max`" (the
+    # reasoning guide), so a chain row that names it must name one of those
+    # three. Mistral retires Large 3 and Medium 3.5 behind it (deprecated
+    # 2026-10-31). No provider row: the vocabulary has no Mistral family.
+    # Recognition-only, in no shipped chain.
+    "mistral-large-4": (0.70, 2.10),
+    "mistral-large-4-0": (0.70, 2.10),
+    # MiniMax list price (platform.minimax.io/docs/guides/pricing-paygo, read
+    # 2026-10-28), standard tier: MiniMax-M3 0.30/1.20 with cache read 0.06
+    # (APPROX_CACHE_READ_RATIO) up to 512K input tokens; above that the card
+    # is 0.60/2.40 (cache 0.12), and the priority tier bills 1.5x. Like the
+    # Gemini 3.1 Pro row, this table carries the lower card. MiniMax-M3.1-Flash
+    # (released 2026-10-19, platform.minimax.io/docs/release-notes/models) is
+    # 0.15/0.60, cache read 0.015 (the default tenth), one tier; reasoning is
+    # always on, effort `low` to `max` (default `max`), and `none` is a 400.
+    # The vendor serves them as `MiniMax-M3` and `MiniMax-M3.1-Flash`; cost
+    # lookup casefolds the id first, so the lower-case keys match. No provider
+    # row: the vocabulary has no MiniMax family. OpenRouter lists both ids,
+    # but a relay-only row would claim that every first-party provider does
+    # not serve them. Recognition-only, in no shipped chain.
+    "minimax-m3": (0.30, 1.20),
+    "minimax-m3.1-flash": (0.15, 0.60),
     # xAI list price (docs.x.ai/developers/models/grok-build-0.1, read
     # 2026-10-01): 1/2 below 200K prompt tokens, 2/4 at or above; cached input
     # 0.20, a fifth of input (APPROX_CACHE_READ_RATIO below). The page's
@@ -1447,6 +1955,24 @@ APPROX_PRICE_PER_MTOK: dict[str, tuple[float, float]] = {
     # `grok-code-fast-1` to `grok-4.3` (observed in the Hermes source).
     "grok-build-0.1": (1.0, 2.0),
     "grok-code-fast": (1.0, 2.0),
+    # xAI list price (docs.x.ai/developers/models/grok-4.7, /grok-4.6,
+    # /grok-4.5, and /grok-4.3, read 2026-10-28), below 200K prompt tokens.
+    # A request whose prompt reaches 200K is billed at the higher card for
+    # ALL its tokens, not only the excess: Grok 4.7/4.6/4.5 4/12, Grok 4.3
+    # 2.50/5.00. This table carries the lower card, so a long-prompt run is
+    # under-reported twofold. Cached input (APPROX_CACHE_READ_RATIO): 0.50 on
+    # 4.7 and 4.6, 0.30 on 4.5, 0.20 on 4.3 (doubled above 200K). Context
+    # 500K (1M on 4.3). Effort: 4.7 and 4.6 `low`/`medium`/`high` (default)/
+    # `xhigh`; 4.5's model page lists the same, but its July release note
+    # says no `xhigh`; 4.3 `none`/`low` (default)/`medium`/`high`/`xhigh`.
+    # Release notes date 4.7 to September, 4.6 to August, and 4.5 to July
+    # 2026 (month only). Aliases: `grok-4.5-latest` and `grok-build-latest`
+    # for 4.5, `grok-4.3-latest` for 4.3 (see the Grok Build 0.1 row for the
+    # Hermes retirement map). Recognition-only, in no shipped chain.
+    "grok-4.7": (2.0, 6.0),
+    "grok-4.6": (2.0, 6.0),
+    "grok-4.5": (2.0, 6.0),
+    "grok-4.3": (1.25, 2.50),
     # TypeSafe list price (docs.typesafe.ai/models, 2026-09): input $0.042
     # per Mtok, output free. The zero is the published rate, not a missing
     # one -- this model is never a chain member, but a machine-level override
@@ -1469,12 +1995,33 @@ APPROX_CACHE_READ_RATIO: dict[str, float] = {
     "claude-sonnet-5-5": 0.05,
     "claude-fable-5-1": 0.025,
     "claude-mythos-5-1": 0.025,
+    # Fable 5.2 and Mythos 5.2 read cache at $0.20 against $8 input, the
+    # same 0.025x (the Fable 5.2 what's-new page, read 2026-11-10).
+    "claude-fable-5-2": 0.025,
+    "claude-mythos-5-2": 0.025,
     # DeepSeek V4.1 Flash cache hit 0.006 vs cache miss 0.30 per MTok input
     # (api-docs.deepseek.com/quick_start/pricing, 2026-09); the Ultrafast
     # serving of the same model carries the same cache-hit ratio, or a run on
     # the tier would price cached input at the generic tenth.
     "deepseek-v4.1-flash": 0.02,
     "deepseek-v4.1-flash-ultrafast": 0.02,
+    # DeepSeek V4 Pro cache hit 0.044 vs cache miss 1.32 per MTok input
+    # (api-docs.deepseek.com/quick_start/pricing, read 2026-10-28).
+    "deepseek-v4-pro": 0.0333,
+    # Gemini 4 Argon cached input 0.10 against 2.00 input through 2026-11-30,
+    # and 0.20 against 4.00 from 2026-12-01 (aistudio.google.com/docs/
+    # pricing, re-read 2026-11-18).
+    "gemini-4-argon": 0.05,
+    # Gemini 4 Carbon carries Argon's card: cached input 0.10 against 2.00
+    # through 2026-11-30, 0.20 against 4.00 from 2026-12-01
+    # (aistudio.google.com/docs/pricing, re-read 2026-11-18).
+    "gemini-4-carbon": 0.05,
+    # Gemini 4 Hydrogen cached input 0.075 against 1.50 input
+    # (aistudio.google.com/docs/pricing, re-read 2026-11-18).
+    "gemini-4-hydrogen": 0.05,
+    # Gemini 4 Neon cached input 0.15 against 3.00 input
+    # (aistudio.google.com/docs/pricing, read 2026-11-20).
+    "gemini-4-neon": 0.05,
     # Kimi K3.1 Pro Highspeed cached input 0.20 against 4.00 input
     # (platform.kimi.ai/docs/pricing/chat, read 2026-10-24); the base model's
     # 0.20 against 2.00 is the default tenth and needs no row.
@@ -1484,6 +2031,13 @@ APPROX_CACHE_READ_RATIO: dict[str, float] = {
     # read 2026-10-01); the retired alias bills at the same rate.
     "grok-build-0.1": 0.2,
     "grok-code-fast": 0.2,
+    # Grok 4.7 and 4.6 cached input 0.50, Grok 4.5 0.30, against 2.00 input;
+    # Grok 4.3 0.20 against 1.25 (docs.x.ai/developers/models/<id>, read
+    # 2026-10-28). The ratio holds on the card above 200K too.
+    "grok-4.7": 0.25,
+    "grok-4.6": 0.25,
+    "grok-4.5": 0.15,
+    "grok-4.3": 0.16,
     # Z.ai lists GLM-5.3 cached input at $0.26 against $1.4 input, and
     # GLM-5.3-Flash cached input at $0.03 against $0.15 input (docs.z.ai
     # pricing, read 2026-09-24). The Ultrafast serving of GLM-5.3 carries the
@@ -1493,9 +2047,35 @@ APPROX_CACHE_READ_RATIO: dict[str, float] = {
     "glm-5.3": 0.186,
     "glm-5.3-flash": 0.2,
     "glm-5.3-ultrafast": 0.186,
+    # The same page, read 2026-10-28: GLM-5.2 cached input $0.26 against $1.4
+    # (its Ultrafast serving carries the base ratio, as above), and
+    # GLM-5.3-FlashX $0.075 against $0.37.
+    "glm-5.2": 0.186,
+    "glm-5.2-ultrafast": 0.186,
+    "glm-5.3-flashx": 0.203,
+    # GLM-5.3-FlashX-Legal: the same $0.075 against $0.37 (read 2026-11-06).
+    "glm-5.3-flashx-legal": 0.203,
+    # Solar Pro 4 cached input 0.06 against 0.30 (upstage.ai/pricing, read
+    # 2026-10-28), and MiniMax-M3 cache read 0.06 against 0.30 on both of its
+    # cards (platform.minimax.io/docs/guides/pricing-paygo, read 2026-10-28).
+    "solar-pro4": 0.2,
+    "minimax-m3": 0.2,
+    # Solar Pro 4 Contributor cached input 0.018 against 0.09 (the same
+    # console.upstage.ai/docs/models/solar-pro-4 card, read 2026-11-26).
+    "solar-pro-4-contributor": 0.2,
     # GPT-6.1 Sol: "Cached input tokens are priced at 5% of the uncached input
     # token rate" (developers.openai.com model page, read 2026-10-01).
     "gpt-6.1-sol": 0.05,
+    # GPT-6.1 Terra: the same 5% wording on its model page (read 2026-10-27).
+    "gpt-6.1-terra": 0.05,
+    # GPT-6.2 Astra 0.40 against 8 and GPT-6.2 Sol 0.10 against 2 (each model
+    # page and the pricing page, read 2026-11-18).
+    "gpt-6.2-astra": 0.05,
+    "gpt-6.2-sol": 0.05,
+    # Qwen4-Max explicit/implicit cache hit 0.075 against 1.50 input
+    # (Singapore; docs.qwencloud.com explicit-cache-qwen4 billing, read
+    # 2026-11-19). Beijing/Global's 0.071 against 1.413 is the same 5%.
+    "qwen4-max": 0.05,
 }
 _DEFAULT_CACHE_READ_RATIO = 0.1
 
@@ -1508,7 +2088,7 @@ _DEFAULT_CACHE_READ_RATIO = 0.1
 # follow ("Chain customization is a config edit, not a source edit").
 #
 #   {"schema_version": "model_price_overrides/v1",
-#    "models": {"claude-fable-5-1": {"input_per_mtok": 8.0,
+#    "models": {"claude-fable-5-2": {"input_per_mtok": 8.0,
 #                                    "output_per_mtok": 40.0,
 #                                    "cache_read_ratio": 0.025}}}
 #
@@ -1734,8 +2314,18 @@ def _model_alias_candidates(observed_model: str) -> list[str]:
     # `-fast` / `-flex` entry is a different mode or price and never labels
     # the base id. A dated snapshot of the exact id reaches the pointer
     # through its snapshot base; a mode or tier variant's projected base is
-    # deliberately not a root here, or `-fast` would reach the pointer.
-    for root in (observed_model, snapshot_base):
+    # deliberately not a root here, or `-fast` would reach the pointer. A
+    # declared second spelling whose row equals one of its contract's pointer
+    # rows (`deepseek-v4.1-flash-1017`, the snapshot `deepseek-flash` serves)
+    # is the same model at the same mode and tier, so its base is a root.
+    roots = [observed_model, snapshot_base]
+    declared = DECLARED_MODEL_ALIAS_PROJECTIONS.get(observed_model)
+    if declared is not None and any(
+        DECLARED_MODEL_ALIAS_PROJECTIONS.get(pointer) == declared
+        for pointer in EXACT_CONTRACT_POINTER_ALIASES.get(declared[0], ())
+    ):
+        roots.append(declared[0])
+    for root in roots:
         candidates.extend(
             alias
             for alias in EXACT_CONTRACT_POINTER_ALIASES.get(root, ())
@@ -2538,6 +3128,30 @@ def _iso_utc(epoch: float) -> str:
         return ""
 
 
+def _observed_routes_reader(omh_home: str | Path | None) -> Any:
+    """``parent session -> {child session: observed route}`` from OMH's delegation ledger, read once per parent.
+
+    The ledger holds the ``route`` Hermes' own `delegate_task` result reported
+    for a backend-routed child (`delegation_ledger.observe_delegate_call`). No
+    OMH home, or an unreadable ledger, reports none.
+    """
+    cache: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def routes_of(parent_id: str) -> dict[str, dict[str, Any]]:
+        if omh_home is None or not parent_id:
+            return {}
+        if parent_id not in cache:
+            ledger = _delegation_ledger.read_ledger(Path(omh_home).expanduser(), parent_id) or {}
+            cache[parent_id] = {
+                child["child_session_id"]: child["observed_route"]
+                for child in ledger.get("children", [])
+                if child.get("observed_route")
+            }
+        return cache[parent_id]
+
+    return routes_of
+
+
 def read_hermes_native_subagents(
     hermes_home: str | Path | None = None,
     *,
@@ -2575,6 +3189,7 @@ def read_hermes_native_subagents(
     children = state.get("children", [])
     if not children:
         return payload
+    observed_routes = _observed_routes_reader(omh_home)
     # The host manifests carry neither parent nor child session identity.
     # Timestamp/task-order matching cannot establish ownership when dispatches
     # overlap. Keep legacy global context, but never borrow it for a session.
@@ -2900,6 +3515,15 @@ def read_hermes_native_subagents(
                     row["route_origin"] = "fallback"
         if failure_hint:
             row["failure_hint"] = failure_hint
+        reported = observed_routes(child["parent_id"]).get(child["session_id"])
+        if reported:
+            # Where Hermes' delegation backend (0.22.5+) reports it ran this child. The model shown is the observed
+            # wire model above; the option name (`label`) is the user's own, and it outranks no OMH category.
+            row["route_backend"] = reported["backend"]
+            if reported.get("label"):
+                row["route_label"] = reported["label"]
+            if reported.get("fallback_activated"):
+                row["route_origin"] = "fallback"
         api_calls = usage.get("api_calls")
         if api_calls is not None:
             row["turn_count"] = int(api_calls)
@@ -2936,3 +3560,9 @@ def read_hermes_native_subagents(
     payload["active"] = running + blocked
     payload["status"] = "observed" if rows else "idle"
     return payload
+
+
+# Module scope, not call time: Hermes can evict the bundle from sys.modules
+# while its callbacks stay live (#1979). Last, because the ledger imports this
+# module: the cycle then finds every name defined here.
+from . import delegation_ledger as _delegation_ledger  # noqa: E402

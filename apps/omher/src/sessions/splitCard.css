@@ -1,0 +1,315 @@
+/* The TERMINALS split card (SplitLayoutCard.tsx). Theme tokens only; the attention colour is the row's bell colour, with a
+   darker one on light. Motion: keyframes on SVG strokes (pathLength 100 for the orbit's head) and on opacity, nothing
+   else. */
+.split-card {
+  --sc-attn: #e8a33c;
+  --sc-orbit: var(--accent);
+  margin: 2px 0 2px;
+  padding: 4px 4px 0;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--bg);
+  transition: opacity 0.12s;
+}
+[data-theme="light"] .split-card {
+  --sc-attn: #c47a00;
+}
+/* a split the open session is not in */
+.split-card[data-away="true"] {
+  opacity: 0.75;
+}
+.split-card[data-away="true"]:hover,
+.split-card[data-away="true"]:focus-within {
+  opacity: 1;
+}
+.sc-map {
+  position: relative;
+  width: 100%;
+}
+.sc-cell {
+  position: absolute;
+  border-radius: 6px;
+  background: var(--side);
+  overflow: hidden;
+}
+/* the tint under a focused or waiting cell, on its own layer so the wait can blink it */
+.sc-cell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+}
+.sc-cell[data-focused="true"]::before {
+  opacity: 0.12;
+}
+.sc-cell[data-state="wait"]::before {
+  background: var(--sc-attn);
+  opacity: 0.12;
+  animation: sc-blink-tint 1.1s ease-in-out infinite;
+}
+.sc-cell[data-state="wait"][data-focused="true"]::before {
+  animation: none;
+  opacity: 0.14;
+}
+.sc-svg {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+.sc-svg rect {
+  fill: none;
+}
+.sc-edge {
+  stroke: var(--line-strong);
+  stroke-width: 1.2;
+}
+.sc-cell[data-focused="true"] .sc-edge {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+.sc-cell[data-state="err"] .sc-edge {
+  stroke: var(--danger);
+  stroke-width: 1.5;
+}
+/* work: the whole edge in a faint accent (the ring) and one short bright head running round it clockwise from the
+   top-left, one lap per 2 s. Any still frame shows a whole ring with a mark on it, never a segment that reads as a
+   progress bar's fill (owner, 2026-11-25) */
+.sc-ring {
+  stroke: var(--sc-orbit);
+  stroke-width: 1.2;
+  opacity: 0.35;
+}
+.sc-orbit {
+  stroke: var(--sc-orbit);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-dashoffset: 5;
+  animation: sc-orbit 2s linear infinite;
+}
+.sc-cell[data-focused="true"] .sc-orbit,
+.sc-cell[data-focused="true"] .sc-ring {
+  stroke: color-mix(in srgb, var(--accent) 60%, var(--ink));
+}
+@keyframes sc-orbit {
+  from {
+    stroke-dashoffset: 5;
+  }
+  to {
+    stroke-dashoffset: -95;
+  }
+}
+/* bg: a dashed edge flowing clockwise, one dash cell a second */
+.sc-dash {
+  stroke: var(--accent);
+  stroke-width: 1.2;
+  opacity: 0.85;
+  stroke-dasharray: 3.6 2.4;
+  animation: sc-dash 1s linear infinite;
+}
+@keyframes sc-dash {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -6;
+  }
+}
+/* wait: an attention edge blinking; held on the focused cell (the person is looking at it) */
+.sc-wait {
+  stroke: var(--sc-attn);
+  stroke-width: 1.5;
+  animation: sc-blink 1.1s ease-in-out infinite;
+}
+.sc-cell[data-focused="true"] .sc-wait {
+  animation: none;
+  opacity: 1;
+}
+@keyframes sc-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+/* news: it rang unseen (a bell, an OSC 9 message, a progress done). A soft accent edge breathing slowly, never the
+   attention blink: it may as well mean the program finished (kasaterm's "unseen done") */
+.sc-news {
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  opacity: 0.7;
+  animation: sc-breath 2.4s ease-in-out infinite;
+}
+@keyframes sc-breath {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+@keyframes sc-blink-tint {
+  0%,
+  100% {
+    opacity: 0.14;
+  }
+  50% {
+    opacity: 0.04;
+  }
+}
+/* the cell's button: the whole cell, its text laid out once for the whole card (data-text, splitCard.ts cardText),
+   always from the inline start. The start padding puts the first cell's mark on the TERMINALS rows' icon column:
+   a row's mark sits at its list's edge + 1 (border) + --side-x + 7 + 12 (status glyph) + 7 = --side-x + 27; a cell's
+   box starts at the list's edge + --side-x + 10 (the card's inset, below) + 1 (border) + 4 (padding) + 1 (half the
+   cells' gap) = --side-x + 16, so 11 px more. */
+.sc-open,
+.sc-open.line {
+  position: absolute;
+  inset: 0;
+  /* the whole cell, whatever its layout class: chat.css's one-line `.line` (24 px tall) must not shrink a "line" cell's
+     face, which let a right-click below it reach the list's background menu */
+  height: auto;
+  gap: 0;
+  font-size: inherit;
+  display: flex;
+  padding: 0 6px 0 11px;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+  min-width: 0;
+}
+.sc-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.sc-body {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+  width: 100%;
+}
+.sc-t {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--ink);
+}
+.sc-t .trm {
+  flex: none;
+}
+.sc-n,
+.sc-l {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-l {
+  font-family: var(--mono);
+  font-size: 9.5px;
+  color: var(--muted);
+}
+/* beside: the last line under the title, past the 16 px mark and its gap */
+.sc-open.beside .sc-l {
+  padding-inline-start: 21px;
+}
+/* stack: the mark above the title, both from the inline start, so a narrow cell gives its title the whole width; a
+   long title keeps its start and ends in an ellipsis */
+.sc-open.stack .sc-t {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+}
+.sc-open.stack .sc-n {
+  max-width: 100%;
+  line-height: 14px;
+}
+.sc-editing .ss-name-in {
+  min-width: 0;
+  width: 100%;
+  font-size: 11px;
+}
+/* the time a cell has been working, top right */
+.sc-el {
+  position: absolute;
+  top: 3px;
+  inset-inline-end: 6px;
+  font-family: var(--mono);
+  font-size: 9px;
+  color: var(--muted);
+  pointer-events: none;
+}
+.sc-el[data-old="true"] {
+  color: var(--quiet);
+  opacity: 0.7;
+}
+/* the height grip under the card (kasaterm's room-card grip): a 10px band, a 28x3 handle */
+.sc-grip {
+  height: 10px;
+  display: grid;
+  place-items: center;
+  cursor: row-resize;
+  touch-action: none;
+  border-radius: 0 0 9px 9px;
+}
+.sc-grip i {
+  width: 28px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--line-strong);
+}
+.sc-grip:hover i,
+.sc-grip.on i,
+.sc-grip:focus-visible i {
+  background: var(--accent);
+}
+.sc-grip:focus-visible {
+  outline: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .split-card,
+  .sc-orbit,
+  .sc-dash,
+  .sc-wait,
+  .sc-news,
+  .sc-cell::before {
+    animation: none !important;
+    transition: none;
+  }
+  /* work: no head that would stand still on one edge; the ring alone, still (a ring, never a fill level), thinner and
+     fainter than a focused cell's edge so the two do not read alike */
+  .sc-orbit {
+    display: none;
+  }
+  .sc-ring {
+    opacity: 0.6;
+  }
+  .sc-wait {
+    opacity: 1;
+  }
+  .sc-news {
+    opacity: 0.7;
+  }
+}
+
+/* a split card inside its folder group sits in the folder's content column, as the folder's rows do */
+.tg > .split-card {
+  margin-inline-start: calc(var(--side-x) + 10px);
+}

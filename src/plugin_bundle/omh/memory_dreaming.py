@@ -39,6 +39,7 @@ from typing import Any, Callable
 from . import runtime_paths
 from .group_activity_status import profile_slot
 from .memory_state_files import state_file_lock, write_text_atomic, write_text_locked
+from .memory_store_io import guard_store_write
 
 DREAMING_STATE_SCHEMA_VERSION = "omh_memory_dreaming_state/v1"
 DREAMING_HANDOFF_SCHEMA_VERSION = "omh_memory_consolidation_handoff/v1"
@@ -196,7 +197,11 @@ def adopt_legacy_dreaming_files(omh_home: str | Path, hermes_home: str | Path) -
     if not any(path.is_file() and not path.is_symlink() for path in legacy_files):
         return []
     target_dir = profile_dreaming_dir(omh_home, hermes_home)
-    target_dir.mkdir(parents=True, exist_ok=True)
+    # The lock sidecar and the moved files stay inside the store: a linked
+    # directory or target on the way is refused (OSError), never followed.
+    guard_store_write(memory_dir / "consolidation.json", omh_home=Path(omh_home).expanduser())
+    for name in LEGACY_STATE_FILENAMES:
+        guard_store_write(target_dir / name, omh_home=Path(omh_home).expanduser())
     moved: list[str] = []
     with state_file_lock(memory_dir / "consolidation.json"):
         for legacy in legacy_files:
@@ -254,6 +259,7 @@ def read_dreaming_state(omh_home: str | Path, hermes_home: str | Path) -> dict[s
 def write_dreaming_state(omh_home: str | Path, hermes_home: str | Path, state: dict[str, Any]) -> Path:
     """Replace this profile's counters whole, under the state lock. Raises ``OSError``."""
     path = dreaming_state_path(omh_home, hermes_home)
+    guard_store_write(path, omh_home=Path(omh_home).expanduser())
     write_text_locked(path, json.dumps(state, ensure_ascii=False, sort_keys=True))
     return path
 
@@ -272,7 +278,7 @@ def update_dreaming_state(
     Raises ``OSError`` (a lock timeout is one).
     """
     path = dreaming_state_path(omh_home, hermes_home)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    guard_store_write(path, omh_home=Path(omh_home).expanduser())
     with state_file_lock(path):
         updated = mutate(read_dreaming_state(omh_home, hermes_home))
         write_text_atomic(path, json.dumps(updated, ensure_ascii=False, sort_keys=True))
@@ -349,10 +355,12 @@ def consolidation_reasons(
     own cause. "It is time" and "the file is nearly full" ask for different work,
     and a brief that cannot tell them apart is a brief that says nothing.
 
-    ``session_ending`` lowers the bar to a single unconsolidated turn, because
-    the interval assumes a later turn will come and a closing session is exactly
-    where that assumption fails. Three turns and a closed laptop would otherwise
-    leave nothing behind.
+    ``session_ending`` (a closing session, or the recovery of one that closed
+    without consolidating) uses the same threshold as the interval. It once
+    lowered the bar to a single turn; that raised a brief at nearly every
+    session start (213 of 216 console turns carried one, 153 via recovery), and
+    the brief asks the model to capture, so it inflated the store it feeds. A
+    session shorter than the interval leaves nothing worth a brief.
 
     A reason that describes a *condition* is suppressed until the condition
     actually changes. Observed live: 19 consecutive briefs, every one of them
@@ -377,9 +385,13 @@ def consolidation_reasons(
     interval = turn_interval if isinstance(turn_interval, int) and turn_interval > 0 else DEFAULT_TURN_INTERVAL
     turns = _non_negative_int(state.get("turns_since_consolidation"))
     if turns >= interval:
-        reasons.append(f"turn_interval_reached:{turns}/{interval}")
-    elif session_ending and turns > 0:
-        reasons.append(f"session_ending_with_unconsolidated_turns:{turns}")
+        # A closing session is named for the moment, not the interval: the
+        # same threshold, a different request ("save it now").
+        reasons.append(
+            f"session_ending_with_unconsolidated_turns:{turns}"
+            if session_ending
+            else f"turn_interval_reached:{turns}/{interval}"
+        )
     if bool(state.get("compaction_pending")):
         reasons.append("context_compaction_observed")
     if headroom_chars is not None and headroom_chars <= max(headroom_floor_chars, 0):

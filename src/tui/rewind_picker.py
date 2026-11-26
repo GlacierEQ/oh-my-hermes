@@ -19,11 +19,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .keys import BACKSPACE, CHAR, DOWN, ENTER, ESCAPE, PAGE_DOWN, PAGE_UP, UP, Key, Paste
-from .session_picker import age_text, picker_frame
+from .fuzzy import subsequence_tail
+from .keys import BACKSPACE, CHAR, DOWN, ENTER, ESCAPE, PAGE_DOWN, PAGE_UP, UP, Key, Paste, list_nav_step
+from .session_picker import age_text, picker_frame, picker_row
 from .style import Line, Span
 from .theme import Theme
-from .width import cell_width, truncate, truncate_line
 
 PICK = "pick"
 CLOSE = "close"
@@ -82,8 +82,7 @@ class RewindPicker:
     caret: tuple[int, int] | None = None  # the last render's caret, at the end of its filter row
 
     def visible(self) -> list[RewindRow]:
-        needle = self.query.casefold()
-        return [row for row in self.rows if needle in row.text.casefold()] if needle else list(self.rows)
+        return subsequence_tail(self.rows, self.query, lambda row: (row.text,))
 
     def handle_key(self, event: Key | Paste) -> RewindAction | None:
         """Apply one key; a `RewindAction` when the person picked a prompt or closed the picker."""
@@ -96,7 +95,10 @@ class RewindPicker:
         if event.name == ENTER:
             return RewindAction(PICK, shown[min(self.index, len(shown) - 1)]) if shown else None
         steps = {UP: -1, DOWN: 1, PAGE_UP: -self.page, PAGE_DOWN: self.page}
-        if event.name in steps and shown:
+        arc = list_nav_step(event)
+        if arc and shown:
+            self.index = min(max(self.index + arc, 0), len(shown) - 1)
+        elif event.name in steps and shown:
             self.index = min(max(self.index + steps[event.name], 0), len(shown) - 1)
         elif event.name == BACKSPACE:
             self._filter(self.query[:-1])
@@ -122,12 +124,4 @@ class RewindPicker:
         return frame.lines
 
     def _row(self, row: RewindRow, highlighted: bool, width: int, theme: Theme, now: float) -> Line:
-        style = theme.menu_current if highlighted else theme.menu
-        lead = f" #{row.ordinal} "
-        age = age_text(row.timestamp, now)
-        meta = f" {age} " if age else " "
-        room = width - cell_width(lead) - cell_width(meta)
-        if room < 8:
-            return truncate_line((Span(lead + row.label, style),), width)
-        label = truncate(row.label, room)
-        return (Span(lead + label + " " * (room - cell_width(label)) + meta, style),)
+        return picker_row(highlighted, f"#{row.ordinal} ", row.label, age_text(row.timestamp, now), width, theme)

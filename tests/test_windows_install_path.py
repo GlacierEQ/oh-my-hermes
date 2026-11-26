@@ -126,6 +126,32 @@ class WindowsInstallerRedirectResponseTests(unittest.TestCase):
                         workflow,
                     )
 
+    def test_python_selection_behaviour_runs_on_both_windows_hosts(self) -> None:
+        # Select-OmhPython's venv-layout check (an MSYS2 python whose venvs put
+        # python.exe in bin\\) is behavioural only on Windows CI. Pin that its
+        # suite and mutation run under both hosts.
+        workflow = (REPO_ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        self.assertTrue((REPO_ROOT / "tests" / "powershell" / "Test-OmhPythonSelection.ps1").is_file())
+        for shell in ("pwsh", "powershell"):
+            for suffix in ("", " -InjectRegression"):
+                with self.subTest(shell=shell, suffix=suffix):
+                    self.assertIn(
+                        f"shell: {shell}\n        run: ./tests/powershell/Test-OmhPythonSelection.ps1{suffix}\n",
+                        workflow,
+                    )
+
+    def test_python_selection_reads_the_venv_scheme_not_the_preferred_one(self) -> None:
+        # get_preferred_scheme('prefix') answers `venv` from inside any venv,
+        # which would reject Hermes' own interpreter as MSYS2. The probe asks
+        # the `venv` scheme's scripts folder, which the venv module itself uses.
+        probe = [
+            line for line in INSTALL_PS1.read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith("$probe = Invoke-OmhCapture -FilePath $candidate")
+        ]
+        self.assertEqual(len(probe), 1, "Select-OmhPython's probe line moved")
+        self.assertNotIn("get_preferred_scheme", probe[0])
+        self.assertIn("sysconfig.get_path(''scripts'', ''venv''", probe[0])
+
 
 class WindowsInstallerContractParityTests(unittest.TestCase):
     """install.ps1 must accept the same inputs install.sh does."""
@@ -214,7 +240,8 @@ class WindowsInstallerDocumentationTests(unittest.TestCase):
         self.readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
 
     def test_windows_one_liner_is_documented_where_a_windows_user_will_look(self) -> None:
-        one_liner = "irm https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.ps1 | iex"
+        # The short form omher.app serves; site/install.ps1 runs install.ps1 from main.
+        one_liner = "irm https://omher.app/install.ps1 | iex"
         for name, text in (("docs/INSTALLATION.md", self.installation), ("README.md", self.readme)):
             self.assertIn(one_liner, text, f"{name} does not show the native Windows install command")
         self.assertIn('$env:OMH_SOURCE_REF = $Ref', self.agents)

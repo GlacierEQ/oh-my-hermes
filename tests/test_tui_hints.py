@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import unittest
 
-from _tui_lines import INFO_INSET, line_text, lines_text
+from _tui_lines import INFO_INSET, line_text, lines_text, without_badge
 from test_tui_agent_view import agent_app
 from test_tui_modes import answer, make_app
 from omh.tui.app import App, banner_lines
@@ -29,23 +29,29 @@ SECRET = ServerRequest("srq-3", "secret", {"env_var": "TOKEN"})
 
 
 def mode_row(app: App) -> str:
-    return line_text(app._info_line(100))
+    return without_badge(line_text(app._info_line(100)))
 
 
 class QuestionKeyTests(unittest.TestCase):
     def test_an_open_question_puts_its_keys_on_the_info_line_and_esc_means_one_thing(self) -> None:
         cases = [
             (APPROVAL, "↑↓ pick · enter confirms · d or esc denies and stops"),
-            (CLARIFY, "↑↓ or 1-9 · enter picks · type to answer · esc cancels"),
+            (CLARIFY, "Enter to select · ↑↓ to navigate · Esc to cancel"),
             (SECRET, "type it · enter sends · esc declines"),
         ]
         for request, keys in cases:
             with self.subTest(method=request.method):
                 app, _client = make_app(busy=True)
                 app._on_server_request(request)
-                self.assertIn(keys, mode_row(app))
+                if request.method == "clarify":
+                    # A framed question says its keys on its own row under its bottom rule, not on the info line.
+                    self.assertIn(keys, [line_text(row).strip() for row in app._slot_lines(100, 24)])
+                    self.assertNotIn("esc", mode_row(app).casefold())
+                else:
+                    self.assertIn(keys, mode_row(app))
                 self.assertNotIn("esc interrupt", mode_row(app))
-                self.assertNotIn("esc to interrupt", line_text(app._tail(100)[-1]))  # the working row too
+                tail = app._tail(100)  # a framed question draws no waiting row: its key row carries the clock
+                self.assertNotIn("esc to interrupt", line_text(tail[-1]) if tail else "")  # the working row too
 
     def test_an_approval_with_no_turn_running_says_deny_not_stop(self) -> None:
         # A subagent that outlived the turn can still ask; nothing would be interrupted then.
@@ -77,7 +83,7 @@ class EscMeaningTests(unittest.TestCase):
         draft, client = make_app(busy=True, cols=100)
         from test_tui_modes import type_text
 
-        type_text(draft, "a draft")  # Esc arms the clear
+        type_text(draft, "/he")  # the `/` menu is open: Esc closes it
         listed, listed_client = agent_app(busy=True, frames=[], cols=100)
         relay(listed, STARTS)
         listed._on_input(Key(DOWN))  # the agent list: Esc goes back
@@ -88,7 +94,7 @@ class EscMeaningTests(unittest.TestCase):
         searching, searching_client = make_app(busy=True, cols=100)
         searching.composer.history = ["an older prompt"]
         searching._on_input(Key(CHAR, "r", ctrl=True))  # Esc cancels the search
-        return [("draft", draft, client), ("agent list", listed, listed_client),
+        return [("slash menu", draft, client), ("agent list", listed, listed_client),
                 ("agent steer", steering, steering_client), ("history search", searching, searching_client)]
 
     def test_no_state_that_gives_esc_another_meaning_offers_it_for_the_interrupt(self) -> None:
@@ -112,6 +118,17 @@ class EscMeaningTests(unittest.TestCase):
         self.assertNotIn("esc interrupt", said)
         app._on_input(Key(ESCAPE))
         self.assertEqual(client.calls[-1][0], "session.interrupt")
+
+    def test_a_draft_during_a_turn_offers_it_too_and_esc_keeps_the_draft(self) -> None:
+        from omh.tui.keys import ESCAPE, Key
+        from test_tui_modes import type_text
+
+        app, client = make_app(busy=True, cols=100)
+        type_text(app, "a draft")
+        self.assertEqual(self.screen_says(app).count("esc to interrupt"), 1)
+        app._on_input(Key(ESCAPE))
+        self.assertEqual(client.calls[-1][0], "session.interrupt")
+        self.assertEqual(app.composer.text, "a draft")
 
 
 class NarrowSayTests(unittest.TestCase):
@@ -189,8 +206,9 @@ class NarrowSayTests(unittest.TestCase):
         show_mode(app, MODE_ACCEPT_PLAN)
         app._on_server_request(CLARIFY)
         row = line_text(app._info_line(40))
-        self.assertTrue(row.rstrip().endswith("esc cancels"), row)
         self.assertTrue(row.startswith(INFO_INSET + "⏵⏵") and "⏸" in row, row)
+        # The way out is on the question's own key row, which keeps it at forty columns.
+        self.assertTrue(line_text(app._slot_lines(40, 24)[-1]).rstrip().endswith("Esc to cancel"))
 
     def test_the_right_side_gives_way_before_the_count_or_the_steered_agents_name(self) -> None:
         row = self.steer_row(100, effort="high")
@@ -246,11 +264,15 @@ class NarrowApprovalTests(unittest.TestCase):
                 row = line_text(app._info_line(width))
                 self.assertIn("esc denies", row)
                 self.assertLessEqual(len(row), width)
-                self.assertIn("▌ ❯ deny", self.rows(width))
+                rows = self.rows(width)
+                self.assertEqual(rows[rows.index("▌   ✗ deny") + 1], "▌ ❯ ✓ allow once")
 
     def test_a_wrapped_command_keeps_its_indent(self) -> None:
-        rows = self.rows(50)
-        command_rows = rows[1 : rows.index("▌ ❯ deny")]
+        # One command, so it is listed whole, wrapped under the indent (two would each fit on a row of their own).
+        slot = open_request("srq", "approval", {"command": self.COMMAND.replace(" && ", " -o -exec "),
+                                                "description": "delete in root path"})
+        rows = lines_text(slot.lines(50, DEFAULT_THEME, 20))
+        command_rows = [row for row in rows[1 : rows.index("▌   ✗ deny")] if row.strip("▌ ─")]  # past the spacing
         self.assertGreater(len(command_rows), 1)
         for row in command_rows:
             self.assertTrue(row.startswith("▌   "), rows)

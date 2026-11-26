@@ -53,7 +53,7 @@ from .bare_launch import (
     _launch_hermes_tui,
     _node_available,
     _omh_tui_blocker,
-    _print_resume_hint,
+    _print_exit_card,
     _print_welcome,
     _run_auto_update,
     _run_hermes_fallback,
@@ -64,6 +64,7 @@ from .bare_launch import (
     run_bare_launch,
 )
 from .common import set_json_output_pretty
+from .fast_dispatch import run_command
 from .context import _add_context_commands, cmd_context_brief
 from .model_chains import _add_model_chains_commands
 from .conformance import _add_conformance_commands, cmd_conformance_check
@@ -95,6 +96,7 @@ from .goal import (
 )
 from .handoff_risk_scan import add_handoff_risk_scan_command
 from .hermes import _add_hermes_commands, cmd_hermes_plan
+from .cache import _add_cache_commands
 from .hud import _add_hud_commands, cmd_hud
 from .learning import (
     _add_learning_commands,
@@ -170,6 +172,7 @@ from .paper import (
 )
 from .playbook import _add_playbook_commands, cmd_playbook_inspect, cmd_playbook_list, cmd_playbook_recommend
 from .release import _add_release_commands, cmd_release_checklist, cmd_release_hermes_smoke
+from .research import _add_research_commands
 from .runtime import (
     _add_runtime_commands,
     cmd_runtime_ci,
@@ -207,11 +210,13 @@ from .setup import (
 from .state import _add_state_commands, cmd_state_clear, cmd_state_finish, cmd_state_start, cmd_state_status
 from .theme import _add_theme_commands
 from .update_check import _add_update_check_commands
+from .auto_resume import _add_auto_resume_commands
 from .use_cases import _add_cases_commands, cmd_cases_inspect, cmd_cases_list, cmd_cases_recommend
 from .visual import _add_visual_commands, cmd_visual_observe, cmd_visual_prompt_card
 from .adapter_quality import _add_adapter_quality_commands
 from .cross_harness_benchmark import _add_benchmark_commands
 from .quality_evidence import _add_quality_evidence_commands
+from .skill_eval import _add_skill_eval_commands
 from .web_qa import _add_web_qa_commands, cmd_web_qa_observe_capture, cmd_web_qa_package, cmd_web_qa_record_verdict
 from .worktree import cmd_worktree_bind, cmd_worktree_list, _add_worktree_commands
 
@@ -299,6 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_coding_commands(sub)
     _add_codegraph_commands(sub)
     _add_hermes_commands(sub)
+    _add_cache_commands(sub)
     _add_hud_commands(sub)
     status = sub.add_parser("status", help="Alias for `omh hud`; show compact OMH status metadata.")
     status.add_argument("--json", action="store_true", help="Print the full machine-readable HUD payload.")
@@ -319,10 +325,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_ops_commands(sub)
     _add_materials_commands(sub)
     _add_paper_commands(sub)
+    _add_research_commands(sub)
     _add_visual_commands(sub)
     _add_adapter_quality_commands(sub)
     _add_benchmark_commands(sub)
     _add_quality_evidence_commands(sub)
+    _add_skill_eval_commands(sub)
     _add_web_qa_commands(sub)
     _add_worktree_commands(sub)
     _add_runtime_commands(sub)
@@ -330,24 +338,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_state_commands(sub)
     _add_theme_commands(sub)
     _add_update_check_commands(sub)
+    _add_auto_resume_commands(sub)
     return parser
-
-
-def _reject_tui_passthrough_with_subcommand(args: argparse.Namespace) -> None:
-    """Refuse a bare-launch flag that was given alongside a subcommand.
-
-    Unlike `--omh-home`/`--hermes-home`/`--scope`, these three do not apply to
-    a subcommand at all: they are forwarded to `hermes` when the bare launch
-    opens the terminal, and there is no terminal here. Ignoring one silently
-    would run the subcommand against a profile or session the person believes
-    they selected.
-    """
-    for dest, flag in _TUI_PASSTHROUGH_OPTIONS:
-        if getattr(args, dest, None) is not None:
-            raise OmhError(
-                f"{flag} opens the OH-MY-HERMES terminal and cannot be combined "
-                f"with the '{args.command}' command."
-            )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -361,15 +353,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     parser = build_parser()
     args = parser.parse_args(raw_argv)
-    set_json_output_pretty(bool(getattr(args, "pretty", False)))
     if not getattr(args, "command", None):
+        args._argv = raw_argv
+        set_json_output_pretty(bool(getattr(args, "pretty", False)))
         return run_bare_launch(args)
-    try:
-        _reject_tui_passthrough_with_subcommand(args)
-        return int(args.func(args))
-    except OmhError as exc:
-        print(f"omh: {exc}", file=sys.stderr)
-        return 2
+    return run_command(args, raw_argv)
 
 
 if __name__ == "__main__":

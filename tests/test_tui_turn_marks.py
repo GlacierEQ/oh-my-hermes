@@ -1,11 +1,11 @@
-"""Outcome bands, the queue's tag, and where a steer lands.
+"""Outcome bands, a prompt the queue sent, and where a steer lands.
 
 Your prompt sits on no band: a dim `>` and dim text, as Claude Code shows it.
 A band (an outcome's) fills to the right edge by an erase in its background
 rather than by spaces. A prompt the queue sent once the turn before it ended
-says `⧗ from queue`. A steer shows as
-`↪ steer · <text>` under what is running until Hermes answers, and is
-written into the transcript at the next block boundary after that, so it
+reads as any prompt, with no tag. A steer shows as a dim prompt row (`┃ ❯ <text>`) under
+what is running until the turn takes it in, and is written into the
+transcript, as any prompt reads, at the next block boundary after that, so it
 never closes a running tool group (whose calls would read as cut off) or
 splits a streaming reply. A turn's done line sits right above the panel
 however tall its last tool group was.
@@ -13,6 +13,7 @@ however tall its last tool group was.
 
 from __future__ import annotations
 
+import re
 import unittest
 
 from _tui_lines import line_text, lines_text
@@ -27,13 +28,13 @@ from omh.tui.panels import HudSnapshot
 from omh.tui.screen import ERASE_TO_LINE_END, paint_line
 from omh.tui.style import SGR_RESET, Span, Style, fill
 from omh.tui.theme import DEFAULT_THEME as THEME
-from omh.tui.theme import build_theme, is_light
+from omh.tui.theme import DEFAULT_LAUNCH, build_theme, is_light, with_prompt_band
 from omh.tui.transcript import (
     NOTICE_ERROR,
     NOTICE_OK,
     NOTICE_WARN,
     OUTPUT_FAILED,
-    STEER_QUEUED,
+    STEER_TAKEN,
     TOOL_DENIED,
     TOOL_ERROR,
     TOOL_OK,
@@ -47,6 +48,7 @@ from omh.tui.transcript import (
     TurnSummaryBlock,
     UserBlock,
     block_rows,
+    rail_cell,
 )
 
 
@@ -59,20 +61,23 @@ REPORTED = build_theme(SKIN_THEMES[0], "#1E1E1E")
 
 
 def unrailed(rows: list) -> list:
-    """`rows` without the rail a tool call's rows hang on (`┃` and a space): what is on a band beside it."""
-    return [row[2:] if row and row[0].text == "┃" else row for row in rows]
+    """`rows` without the rail a tool call's rows hang on (the bar and a space): what is on a band beside it."""
+    return [row[2:] if row and row[0].style.gutter else row for row in rows]
 
 
 class BandTests(unittest.TestCase):
-    def test_a_prompt_has_no_band_on_any_theme_or_background(self) -> None:
-        # Round 4: your prompt reads as Claude Code's, a dim `>` and dim text with no band behind it; since the rail and
-        # kind colours (2026-10-22) it hangs on a dim rail, a block of its own.
+    def test_a_prompt_runs_on_the_look_s_band_wherever_a_background_was_reported(self) -> None:
+        # Round 4 drew your prompt with no band, a dim `>` and dim text on a dim rail; the owner's pick of 2026-10-27
+        # puts it on the launch look's band, to the right edge, on every theme and reported background, and on none
+        # when no background was reported.
         for skin in SKIN_THEMES:
             for background in (None, *LIGHT_BACKGROUNDS, *DARK_BACKGROUNDS):
-                rows = block_rows(UserBlock("first line\nsecond line"), 40, build_theme(skin, background))
+                theme = with_prompt_band(build_theme(skin, background), skin, background, DEFAULT_LAUNCH)
+                rows = block_rows(UserBlock("first line\nsecond line"), 40, theme)
                 with self.subTest(theme=skin.short_name, background=background):
                     self.assertEqual(lines_text(rows), ["┃ ❯ first line", "┃   second line"])
-                    self.assertEqual({span.style.bg for row in rows for span in row}, {None})
+                    band = {theme.prompt_band.bg} if background is not None else {None}
+                    self.assertEqual({span.style.bg for row in rows for span in row}, band)
 
     def test_the_fill_erases_to_the_edge_in_its_background_and_a_full_row_erases_nothing(self) -> None:
         band = Style(bg="#102030")
@@ -215,7 +220,7 @@ class OutcomeBandTests(unittest.TestCase):
                                                          output=("1 failed",))], done=True), 60, theme)
                     with self.subTest(theme=skin.short_name, background=background, status=status):
                         self.assertEqual({span.style.bg for row in rows for span in row}, {None})
-                        self.assertEqual({row[0] for row in rows}, {Span("┃", theme.error)})
+                        self.assertEqual({row[0] for row in rows}, {rail_cell(theme.error)})
                         self.assertEqual(rows[0][2], Span("✗", theme.error))
                         self.assertGreaterEqual(contrast(theme.error.fg, background), 3.0)
 
@@ -227,14 +232,15 @@ class OutcomeBandTests(unittest.TestCase):
 
 
 class FromQueueTests(unittest.TestCase):
-    def test_a_prompt_the_queue_sent_says_so_and_a_typed_one_does_not(self) -> None:
+    def test_a_prompt_the_queue_sent_reads_as_a_typed_one(self) -> None:
         app, client = make_app(busy=True)
         type_text(app, "next one")
         app._on_input(Key(ENTER))
         app._on_event(ev("message.complete", text="done"))
         self.assertEqual(client.calls[-1], ("prompt.submit", {"session_id": SID, "text": "next one", "queued": True}))
         users = [block for block in app.transcript.blocks if isinstance(block, UserBlock)]
-        self.assertEqual([line_text(block_rows(block, 80, THEME)[0]) for block in users], ["┃ ❯ next one  ⧗ from queue"])
+        self.assertEqual([line_text(block_rows(block, 80, THEME)[0]).rstrip() for block in users], ["┃ ❯ next one"])
+        self.assertTrue(users[0].from_queue)  # the field stays; it draws nothing (owner, 2026-11-21)
         typed = block_rows(UserBlock("typed"), 80, THEME)[0]
         self.assertEqual(line_text(typed), "┃ ❯ typed")
 
@@ -242,20 +248,21 @@ class FromQueueTests(unittest.TestCase):
         row = block_rows(UserBlock("a long prompt that fills the row", from_queue=True), 36, THEME)[0]
         self.assertEqual(line_text(row), "┃ ❯ a long prompt that fills the row")  # the rail, then no room for the tag
 
-    def test_the_tag_reads_on_the_terminals_background(self) -> None:
+    def test_no_tag_on_any_palette_or_background(self) -> None:
         for skin in SKIN_THEMES:
             for background in (*LIGHT_BACKGROUNDS, *DARK_BACKGROUNDS):
                 theme = build_theme(skin, background)
-                row = block_rows(UserBlock("next", from_queue=True), 80, theme)[0]
-                (tag,) = [span for span in row if "from queue" in span.text]
+                rows = block_rows(UserBlock("next", from_queue=True), 80, theme)
                 with self.subTest(theme=skin.short_name, background=background):
-                    self.assertGreaterEqual(contrast(tag.style.fg, background), 4.5)
+                    self.assertFalse([span for row in rows for span in row if "from queue" in span.text or "⧗" in span.text])
+                    self.assertEqual(rows, block_rows(UserBlock("next"), 80, theme))
 
 
 class SteerPlacementTests(unittest.TestCase):
     def steer(self, app: object, text: str) -> None:
-        type_text(app, text)  # type: ignore[arg-type]
-        app._on_input(CTRL_ENTER)  # type: ignore[attr-defined]
+        """`/steer`: Hermes' steer, held until the turn reads it (the send-now key's redirect is `RedirectTests`')."""
+        type_text(app, f"/steer {text}")  # type: ignore[arg-type]
+        app._on_input(Key(ENTER))  # type: ignore[attr-defined]
 
     def test_a_steer_during_a_running_tool_leaves_the_tool_running_and_lands_after_its_group(self) -> None:
         app, client = make_app(busy=True)
@@ -263,18 +270,18 @@ class SteerPlacementTests(unittest.TestCase):
         app._on_event(ev("tool.start", tool_id="t1", name="terminal", context="pytest"))
         self.steer(app, "only the failing test")
         live = lines_text(app.transcript.live_lines(80, THEME))
-        self.assertEqual(live[-1], "↪ steer · only the failing test")  # under what is running, until Hermes answers
+        self.assertEqual(live[-1], "┃ ❯ only the failing test")  # under what is running, until Hermes answers
         answer(app, client, {"status": "queued", "text": "only the failing test"})
         group = app.transcript.blocks[-1]
         self.assertIsInstance(group, ToolGroup)
         self.assertEqual(group.tools[0].status, TOOL_RUNNING)  # not cut off by the steer
-        self.assertEqual(lines_text(app.transcript.live_lines(80, THEME))[-1], "↪ steer queued by Hermes · only the failing test")
+        self.assertEqual(lines_text(app.transcript.live_lines(80, THEME))[-1], "┃ ❯ only the failing test")
         app._on_event(ev("tool.complete", tool_id="t1", name="terminal", result={"output": "1 passed"}))
         app._on_event(ev("message.delta", text="Running only that test now."))
         kinds = [type(block) for block in app.transcript.blocks]
         self.assertEqual(kinds, [ToolGroup, SteerBlock, AssistantBlock])
         self.assertEqual(app.transcript.blocks[0].tools[0].status, TOOL_OK)
-        self.assertEqual(app.transcript.blocks[1].state, STEER_QUEUED)
+        self.assertEqual(app.transcript.blocks[1].state, STEER_TAKEN)  # the tool's result carried it to the model
 
     def test_the_steer_command_is_its_own_echo_and_leaves_a_running_tool_running(self) -> None:
         # Found live: `> /steer ...` echoed as a command closed the tool group and marked the running call `▪`.
@@ -286,7 +293,7 @@ class SteerPlacementTests(unittest.TestCase):
         answer(app, client, {"status": "queued", "text": "also echo steered"})
         (group,) = app.transcript.blocks
         self.assertEqual(group.tools[0].status, TOOL_RUNNING)
-        self.assertEqual(lines_text(app.transcript.live_lines(80, THEME))[-1], "↪ steer queued by Hermes · also echo steered")
+        self.assertEqual(lines_text(app.transcript.live_lines(80, THEME))[-1], "┃ ❯ also echo steered")
         self.assertEqual(app.composer.history[-1], "/steer also echo steered")  # Up still finds what was typed
 
     def test_a_steer_during_a_streaming_reply_does_not_split_it(self) -> None:
@@ -302,19 +309,40 @@ class SteerPlacementTests(unittest.TestCase):
         kinds = [type(block).__name__ for block in app.transcript.blocks]
         self.assertEqual(kinds[:2], ["AssistantBlock", "SteerBlock"])
 
+    def test_a_steer_hermes_answers_with_another_call_keeps_all_the_reply_showed(self) -> None:
+        # Found live: Hermes read the steer before a second model call with no `message.interim` between, so the
+        # second call's text streamed onto the first's, and `message.complete` (the last call's text only) replaced
+        # the whole block: the first reply left the screen and scrollback. Now nothing that streamed is rewritten;
+        # the steer row goes under the reply, as Hermes' answer put it.
+        app, client = make_app(busy=True, rows=16)
+        app._on_event(ev("message.start"))
+        app._on_event(ev("message.delta", text="SLOW-START the first "))
+        self.steer(app, "steer me")
+        answer(app, client, {"status": "queued", "text": "steer me"})
+        app._on_event(ev("message.delta", text="reply SLOW-END "))
+        app._on_event(ev("message.delta", text="Reply #2 to: steer me. REPLY-END-2"))
+        app._on_event(ev("message.complete", text="Reply #2 to: steer me. REPLY-END-2", status="complete"))
+        replies = [block.text for block in app.transcript.blocks if isinstance(block, AssistantBlock)]
+        self.assertEqual(replies, ["SLOW-START the first reply SLOW-END Reply #2 to: steer me. REPLY-END-2"])
+        drawn(app)
+        screen = "\n".join(app.terminal.screen.history())  # type: ignore[attr-defined]  # scrollback and the screen
+        for words in ("SLOW-START the first reply SLOW-END", "Reply #2 to: steer me. REPLY-END-2",
+                      "┃ ❯ steer me"):
+            self.assertEqual(screen.count(words), 1, screen)
+        self.assertLess(screen.index("REPLY-END-2"), screen.index("┃ ❯ steer me"), screen)
+
     def test_the_screen_shows_the_steer_waiting_then_once_in_scrollback(self) -> None:
         app, client = make_app(busy=True, rows=16)
         app._on_event(ev("message.start"))
         app._on_event(ev("tool.start", tool_id="t1", name="terminal", context="ls"))
         self.steer(app, "and the docs")
-        self.assertIn("↪ steer · and the docs", drawn(app))
+        self.assertIn("┃ ❯ and the docs", drawn(app))
         answer(app, client, {"status": "queued", "text": "and the docs"})
         app._on_event(ev("tool.complete", tool_id="t1", name="terminal", result={"output": ""}))
         app._on_event(ev("message.complete", text="done", status="complete"))
         drawn(app)
         screen = app.terminal.screen.history()  # type: ignore[attr-defined]  # scrollback and the screen
-        self.assertEqual(screen.count("↪ steer queued by Hermes · and the docs"), 1, screen)
-        self.assertNotIn("↪ steer · and the docs", screen)
+        self.assertEqual(screen.count("┃ ❯ and the docs"), 1, screen)  # the waiting row went; the row taken in stays
 
     def test_a_refused_steer_reads_in_amber_and_waits_in_the_queue(self) -> None:
         app, client = make_app(busy=True)
@@ -358,16 +386,16 @@ class UnansweredSteerTests(unittest.TestCase):
         taken = lines_text(app.transcript.take_stable_lines(100, THEME))  # what reaches scrollback
         self.assertNotIn("steer", " ".join(lines_text(app.transcript.live_lines(100, THEME))))  # nothing held back
         self.assertIn(self.BACK, taken)
-        self.assertEqual([method for method, _params in client.calls], ["session.steer"])  # nothing sent for it
+        self.assertEqual([method for method, _params in client.calls], ["session.redirect"])  # nothing sent for it
 
     def test_an_unanswered_steer_after_its_turn_ended_is_not_sent_as_a_prompt(self) -> None:
         app, client, steer = self.steered(Clock(), busy_after=False)
-        self.assertEqual([method for method, _params in client.calls], ["session.steer"])
+        self.assertEqual([method for method, _params in client.calls], ["session.redirect"])
         self.assertFalse(app._busy())
         self.assertEqual(app.composer.text, "an unrelated draft\nuse the other file")
         app._on_response(Response(steer, {"status": "queued"}, None))  # Hermes' late answer: it had taken it
         self.assertIn(steer, client.forgotten)
-        self.assertEqual([method for method, _params in client.calls], ["session.steer"])
+        self.assertEqual([method for method, _params in client.calls], ["session.redirect"])
         self.assertEqual(app.composer.text, "an unrelated draft\nuse the other file")  # given back once
         rows = [line_text(row) for block in app.transcript.blocks if isinstance(block, SteerBlock)
                 for row in block_rows(block, 100, THEME)]
@@ -484,21 +512,21 @@ class CommandPlacementTests(unittest.TestCase):
         self.assertEqual((block.command, block.done), ("/queue", True))
 
     def test_an_echo_still_waiting_for_hermes_stays_held_past_a_boundary_and_is_written_once(self) -> None:
-        app, client = self.mid_tool("/usage")
+        app, client = self.mid_tool("/btw cost so far")
         app._on_event(ev("tool.complete", tool_id="t1", name="terminal", result={"output": "1 passed"}))
-        app._on_event(ev("message.delta", text="Checking the cost."))  # a boundary while /usage is still out
+        app._on_event(ev("message.delta", text="Checking the cost."))  # a boundary while /btw is still out
         self.assertNotIn("CommandBlock", [type(block).__name__ for block in app.transcript.blocks])
         answer(app, client, {"output": "Session cost: $0.01"})
         app._on_event(ev("message.complete", text="Checking the cost.", status="complete"))
         echoes = [block for block in app.transcript.blocks if type(block).__name__ == "CommandBlock"]
-        self.assertEqual([(block.command, block.parts) for block in echoes], [("/usage", [("Session cost: $0.01", "info")])])
+        self.assertEqual([(block.command, block.parts) for block in echoes], [("/btw cost so far", [("Session cost: $0.01", "info")])])
 
     def test_a_commands_call_that_expires_mid_tool_says_so_under_its_echo_and_the_call_runs_on(self) -> None:
         clock = Clock()
         app, _client = make_app(busy=True, clock=clock)
         app._on_event(ev("message.start"))
         app._on_event(ev("tool.start", tool_id="t1", name="terminal", context="pytest -q"))
-        type_text(app, "/usage")
+        type_text(app, "/btw cost so far")
         app._on_input(Key(ENTER))
         clock.now += 3600
         app._expire_calls()
@@ -506,11 +534,11 @@ class CommandPlacementTests(unittest.TestCase):
         self.assertIsInstance(group, ToolGroup)
         self.assertEqual(group.tools[0].status, TOOL_RUNNING)
         self.assertEqual(lines_text(app.transcript.live_lines(140, THEME))[-2:],
-                         ["┃ ❯ /usage", "┃   ⎿  ⚠ Hermes has not answered slash.exec in 120 s; the OMH TUI stopped waiting for it."])
+                         ["┃ ❯ /btw cost so far", "┃   ⎿  ⚠ Hermes has not answered slash.exec in 120 s; the OMH TUI stopped waiting for it."])
 
     def usage_out_past_the_turn(self) -> tuple[object, object, int]:
-        """`/usage` typed over a running tool, the turn ended with it still out, and the next prompt streaming."""
-        app, client = self.mid_tool("/usage")
+        """`/btw` (a command that runs during a turn) typed over a running tool, the turn ended with it still out, and the next prompt streaming."""
+        app, client = self.mid_tool("/btw cost so far")
         usage = len(client.calls)
         app._on_event(ev("tool.complete", tool_id="t1", name="terminal", result={"output": "1 passed"}))
         app._on_event(ev("message.complete", text="done", status="complete"))
@@ -524,13 +552,13 @@ class CommandPlacementTests(unittest.TestCase):
         app, client, usage = self.usage_out_past_the_turn()
         kinds = [type(block).__name__ for block in app.transcript.blocks]
         self.assertEqual(kinds[:4], ["ToolGroup", "AssistantBlock", "CommandBlock", "TurnSummaryBlock"])
-        self.assertEqual(app.transcript.blocks[2].command, "/usage")  # dated in the turn it was typed in
+        self.assertEqual(app.transcript.blocks[2].command, "/btw cost so far")  # dated in the turn it was typed in
         app._on_response(Response(usage, {"output": "Session cost: $0.01"}, None))
         app._on_event(ev("message.complete", text="Second reply done.", status="complete"))
         replies = [block.text for block in app.transcript.blocks if isinstance(block, AssistantBlock)]
         self.assertEqual(replies, ["done", "Second reply done."])  # the late output did not split the reply
         echoes = [(block.command, block.parts) for block in app.transcript.blocks if isinstance(block, CommandBlock)]
-        self.assertEqual(echoes, [("/usage", []), ("/usage", [("Session cost: $0.01", "info")])])
+        self.assertEqual(echoes, [("/btw cost so far", []), ("/btw cost so far", [("Session cost: $0.01", "info")])])
         kinds = [type(block).__name__ for block in app.transcript.blocks]
         self.assertEqual(kinds[-3:], ["AssistantBlock", "CommandBlock", "TurnSummaryBlock"])  # under a repeat echo
 
@@ -541,7 +569,7 @@ class CommandPlacementTests(unittest.TestCase):
         replies = [block.text for block in app.transcript.blocks if isinstance(block, AssistantBlock)]
         self.assertEqual(replies, ["done", "Second reply goes on."])
         held = lines_text(app.transcript.live_lines(100, THEME))
-        self.assertEqual(held[-2:], ["┃ ❯ /usage", "┃   ⎿  ✗ Usage is unavailable."])
+        self.assertEqual(held[-2:], ["┃ ❯ /btw cost so far", "┃   ⎿  ✗ Usage is unavailable."])
 
     def test_output_for_an_echo_already_closed_waits_under_a_running_call(self) -> None:
         app, client = make_app()
@@ -594,7 +622,8 @@ class FinishedPlanTests(unittest.TestCase):
         self.app._take_hud()
 
     def headers(self) -> list[str]:
-        return [row for row in drawn(self.app) if row.startswith("[Plan]")]
+        # The header's right edge names what Ctrl+P does now (`ctrl+p fold`); the plan's own words come before it.
+        return [re.sub(r" {2,}ctrl\+p (fold|expand)$", "", row) for row in drawn(self.app) if row.startswith("[Plan]")]
 
     def notices(self) -> list[str]:
         return [block.text for block in self.app.transcript.blocks if isinstance(block, NoticeBlock)]
@@ -669,12 +698,16 @@ class SettledTailTests(unittest.TestCase):
                 app._render()
                 screen = app.terminal.screen.lines()
                 plan = next(index for index, line in enumerate(screen) if "[Plan]" in line)
-                # the spacer row every block opens with, then the panel
-                self.assertEqual(screen[plan - 1], "", "\n".join(screen[plan - 4 : plan + 1]))
-                self.assertTrue(screen[plan - 2].startswith("  ✻ "), "\n".join(screen[plan - 4 : plan + 1]))
+                done = max(index for index, line in enumerate(screen[:plan]) if line.startswith("  ✻ "))
+                # The spacer row every block opens with, then the panel. On the bottom rows the region keeps its
+                # height as the turn ends, but not the rows only the running turn had and nothing takes at its end:
+                # the blank row over the plan (2026-10-27 spacing). It stood here as a blank row until the next prompt
+                # (the owner's report of 2026-10-28); the region gives it up and the composer rises by it.
+                self.assertEqual(plan - done - 1, 1, "\n".join(screen[done - 1 : plan + 1]))
+                self.assertEqual(set(screen[done + 1 : plan]), {""}, "\n".join(screen[done - 1 : plan + 1]))
 
-    def test_the_prompt_and_its_sticky_echo_are_never_on_screen_together(self) -> None:
-        # A reply streams line by line under the prompt: the prompt shows until it scrolls off, the echo after.
+    def test_a_prompt_that_scrolls_off_is_never_echoed_above_the_composer(self) -> None:
+        # The owner removed the `↳ you: …` echo (2026-11-11): a prompt that scrolls off is read by scrolling up.
         for rows, cols, earlier in ((24, 80, 0), (24, 80, 60), (40, 100, 0), (40, 100, 60)):
             with self.subTest(rows=rows, cols=cols, earlier=earlier):
                 app, now = self.app_with_plan(rows, cols, earlier)
@@ -682,30 +715,21 @@ class SettledTailTests(unittest.TestCase):
                 app._render()
                 app._on_event(ev("message.start"))
                 app._render()
-                echoed = 0
+                scrolled = False
                 for index in range(rows * 2):
                     now[0] += 0.05
                     app._on_event(ev("message.delta", text=f"line {index}\n"))
                     app._render()
-                    screen = app.terminal.screen.lines()
-                    prompt = any(line.startswith("┃ ❯ run the tools") for line in screen)
-                    echo = any(line.startswith("↳ you: run the tools") for line in screen)
-                    self.assertFalse(prompt and echo, f"line {index}: the prompt and its echo are both on screen")
-                    self.assertTrue(prompt or echo, f"line {index}: the prompt scrolled off and nothing echoes it")
-                    echoed += echo
-                self.assertGreater(echoed, 0, "the prompt never scrolled off")
+                    scrolled = self.assert_no_echo(app, f"line {index}") or scrolled
+                self.assertTrue(scrolled, "the prompt never scrolled off")
 
-    def assert_prompt_xor_echo(self, app: object, where: str) -> bool:
-        """Exactly one of the prompt and its sticky echo is on screen; True when it is the echo."""
+    def assert_no_echo(self, app: object, where: str) -> bool:
+        """No `↳ you:` row is on screen; True when the prompt has scrolled off."""
         screen = app.terminal.screen.lines()  # type: ignore[attr-defined]
-        prompt = any(line.startswith("┃ ❯ run the tools") for line in screen)
-        echo = any(line.startswith("↳ you: run the tools") for line in screen)
-        self.assertFalse(prompt and echo, f"{where}: the prompt and its echo are both on screen\n" + "\n".join(screen))
-        self.assertTrue(prompt or echo, f"{where}: the prompt scrolled off and nothing echoes it")
-        return echo
+        self.assertFalse([line for line in screen if "↳ you:" in line], f"{where}: an echo row\n" + "\n".join(screen))
+        return not any(line.startswith("┃ ❯ run the tools") for line in screen)
 
-    def test_a_tall_tool_batch_never_shows_the_prompt_and_its_echo_together(self) -> None:
-        # The blank row above the prompt is not the prompt's: counted, the echo came one row early, over the prompt.
+    def test_a_tall_tool_batch_never_echoes_the_prompt(self) -> None:
         shapes = ((24, 80, 60, 8), (24, 80, 60, 14), (24, 80, 0, 14), (40, 100, 60, 14), (24, 80, 0, 2), (40, 100, 0, 2),
                   (40, 100, 0, 8))
         for rows, cols, earlier, tools in shapes:
@@ -719,14 +743,14 @@ class SettledTailTests(unittest.TestCase):
                     now[0] += 0.1
                     app._on_event(ev("tool.start", tool_id=f"t{index}", name="read_file", context=f"f{index}.py"))
                     app._render()
-                    self.assert_prompt_xor_echo(app, f"tool {index} started")
+                    self.assert_no_echo(app, f"tool {index} started")
                 for index in range(tools):
                     app._on_event(ev("tool.complete", tool_id=f"t{index}", name="read_file", result={"content": "x"}))
                     app._render()
-                    self.assert_prompt_xor_echo(app, f"tool {index} completed")
+                    self.assert_no_echo(app, f"tool {index} completed")
 
-    def test_the_frame_and_its_flush_are_one_write_so_no_state_between_them_shows(self) -> None:
-        # Written apart, the frame (echo drawn) showed for a moment over the prompt the flush had not yet moved.
+    def test_the_frame_and_its_flush_are_one_write(self) -> None:
+        # Written apart, a frame showed for a moment over rows the flush had not yet moved.
         from omh.tui.screen import SYNC_BEGIN
 
         for rows, cols, earlier, tools in ((24, 80, 0, 14), (24, 80, 60, 8), (40, 100, 0, 14)):
@@ -741,7 +765,7 @@ class SettledTailTests(unittest.TestCase):
                 def checked(text: str) -> None:  # every write reaches the screen as one feed
                     feed(text)
                     synced[-1] += text.count(SYNC_BEGIN)
-                    self.assert_prompt_xor_echo(app, "after one write")
+                    self.assert_no_echo(app, "after one write")
 
                 screen.feed = checked  # type: ignore[method-assign]
                 events = [ev("message.start")]
@@ -756,9 +780,8 @@ class SettledTailTests(unittest.TestCase):
                 self.assertLessEqual(max(synced), 1, "a render wrote more than one synchronized update")
                 self.assertIn(1, synced)
 
-    def test_a_resize_redraw_mid_turn_never_shows_the_prompt_and_its_echo_together(self) -> None:
-        # The redraw takes the session again from its top: only the rows from the prompt on are the prompt's,
-        # and the banner it prints again ahead of them is not.
+    def test_a_resize_redraw_mid_turn_never_echoes_the_prompt(self) -> None:
+        # The redraw takes the session again from its top, the banner it prints again included.
         cases = ((40, 100, 0, False), (40, 100, 60, False), (24, 80, 0, False), (24, 80, 60, False), (24, 80, 0, True))
         for rows, cols, earlier, banner in cases:
             with self.subTest(rows=rows, cols=cols, earlier=earlier, banner=banner):
@@ -777,14 +800,14 @@ class SettledTailTests(unittest.TestCase):
                 app._on_resize()
                 now[0] += 1.0
                 app._render_when_due()
-                self.assert_prompt_xor_echo(app, "after the resize redraw")
-                echoed = False
+                self.assert_no_echo(app, "after the resize redraw")
+                scrolled = False
                 for index in range(2, rows * 2):
                     now[0] += 0.05
                     app._on_event(ev("message.delta", text=f"line {index}\n"))
                     app._render()
-                    echoed = self.assert_prompt_xor_echo(app, f"line {index} after the redraw") or echoed
-                self.assertTrue(echoed, "the prompt never scrolled off after the redraw")
+                    scrolled = self.assert_no_echo(app, f"line {index} after the redraw") or scrolled
+                self.assertTrue(scrolled, "the prompt never scrolled off after the redraw")
 
 
 class ApprovalOutcomeTests(unittest.TestCase):
@@ -814,7 +837,7 @@ class ApprovalOutcomeTests(unittest.TestCase):
         self.assertEqual(group.tools[0].status, TOOL_RUNNING)  # Hermes reports what the call did next
 
     def test_allowing_reads_in_green(self) -> None:
-        for keys, words in (([Key(RIGHT)], "allowed once"), ([Key(RIGHT), Key(RIGHT)], "allowed for this session")):
+        for keys, words in (([], "allowed once"), ([Key(RIGHT)], "allowed for this session")):
             with self.subTest(words=words):
                 app, _client, _clock = self.asked()
                 for key in (*keys, Key(ENTER)):
@@ -838,11 +861,11 @@ class ApprovalOutcomeTests(unittest.TestCase):
     def test_the_answer_goes_under_the_call_that_asked_not_the_first_of_the_turn(self) -> None:
         # Review B: `✓ allowed once · …` stood above `⏺ read_file(README.md)`, the turn's first call.
         app, _client, clock = self.asked_after_a_read()
-        app._on_input(Key(RIGHT))
-        app._on_input(Key(ENTER))
+        app._on_input(Key(ENTER))  # allow once, where the approval opens
         (group,) = app.transcript.blocks
         rows = lines_text(block_rows(group, 80, THEME))
-        self.assertEqual(rows, ["┃ ● read_file(README.md)  0.1s", "┃   ⎿  Read 1 line", "", f"┃ ○ terminal({self.COMMAND})",
+        self.assertEqual(rows, ["┃ ● read_file(README.md)  0.1s", "┃   ⎿  Read 1 line", "", "",
+                                f"┃ ○ terminal({self.COMMAND})",
                                 f"┃   ⎿  ✓ allowed once · {self.COMMAND}"])
 
     def asked_after_a_read(self) -> tuple[object, object, Clock]:
@@ -880,8 +903,7 @@ class ApprovalOutcomeTests(unittest.TestCase):
         # A subagent's approval can arrive after the turn's own calls finished: none of them asked it.
         app, _client, _clock = self.asked_after_a_read()
         app._on_event(ev("tool.complete", tool_id="t1", name="terminal", duration_s=0.1, result={"output": ""}))
-        app._on_input(Key(RIGHT))
-        app._on_input(Key(ENTER))
+        app._on_input(Key(ENTER))  # allow once, where the approval opens
         notice, group = app.transcript.blocks
         self.assertEqual((notice.text, notice.level), (f"allowed once · {self.COMMAND}", NOTICE_OK))
         self.assertEqual([tool.answers for tool in group.tools], [[], []])

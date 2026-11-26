@@ -1,6 +1,6 @@
 ---
 name: "omh-commit-pr-authoring"
-description: "[omh] Commit message or pull-request body to write for a change: draft it in the repository's own convention, with `Tested:` listing only commands observed to run and everything prepared but not run under `Not-tested:`. Use when the user says: commit-pr-authoring, commit message, commit messages, write the commit message, draft the commit message, commit body, squash message, pr body."
+description: "[omh] Commit message or pull-request body to write: draft it for the change in the repository's own convention, with `Tested:` listing only commands observed to run and everything prepared but not run under `Not-tested:`. Use when the user says: commit-pr-authoring, commit message, commit messages, write the commit message, draft the commit message, commit body, squash message, pr body."
 license: MIT
 author: "oh-my-hermes maintainers"
 metadata:
@@ -15,62 +15,30 @@ metadata:
 
 # Commit Pr Authoring
 
-This is a Hermes-native `commit-pr-authoring` workflow skill.
+Required: the change: the diff, the staged files, or the branch compared with its base, the repository's PR template and a sample of its recent commit log, the commands that ran for this change, each with its observed exit status, the commands that were prepared, planned, or skipped, and why, the issue or goal the change closes, when there is one. Output: repo_convention_read/v1, evidence_ledger/v1, commit_message_draft/v1, pr_body_draft/v1 when a PR is being opened.
 
 ## Why This Exists
 
-`commit-pr-authoring` exists because nothing in the catalog authored the commit or the PR body. `code-review` reads a commit message as a thing to review and `github-event-ops` routes PR events, so the text an engineer writes several times a day had no owner, and nothing applied the observed-versus-prepared split to it.
+`commit-pr-authoring` exists because nothing in the catalog authored the commit or the PR body. `omh-code-review` reads a commit message as a thing to review and `omh-github-event-ops` routes PR events, so the text an engineer writes several times a day had no owner, and nothing applied the observed-versus-prepared split to it.
 
 ## First Steps
 
 - Read the PR template and the recent log, and record the convention before drafting.
 - Build the evidence ledger: each command, observed with its exit status or not_observed.
 
-## Do Not Use When
-
-- The request is to find defects in the diff or judge whether the change is ready; use `omh-code-review`.
-- The request routes an incoming pull-request, issue, or CI webhook event; use `omh-github-event-ops`.
-- The request turns a chat report into a GitHub issue; use `omh-github-issue-intake`.
-- The request is release notes or product copy for readers outside the repository; use `omh-content-operator`.
-
-## Examples
-
-Good example:
-
-- Prompt: write the commit message for this change, the unit tests ran but I did not run the e2e suite
-- Expected behavior: Read the log's subject shape and trailers, record the unit test command as observed and the e2e suite as not_observed, and draft the message with the unit tests under `Tested:` and the e2e suite under `Not-tested:`.
-- Why: The ledger decides which line each command lands on, not the wording of the request.
-
-Bad example:
-
-- Prompt: say the integration tests pass, they will once CI runs
-- Expected behavior: Keep the integration tests under `Not-tested:` until an observed run exists, and say CI has not been observed.
-- Why: A prediction worded as a result is exactly what `Tested:` must not carry.
-
-## Completion Checklist
-
-- The convention read names the template and log sample it drew from.
-- Every `Tested:` entry maps to an observed ledger row with its exit status.
-- Every prepared, skipped, or unobserved command is under `Not-tested:` with its reason.
-- The draft lists the paths to stage, and any state-claiming subject prefix maps to an observed ledger row.
-- Nothing was committed, pushed, or opened by OMH.
-
-## Recovery Notes
-
-- If no run records exist, draft with an empty `Tested:` and every command under `Not-tested:`, and ask for the observed output.
-- If the repository has no template or visible convention, say so and use a plain subject and body rather than importing one.
+Contract: `references/full-contract.md` (examples, sibling boundaries, full artifact details).
 
 ## Workflow Lane
 
-- Current lane: **Coding handoff** (`idea-to-deploy`, `llm-app-dev`, `cto-loop`, `deploy-and-monitor`, `code-review`, `build-failure-triage`, `verification-gate`, `security-safety-review`, `+28 more`) - coding owners, handoffs, review, CI, and merge evidence.
-- If intent belongs to another lane, hand back to `oh-my-hermes` or name the adjacent workflow.
+- Current lane: **Coding handoff** - coding owners, handoffs, review, CI, and merge evidence.
+- If intent belongs to another lane, hand back to `omh-routing` or name the adjacent workflow.
 - Shared product, routing, compatibility, and evidence rules: `skill_view(name='omh-routing', file_path='references/skill-common-rail.md')`.
 
 ## When to Use
 
 Use when a change is ready to record and the user wants its commit message or pull-request body written: the repository's template and recent log read first, the subject and body in that convention, the trailers the repo requires, and a `Tested:` line that lists only commands observed to run, with everything prepared but not run under `Not-tested:`. OMH prepares the text; the commit, the push, and the PR are the user's or the executor's.
 
-    Strong routing signals: `commit-pr-authoring`, `commit message`, `commit messages`, `write the commit message`, `draft the commit message`, `commit body`, `squash message`, `pr body`, `pr description`, `pull request body`, `pull request description`, `draft the pr`, `write the pr`, `pr template`, `tested trailer`, `not-tested trailer`, `lore trailers`
+    Strong routing signals: `commit-pr-authoring`, `commit message`, `commit messages`, `write the commit message`, `draft the commit message`, `commit body`, `squash message`, `pr body`, `pr description`, `pull request body`, `pull request description`, `draft the pr`, `write the pr`, `pr template`, `tested trailer`, `not-tested trailer`, `lore trailers`, `напиши коммит`, `сообщение коммита`, `описание пул реквеста`, `текст коммита`
 
 ## Catalog Metadata
 
@@ -86,33 +54,12 @@ Quality bar:
 - Build the evidence ledger first; the `Tested:` and validation sections are projections of it, not prose.
 - Write the subject in the repository's shape and the body as why the change exists, not a restated diff.
 - Load `references/commit-and-pr-conventions.md` for trailer, sign-off, and template-section mapping instead of improvising them.
+- Run `toolkit/scripts/merge_danger_scan.py` (usage in `toolkit/README.md`: `skill_view(name='omh-commit-pr-authoring', file_path='toolkit/README.md')`) on the unified diff before finalizing Risk/Rollout notes to catch migrations, lockfile churn, deleted public symbols, and secret prefixes.
 - Put `Closes #N` on its own line only when every success criterion of that issue is met.
 
 Handoff policy:
 
 Keep the convention read, the drafted text, and the evidence ledger in Hermes. The commit, the push, and opening the PR are executor or user actions; OMH never performs them, and a command reaches `Tested:` only from an observed run record.
-
-Required inputs:
-
-- the change: the diff, the staged files, or the branch compared with its base
-- the repository's PR template and a sample of its recent commit log
-- the commands that ran for this change, each with its observed exit status
-- the commands that were prepared, planned, or skipped, and why
-- the issue or goal the change closes, when there is one
-
-Expected outputs:
-
-- repo_convention_read/v1
-- evidence_ledger/v1
-- commit_message_draft/v1
-- pr_body_draft/v1 when a PR is being opened
-
-Artifact expectations:
-
-- repo_convention_read/v1 names the template path, the subject shape and trailers seen in the recent log, and the sign-off rule, or says which of them was not found
-- evidence_ledger/v1 lists every command with observed or not_observed; observed carries the exit status and where it was seen
-- commit_message_draft/v1 and pr_body_draft/v1 take `Tested:` and the validation section only from observed ledger rows
-- commit_message_draft/v1 lists the paths the commit covers, so whoever records it stages those paths and nothing else
 
 Safety rules:
 
@@ -124,13 +71,27 @@ Safety rules:
 - Do not claim CI, review, or merge state in the text unless it was observed, and name what was not.
 - Never put credentials, tokens, private URLs, or raw transcripts into a commit message or PR body.
 
+## Completion Checklist
+
+- The convention read names the template and log sample it drew from.
+- Every `Tested:` entry (or the validation line of a repository whose log has no such trailer) maps to an observed ledger row with its exit status.
+- Every prepared, skipped, or unobserved command is under `Not-tested:` (or "Not run" where the log has no trailers) with its reason.
+- The draft lists the paths to stage, and any state-claiming subject prefix maps to an observed ledger row.
+- Nothing was committed, pushed, or opened by OMH.
+- The commit text and the reply say what was not run in plain words; run record and evidence ledger are bookkeeping terms that stay out of both.
+
+## Recovery Notes
+
+- If no command run was observed, draft with an empty `Tested:` and every command under `Not-tested:`, and ask for the observed output.
+- If the repository has no template or visible convention, say so and use a plain subject and body rather than importing one.
+
 ## Runtime Evidence
 
 Record observed delegation results; otherwise return `not_available` or `not_observed`.
 Prepared OMH routing is not execution, review, CI, merge-readiness, or merge evidence.
 - Treat wrapper memory/context summaries as advisory local context, not proof of opaque Hermes memory reads or changes.
 Preserve workflow intent and stop conditions; verify before claiming completion.
-Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only; OMH's record terms (surface, lane, wrapper, handoff, evidence boundary, not_observed) stay in records and tool calls, never in the sentence the user reads unless they ask about one; and when a real unresolved user decision or a useful briefing discussion remains, offer one specific, content-linked question. Completed work needs no question; omit unrelated non-action footers and generic offers to continue.
+Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only. When the requested output is delivered, put any open points inside the result and end with no question or offer; only when the person asked to choose or decide and that choice is still theirs, end with one specific question about it, not a list, a generic offer, or a footer; the shared rail's Reply Language And Host Voice and Turn Ending sections hold the full rule.
 
 Use Hermes-native subagent/delegation features when available: native subagents -> Hermes delegation when available, otherwise sequential lanes.
 

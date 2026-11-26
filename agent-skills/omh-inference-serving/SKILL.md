@@ -1,6 +1,6 @@
 ---
 name: "omh-inference-serving"
-description: "[omh] Self-hosted LLM serving on GPUs: choose the serving engine and quantization from decision tables, prepare deployment as an idempotent runbook with observed-only verification, and measure the endpoint with the standard TTFT/TPOT/goodput protocol. Use when the user says: inference-serving, inference serving, serve this model, serve the model, model serving, serving endpoint, vllm, llama.cpp."
+description: "[omh] Self-hosted LLM serving on GPUs: choose the serving engine…"
 license: MIT
 metadata:
   hermes:
@@ -25,13 +25,14 @@ This is an OMH `inference-serving` workflow skill, projected for Agent Skills ho
 - The user wants their own machine's model routing or providers configured.
 - The question is whether a coding runtime/executor can run at all.
 - The goal is application or system performance rather than the serving endpoint itself; use `ulw-perf`.
+- The ask is producing the smaller weights -- GPTQ or AWQ calibration, pruning, or a distilled student -- and proving they still do the task; use `omh-model-compression`.
 
 ## Examples
 
 Good example:
 
 - Prompt: Serve Qwen on our two A100s for the team and tell me if prefix caching is worth turning on.
-- Expected behavior: Engine verdict (vLLM, TP as a power of two), quantization check, the k8s or docker runbook with its gates and verification, then the prefix-cache A/B protocol with hit-rate assumptions recorded - numbers only from observed runs.
+- Expected behavior: Engine verdict (vLLM, TP dividing the head counts), quantization check, the k8s or docker runbook with its gates and verification, then the prefix-cache A/B protocol with hit-rate assumptions recorded - numbers only from observed runs.
 - Why: Serving plus a measured tuning question is exactly the decide-deploy-measure process this workflow owns.
 
 Bad example:
@@ -70,10 +71,11 @@ Reasoning demand: `light`
 
 Quality bar:
 
-- Decide before deploying: engine from the situation table (vLLM for multi-user NVIDIA APIs, llama.cpp for CPU/Apple Silicon/edge, TensorRT-LLM only with ops budget), quantization to match (AWQ/GPTQ/FP8 vs the GGUF ladder with `Q4_K_M` default), tensor parallel a power of two.
+- Decide before deploying: engine from the situation table (vLLM for multi-user NVIDIA APIs, llama.cpp for CPU/Apple Silicon/edge, TensorRT-LLM only with ops budget), quantization to match (AWQ/GPTQ/FP8 vs the GGUF ladder with `Q4_K_M` default), tensor parallel head-divisible.
 - Deploy as the gated runbook: docker's three load-bearing flags (`--ipc=host`, HF cache mount, `HF_TOKEN`) or the Kubernetes five-step (secret gate, existing-deployment gate, apply, rollout+readiness verify, summary+smoke); the port invariant touches four places or it did not change the port.
 - Troubleshoot from the symptom table first - slow TTFT to prefix caching/chunked prefill, OOM to gpu-memory-utilization/max-model-len/quantization - before inventing flags.
 - Measure with the protocol: TTFT/TPOT/ITL/E2EL as mean/median/P99, goodput against an explicit SLO, one load shape per run, results saved with metadata; the full contract is `omh-inference-serving/references/serving-bench.md`.
+- Run `toolkit/scripts/vram_kv_calc.py` (usage in `toolkit/README.md`: `skill_view(name='omh-inference-serving', file_path='toolkit/README.md')`) for offline weight, KV-cache, tensor-parallel divisibility, and max-concurrency arithmetic instead of estimating VRAM by hand.
 - Report observed-only: each runbook step is prepared until its command's exit status and output are seen.
 
 Required inputs:
@@ -95,6 +97,7 @@ Artifact expectations:
 - serving decision and runbook per `omh-inference-serving/references/serving-runbooks.md`
 - benchmark protocol per `omh-inference-serving/references/serving-bench.md`
 - result files with metadata only after observed runs
+- optional offline VRAM/KV-cache/TP budget via `toolkit/scripts/vram_kv_calc.py` (`vram_kv_budget/v1`, calculated estimate only)
 
 Safety rules:
 

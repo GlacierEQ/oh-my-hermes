@@ -64,16 +64,32 @@ def checked_support_path(root: Path, relative: str) -> Path:
 def builtin_skill_support_templates():
     from .show_reel_support import show_reel_support_templates
     from .geospatial_analysis_skill import geospatial_analysis_support_templates
+    from .sprite_forge_skill import sprite_forge_support_templates
     from .biomedical_evidence_skill import biomedical_evidence_support_templates
     from .molecular_docking_skill import molecular_docking_support_templates
     from .ai_job_search_skill import ai_job_search_support_templates
+    from .frontend_support import frontend_toolkit_support_templates
+    from .channel_watch_support import channel_watch_support_templates
+    from .pr_watch_support import pr_watch_support_templates
+    from .monitor_watch_support import monitor_watch_support_templates
+    from .data_share_review_support import data_share_review_support_templates
+    from .commit_pr_authoring_support import commit_pr_authoring_support_templates
+    from .inference_serving_support import inference_serving_support_templates
 
     return validate_support_templates([
         *show_reel_support_templates(),
         *geospatial_analysis_support_templates(),
+        *sprite_forge_support_templates(),
         *biomedical_evidence_support_templates(),
         *molecular_docking_support_templates(),
         *ai_job_search_support_templates(),
+        *frontend_toolkit_support_templates(),
+        *channel_watch_support_templates(),
+        *pr_watch_support_templates(),
+        *monitor_watch_support_templates(),
+        *data_share_review_support_templates(),
+        *commit_pr_authoring_support_templates(),
+        *inference_serving_support_templates(),
     ])
 
 

@@ -1,7 +1,9 @@
 """Catalog-generated Agent Skills files, independent of Hermes configuration.
 
-Host-selected installs have one portable receipt; unselected installs duplicate
-one manifest at both roots. Roots come from the invocation, never the manifest.
+Host-selected installs have one portable receipt; unselected installs write a
+receipt at each root, sharing `target_dirs`, each listing that root's bytes (the
+`.claude/skills` copy bounds descriptions for Claude Code's listing). Updates reuse an
+installed user pack's receipt.
 A partial write cannot report fresh: status compares every destination's bytes.
 """
 from __future__ import annotations
@@ -26,12 +28,112 @@ CLAIM_BOUNDARY = (
 )
 
 
+# The two directories any installer writes. Cursor and opencode load both, so
+# a pack in each is every skill twice (docs/AGENT-SKILLS.md#duplicate-copies).
+PACK_ROOTS = (".agents/skills", ".claude/skills")
+
+
+def sibling_pack_root(root: str) -> str:
+    return PACK_ROOTS[1] if root == PACK_ROOTS[0] else PACK_ROOTS[0]
+
+
+def duplicate_pack_warnings(target: Path) -> list[str]:
+    """Warn, never refuse: Claude Code plus a .agents host legitimately needs both."""
+    base = target.parent.parent
+    if not all((base / root / MANIFEST_NAME).is_file() for root in PACK_ROOTS):
+        return []
+    return [
+        f"OMH Agent Skills are installed in both {base / PACK_ROOTS[0]} and {base / PACK_ROOTS[1]}. "
+        "Cursor and opencode load both directories and find each skill twice; Codex and OpenClaw "
+        "read only .agents/skills, and Claude Code only .claude/skills. Keep the copy your host reads "
+        "(install with --host <host>) and remove the other: see docs/AGENT-SKILLS.md#duplicate-copies."
+    ]
+
+
 def agent_skill_files() -> dict[str, str]:
     """The same packaged producer drives install and the committed byte gate."""
     files = {f"{t.name}/SKILL.md": t.content for t in agent_skill_templates()}
     files.update({f"{t.skill_name}/{t.relative_path}": t.content for t in agent_skill_reference_templates()})
     files.update({f"{t.skill_name}/{t.relative_path}": t.content for t in agent_skill_support_templates()})
     return files
+
+
+# Claude Code lists every skill's name and description inside a budget and drops
+# descriptions past it (docs/AGENT-SKILLS.md#claude-code-skill-listing). The
+# portable pack now lists only each skill's situation clause (and its picker
+# aliases), which already fits, so the Claude copy equals it today; the cut below
+# stays as the Claude copy's bound and matches the 220-character per-description
+# bound the portable budget test enforces (OpenClaw's compact listing cut).
+CLAUDE_DESCRIPTION_CAP = 220
+CLAUDE_TRIGGER_MARKER = " Use when the user says:"
+CLAUDE_CUT_MARK = "…"
+_CLAUSE_ENDS = (". ", ": ", "; ", ", ", " -- ")
+_FUNCTION_WORDS = frozenset(
+    "a an the and or of to for with in on instead of before after that which when".split()
+)
+
+
+def _frontmatter_description(content: str) -> str | None:
+    """The JSON-quoted `description:` value of a generated SKILL.md, or None."""
+    if not content.startswith("---\n"):
+        return None
+    for line in content.split("\n---\n", 1)[0].splitlines()[1:]:
+        if line.startswith("description: "):
+            value = json.loads(line.removeprefix("description: "))
+            return value if isinstance(value, str) else None
+    return None
+
+
+def _ends_on_function_word(text: str) -> bool:
+    words = text.rstrip(" .,;:-").split()
+    return bool(words) and words[-1].lower() in _FUNCTION_WORDS
+
+
+def shorten_description(description: str, cap: int = CLAUDE_DESCRIPTION_CAP) -> str:
+    """The lead before the trigger list; over `cap`, cut at a clause or word boundary and marked with `…`."""
+    lead = description.partition(CLAUDE_TRIGGER_MARKER)[0].strip()
+    if len(lead) <= cap:
+        # Nothing is cut, so nothing is reworded: a lead that ends "you can act on." keeps its last word,
+        # and one the portable projection already marked as cut keeps its `…`.
+        return lead if lead.endswith(CLAUDE_CUT_MARK) else lead.rstrip(" .,;:-") + "."
+    floor = int(cap * 0.6)
+    cuts = [position for position in (lead.rfind(end, 0, cap) for end in _CLAUSE_ENDS) if position >= floor - 1]
+    clause = max(cuts, default=-1)
+    candidate = lead[:clause] if clause >= 0 else lead[: cap - 1].rsplit(" ", 1)[0]
+    while _ends_on_function_word(candidate) and " " in candidate:
+        candidate = candidate.rsplit(" ", 1)[0]
+    # A cut is marked as a cut: a full stop here would pass off half a list as a whole sentence.
+    return candidate.rstrip(" .,;:-") + CLAUDE_CUT_MARK
+
+
+def claude_skill_files(files: dict[str, str] | None = None) -> dict[str, str]:
+    """The Claude Code copy of the portable pack: same files, descriptions bounded for its listing.
+
+    Only a SKILL.md's frontmatter `description:` value can change: the text
+    before a trigger list, cut to `CLAUDE_DESCRIPTION_CAP`. The portable
+    descriptions carry no trigger list and fit the cap, so today the copy is
+    byte-identical to the portable pack. All skills stay listed and
+    model-invocable; references and toolkit files are unchanged. A SKILL.md
+    without a generated `description:` line is copied as is.
+    """
+    source = agent_skill_files() if files is None else files
+    result = dict(source)
+    for relative, content in source.items():
+        name, _, rest = relative.partition("/")
+        if rest != "SKILL.md" or _frontmatter_description(content) is None:
+            continue
+        head, separator, body = content.partition("\n---\n")
+        lines = head.split("\n")
+        at = next(index for index, line in enumerate(lines) if line.startswith("description: "))
+        text = shorten_description(_frontmatter_description(content) or "")
+        lines[at] = f"description: {json.dumps(text, ensure_ascii=False)}"
+        result[relative] = "\n".join(lines) + separator + body
+    return result
+
+
+def pack_files_for_root(root: Path) -> dict[str, str]:
+    """The bytes a pack root holds: the Claude copy under `.claude/skills`, the portable pack elsewhere."""
+    return claude_skill_files() if (root.name, root.parent.name) == ("skills", ".claude") else agent_skill_files()
 
 
 def agent_skills_targets(scope: str, *, host: str | None = None) -> tuple[Path, Path | None]:
@@ -127,12 +229,17 @@ def agent_skills_manifest(files: dict[str, str], *, roots: tuple[Path, ...] = ()
 
 def agent_skills_status(target: Path, *, mirror: Path | None = None) -> dict[str, Any]:
     roots = (target.absolute(),) if mirror is None else (target.absolute(), mirror.absolute())
-    files = agent_skill_files()
-    expected = agent_skills_manifest(files, roots=roots)
     modified: list[str] = []
     states = []
     installed_revisions = []
+    revisions = []
     for index, root in enumerate(roots):
+        # Each root is compared with its own bytes: a `.claude/skills` copy
+        # carries the Claude listing change, an `.agents/skills` copy does not.
+        files = pack_files_for_root(root)
+        expected = agent_skills_manifest(files, roots=roots)
+        portable_expected = agent_skills_manifest(files)
+        revisions.append(expected["catalog_revision"])
         manifest = _read_manifest(root)
         installed_revisions.append(manifest["catalog_revision"] if manifest else "")
         if manifest is None:
@@ -142,38 +249,138 @@ def agent_skills_status(target: Path, *, mirror: Path | None = None) -> dict[str
             path = _checked_path(root, relative)
             if not path.is_file() or sha256_file(path) != digest:
                 modified.append(relative if index == 0 else f"mirror:{relative}")
-        matches = manifest == expected and all(
+        # A host-selected receipt stays portable even when status also probes
+        # the sibling root used by an unselected install.
+        matches = manifest in (expected, portable_expected) and all(
             _checked_path(root, relative).is_file()
             and sha256_file(root / relative) == digest
             for relative, digest in expected["files"].items()
         )
         states.append("fresh" if matches else "stale")
-    projection = "missing" if "missing" in states else "stale" if "stale" in states else "fresh"
+    projection = (
+        states[0] if len(states) == 2 and states[1] == "missing"
+        else "missing" if "missing" in states else "stale" if "stale" in states else "fresh"
+    )
+    warnings = duplicate_pack_warnings(target.absolute())
+    if len(states) == 2 and states[0] != "missing" and states[1] == "missing":
+        scope = "user" if target.resolve() == Path.home().resolve() / ".agents/skills" else "repo"
+        warnings.append(
+            f"The mirror copy at {roots[1]} is absent; the primary pack is {states[0]}. "
+            f"To create both copies, run `omh install --target agents --scope {scope}`."
+        )
     return {
         "schema_version": SCHEMA_VERSION,
-        "catalog_revision": expected["catalog_revision"],
+        "catalog_revision": revisions[0],
         "installed_revisions": installed_revisions,
         "target_dirs": [str(root) for root in roots],
         "projection": projection,
+        "primary": states[0],
+        "mirror": states[1] if len(states) == 2 else "none",
         "drift": "locally_modified" if modified else "unknown" if "missing" in states else "clean",
         "locally_modified": sorted(modified),
         "next_action": (
-            "Review or back up locally-modified files; rerun the same install command to replace them."
+            "Edited toolkit files are never replaced: back up each locally-modified file, move the "
+            "toolkit ones aside, then rerun the same install command."
+            if any("/toolkit/" in relative for relative in modified)
+            else "Review or back up locally-modified files; rerun the same install command to replace them."
             if modified else "Rerun the same install command to generate the current catalog."
             if projection != "fresh" else "No repair needed; host use remains not_observed."
         ),
+        "warnings": warnings,
         "host_observation": "not_observed",
         "claim_boundary": CLAIM_BOUNDARY,
     }
 
 
+USER_HOME_ENV = "OMH_AGENT_SKILLS_HOME"
+
+
+def agent_skills_user_home() -> Path:
+    """The home whose `.agents/skills` pack update and doctor look after.
+
+    `OMH_AGENT_SKILLS_HOME` overrides the user home; the test process sets it
+    to a temp root, so no test run can refresh or read the developer's real
+    Codex pack (the same leak `OMH_HOME` closes for the OMH home).
+    Resolved, because `omh install --scope user` records resolved roots in a
+    mirrored receipt: an unresolved home behind a symlink would never match.
+    """
+    override = os.environ.get(USER_HOME_ENV, "").strip()
+    return (Path(override).expanduser() if override else Path.home()).resolve()
+
+
+def installed_receipt_roots(target: Path, manifest: dict[str, Any]) -> tuple[Path, Path | None]:
+    """The roots a user-scope receipt at `target` covers: `(target, mirror)`.
+
+    A portable receipt (`target_dirs == ["."]`) is the single target. A
+    mirrored one must list exactly this target and its sibling
+    `.claude/skills` (the only mirror `omh install --scope user` writes);
+    anything else is refused, so a receipt can never point a refresh at an
+    arbitrary directory. Doctor and update share this reader.
+    """
+    directories = manifest["target_dirs"]
+    if directories == ["."]:
+        return target, None
+    resolved_target = target.resolve()
+    expected_mirror = resolved_target.parent.parent / ".claude/skills"
+    if (len(directories) != 2 or not all(Path(item).is_absolute() for item in directories)
+            or Path(directories[0]).resolve() != resolved_target
+            or Path(directories[1]).resolve() != expected_mirror):
+        raise ValueError(f"Invalid installed user Agent Skills target_dirs: {directories!r}")
+    return resolved_target, expected_mirror
+
+
+def _changed_file_count(roots: tuple[Path, ...]) -> int:
+    changed = 0
+    for root in roots:
+        for relative, content in pack_files_for_root(root).items():
+            path = _checked_path(root, relative)
+            if not path.is_file() or path.read_bytes() != content.encode("utf-8"):
+                changed += 1
+    return changed
+
+
+def refresh_installed_agent_skills(home: Path, *, dry_run: bool) -> dict[str, Any] | None:
+    """Refresh only an existing user .agents pack, preserving its install layout.
+
+    A mirrored receipt whose `.claude/skills` copy the user removed (as
+    docs/AGENT-SKILLS.md#duplicate-copies advises) refreshes the primary
+    alone and is rewritten as a single-target receipt: update never
+    re-creates a copy that is not there.
+    """
+    target = home.resolve() / ".agents/skills"
+    if not (target / MANIFEST_NAME).exists():
+        return None
+    manifest = _read_manifest(target)
+    if manifest is None:
+        return None
+    target, mirror = installed_receipt_roots(target, manifest)
+    mirror_skipped = mirror is not None and _read_manifest(mirror) is None
+    if mirror_skipped:
+        mirror = None
+    roots = (target,) if mirror is None else (target, mirror)
+    names = [str(root) for root in roots]
+    result: dict[str, Any] = {"mirror_skipped": mirror_skipped}
+    if dry_run:
+        return {"would_refresh": names, **result}
+    before = agent_skills_status(target, mirror=mirror)
+    changed = _changed_file_count(roots)
+    after = install_agent_skills(target, mirror=mirror)
+    return {
+        "target_dirs": names,
+        "projection_before": before["projection"],
+        "projection_after": after["projection"],
+        "refreshed_files": changed,
+        **result,
+    }
+
+
 def install_agent_skills(target: Path, *, mirror: Path | None = None) -> dict[str, Any]:
     roots = (target.absolute(),) if mirror is None else (target.absolute(), mirror.absolute())
-    files = agent_skill_files()
+    packs = [pack_files_for_root(root) for root in roots]
     manifests = [_read_manifest(root) for root in roots]
     # Preflight all destinations before writing either scope or mirror. Preserve
     # unrelated host skills and refuse conflicting files OMH never installed.
-    for root, previous in zip(roots, manifests):
+    for root, previous, files in zip(roots, manifests, packs):
         for relative, content in files.items():
             path = _checked_path(root, relative)
             owned = relative in (previous or {}).get("files", {})
@@ -183,9 +390,9 @@ def install_agent_skills(target: Path, *, mirror: Path | None = None) -> dict[st
                 raise ValueError(f"Agent Skills refuses edited support: {path}")
             if path.exists() and not owned and (not path.is_file() or path.read_bytes() != content.encode("utf-8")):
                 raise ValueError(f"Agent Skills refuses unowned file collision: {path}")
-    manifest = agent_skills_manifest(files, roots=roots)
-    manifest_text = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
-    for root, previous in zip(roots, manifests):
+    for root, previous, files in zip(roots, manifests, packs):
+        # Each root's receipt lists its own bytes; a mirrored pair shares `target_dirs`.
+        manifest_text = json.dumps(agent_skills_manifest(files, roots=roots), indent=2, sort_keys=True) + "\n"
         for relative, content in files.items():
             atomic_write_text(_checked_path(root, relative), content)
         for relative in (previous or {}).get("files", {}).keys() - files.keys():

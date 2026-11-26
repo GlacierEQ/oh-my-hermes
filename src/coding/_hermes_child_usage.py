@@ -11,14 +11,17 @@ persisted: every API call of the turn queues its token deltas, priced cost,
 quiet CLI exits. The dispatcher hands every child a disposable, exclusive
 ``HERMES_HOME``, so after the child exits and before that home is removed,
 every ``sessions`` row in the file is this child's spend and nothing else's.
-The child runs with ``--toolsets file --safe-mode``, so no delegate subagent
-opens a row of its own and a context-compression rotation is the only source
-of a second row; summing all rows therefore reproduces the agent's own
-cumulative counters, which is what the ``-z`` report summarized. That
-equivalence depends on the toolset restriction: a delegate child writes its
-own ``sessions`` row, and the ``-z`` main-loop keys exclude subagent tokens
-while its cost includes them, so a later ``--toolsets`` widening that admits
-delegation has to revisit this sum.
+A ``--toolsets file --safe-mode`` child opens no delegate subagent, so a
+context-compression rotation is the only source of a second row, and summing
+all rows reproduces the agent's own cumulative counters, which is what the
+``-z`` report summarized. A paired-run arm whose run declared ``delegation``
+can start Hermes' own ``delegate_task`` children, and each writes a
+``sessions`` row of its own (``source = 'subagent'``). Token and API-call
+counts are per-row deltas and still sum to the whole job. Cost does not:
+Hermes folds the children's cost into the parent's running total, so a sum of
+the parent and child rows may count the children twice. When any row is a
+subagent's, the cost and the ``cost_status``/``cost_source`` that explain it
+are left out, so the usage says unmeasured instead of a doubled figure.
 
 This is a read-only coupling to a Hermes-private file shape. The columns read
 here have been in the ``sessions`` table since Hermes 2026-04 (the cost trio
@@ -57,16 +60,37 @@ _TEXT_COLUMNS: Final = (
 )
 _MAX_TEXT_CHARS: Final = 200
 _SELECT: Final = (
-    "SELECT " + ", ".join((*_COUNT_COLUMNS, "estimated_cost_usd", *(column for column, _key in _TEXT_COLUMNS)))
+    "SELECT id, source, "
+    + ", ".join((*_COUNT_COLUMNS, "estimated_cost_usd", *(column for column, _key in _TEXT_COLUMNS)))
     + " FROM sessions ORDER BY started_at, rowid"
 )
+_SUBAGENT_SOURCE: Final = "subagent"
+_COST_KEYS: Final = ("estimated_cost_usd", "cost_status", "cost_source")
 
 
 class _StateDbUnreadable(ValueError):
     """The disposable home holds no readable ``state.db``."""
 
 
-def read_hermes_child_usage(hermes_home: Path) -> dict[str, object]:
+def state_session_ids(hermes_home: Path) -> frozenset[str]:
+    """The ``sessions`` ids already in a home, so a later read can leave them out."""
+    try:
+        _path, connection = open_state_db_readonly(hermes_home, error=_StateDbUnreadable)
+    except (_StateDbUnreadable, OSError):
+        return frozenset()
+    try:
+        return frozenset(str(row[0]) for row in connection.execute("SELECT id FROM sessions").fetchall())
+    except sqlite3.Error:
+        return frozenset()
+    finally:
+        connection.close()
+
+
+def read_hermes_child_usage(
+    hermes_home: Path,
+    *,
+    exclude: frozenset[str] = frozenset(),
+) -> dict[str, object]:
     """Sum the ``sessions`` rows of a finished child's disposable home into one usage record.
 
     Empty when the database is missing, is not a database, lacks the columns,
@@ -81,20 +105,24 @@ def read_hermes_child_usage(hermes_home: Path) -> dict[str, object]:
     except (_StateDbUnreadable, OSError):
         return {}
     try:
-        rows = connection.execute(_SELECT).fetchall()
+        selected = [row for row in connection.execute(_SELECT).fetchall() if str(row[0]) not in exclude]
     except sqlite3.Error:
         return {}
     finally:
         connection.close()
-    return summarize_session_rows(rows)
+    return summarize_session_rows(
+        [row[2:] for row in selected],
+        has_subagents=any(row[1] == _SUBAGENT_SOURCE for row in selected),
+    )
 
 
-def summarize_session_rows(rows: list[tuple[object, ...]]) -> dict[str, object]:
+def summarize_session_rows(rows: list[tuple[object, ...]], *, has_subagents: bool = False) -> dict[str, object]:
     """Fold ``sessions`` rows (in ``started_at`` order) into the ``-z`` report vocabulary.
 
     Counts and cost are summed across rows; for ``model``, ``provider``,
     ``cost_status`` and ``cost_source`` the latest row's non-``None`` value
     wins, mirroring Hermes' own last-call-wins update of those columns.
+    With ``has_subagents`` the cost keys are left out (see the module note).
     """
     counts = {column: 0 for column in _COUNT_COLUMNS}
     cost_total: float | None = None
@@ -122,6 +150,9 @@ def summarize_session_rows(rows: list[tuple[object, ...]]) -> dict[str, object]:
     if cost_total is not None:
         usage["estimated_cost_usd"] = cost_total
     usage.update(text)
+    if has_subagents:
+        for key in _COST_KEYS:
+            usage.pop(key, None)
     return usage
 
 

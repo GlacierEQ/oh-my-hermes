@@ -34,6 +34,7 @@ from omh.commands.setup import _sync_hermes_profiles, read_config  # noqa: E402
 from omh.commands import setup as setup_module  # noqa: E402
 from omh.install.config_adapter import external_dirs, plugin_omh_home_setting  # noqa: E402
 from omh.install.installer import uninstall_skill_pack  # noqa: E402
+from omh.install.lifecycle_safety import store_removal_plan  # noqa: E402
 from omh.system.paths import OmhPaths  # noqa: E402
 
 
@@ -126,6 +127,12 @@ class SharedStoreUninstallTests(_Fixture):
         bot.mkdir(parents=True)
         private = self.root / "private-omh"
         private.mkdir()
+        # An unshared path is not ownership evidence: install the real pack.
+        status, _, stderr = run_cli([
+            "--hermes-home", str(bot), "--omh-home", str(private),
+            "setup", "--core", "--yes", "--no-interactive", "--no-menubar", "--json",
+        ])
+        self.assertEqual(status, 0, stderr)
         _write(private / "runtime" / "record.json", "{}\n")
         self._profile_binding(bot, private)
         # The primary uses A, not private/skills: private really is unshared.
@@ -176,10 +183,72 @@ class SharedStoreUninstallTests(_Fixture):
         self.assertNotIn(self.omh.resolve(),
                          {Path(value).resolve() for value in json.loads(stdout)["removed_paths"]})
 
+    def test_a_skills_reference_spelled_through_a_variable_still_protects_a_shared_store(self) -> None:
+        # Hermes expands `${VAR}` in `skills.external_dirs`, so the primary
+        # still loads skills from this store and the profile's uninstall
+        # must keep it. Read with `~` only, the entry named nothing.
+        bot = self.hermes / "profiles" / "bot"
+        self._profile_binding(bot, self.omh)
+        self._profile_binding(self.hermes, self.root / "primary-runtime")
+        config_path = self.hermes / "config.yaml"
+        config_path.write_bytes(config_path.read_bytes() + b"skills:\n  external_dirs:\n    - ${OMH_TEST_SHARED_STORE}/skills\n")
+        paths = OmhPaths(omh_home=self.omh, hermes_home=bot)
+
+        with mock.patch.dict(os.environ, {"OMH_TEST_SHARED_STORE": self.omh.as_posix()}):
+            plan = store_removal_plan(paths, remove_profiles=False)
+
+        self.assertEqual((plan["status"], plan["homes"]), ("kept", [str(self.hermes)]))
+
+    def test_a_skills_reference_relative_to_its_home_still_protects_a_shared_store(self) -> None:
+        # Hermes anchors a relative entry at its own home, so `../omh/skills`
+        # in the primary names this store whatever directory uninstall runs
+        # from. Resolved against an unrelated cwd it named nothing.
+        bot = self.hermes / "profiles" / "bot"
+        self._profile_binding(bot, self.omh)
+        self._profile_binding(self.hermes, self.root / "primary-runtime")
+        config_path = self.hermes / "config.yaml"
+        config_path.write_bytes(config_path.read_bytes() + b"skills:\n  external_dirs:\n    - ../omh/skills\n")
+        paths = OmhPaths(omh_home=self.omh, hermes_home=bot)
+
+        with TemporaryDirectory() as unrelated:
+            cwd = os.getcwd()
+            os.chdir(unrelated)
+            try:
+                plan = store_removal_plan(paths, remove_profiles=False)
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual((plan["status"], plan["homes"]), ("kept", [str(self.hermes)]))
+
+    def test_a_skills_reference_relative_to_a_second_profile_protects_the_store(self) -> None:
+        # The twin of the primary case: the reference sits in another bot
+        # profile and is read under that profile's own home, where
+        # `../../../omh/skills` reaches this store. Anchored at the primary,
+        # or at the cwd, it names nothing.
+        bot = self.hermes / "profiles" / "bot"
+        other = self.hermes / "profiles" / "other"
+        self._profile_binding(bot, self.omh)
+        self._profile_binding(self.hermes, self.root / "primary-runtime")
+        self._profile_binding(other, self.root / "other-runtime")
+        config_path = other / "config.yaml"
+        config_path.write_bytes(config_path.read_bytes() + b"skills:\n  external_dirs:\n    - ../../../omh/skills\n")
+        paths = OmhPaths(omh_home=self.omh, hermes_home=bot)
+
+        with TemporaryDirectory() as unrelated:
+            cwd = os.getcwd()
+            os.chdir(unrelated)
+            try:
+                plan = store_removal_plan(paths, remove_profiles=False)
+            finally:
+                os.chdir(cwd)
+
+        self.assertEqual((plan["status"], plan["homes"]), ("kept", [str(other)]))
+
     def test_shared_store_dry_run_does_not_delete_or_rewrite_files(self) -> None:
         """Mutation control, independently of whether the proposed plan is safe."""
         bot = self.hermes / "profiles" / "bot"
         bot.mkdir(parents=True)
+        _write(bot / "SOUL.md", "Bot profile identity.\n")
         self._setup_primary()
         _write(self.omh / "runtime" / "sentinel.json", '{"keep": true}\n')
         before = self._file_snapshot(self.root)
@@ -195,6 +264,7 @@ class SharedStoreUninstallTests(_Fixture):
     def test_shared_store_dry_run_does_not_plan_store_deletion(self) -> None:
         bot = self.hermes / "profiles" / "bot"
         bot.mkdir(parents=True)
+        _write(bot / "SOUL.md", "Bot profile identity.\n")
         self._setup_primary()
 
         status, stdout, stderr = run_cli(
@@ -289,6 +359,59 @@ class RegistrationOptOutTests(_Fixture):
             self.assertEqual(self._file_snapshot(directory), snapshots[directory])
 
 
+    def test_registration_only_removes_every_spelling_setup_retires_and_no_user_dir(self) -> None:
+        # Setup retires `../omh/skills` and `${VAR}/skills` as the managed
+        # store's skills; the opt-out must take them out as well, or the next
+        # update reads the home as registered again. A relative entry naming
+        # the person's own directory, and a foreign one, stay.
+        self._setup_primary()
+        personal = self.root / "personal" / "skills"
+        _write(personal / "mine" / "SKILL.md", "# not owned by OMH\n")
+        foreign = self.root / "foreign" / "skills"
+        _write(foreign / "theirs" / "SKILL.md", "# not owned by OMH\n")
+        config_path = self.hermes / "config.yaml"
+        text = config_path.read_text(encoding="utf-8")
+        managed = [entry for entry in external_dirs(text) if Path(entry).resolve() == (self.omh / "skills").resolve()]
+        self.assertEqual(len(managed), 1, external_dirs(text))
+        spelled = "    - ../omh/skills\n    - ${OMH_TEST_STORE}/skills/\n    - ../personal/skills\n" + f"    - {foreign}\n"
+        config_path.write_bytes(text.replace(f"    - {managed[0]}\n", spelled).encode("utf-8"))
+        self.assertEqual(
+            external_dirs(read_config(config_path)),
+            ["../omh/skills", "${OMH_TEST_STORE}/skills/", "../personal/skills", str(foreign)],
+        )
+
+        with mock.patch.dict(os.environ, {"OMH_TEST_STORE": self.omh.as_posix()}):
+            status, _, stderr = run_cli(
+                ["--hermes-home", str(self.hermes), "--omh-home", str(self.omh), "uninstall", "--registration-only"]
+            )
+
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(external_dirs(read_config(config_path)), ["../personal/skills", str(foreign)])
+        self.assertTrue((personal / "mine" / "SKILL.md").is_file())
+
+    def test_registration_only_reads_a_profile_s_spellings_from_the_profile_s_own_home(self) -> None:
+        # The profile twin: `../../../omh/skills` in `profiles/bot` is the
+        # managed store's skills only when read from that profile's home.
+        # Read from the primary's it names nothing and the opt-out would
+        # leave it; the profile-relative personal entry still stays.
+        self._setup_primary()
+        bot = self.hermes / "profiles" / "bot"
+        personal = self.root / "personal" / "skills"
+        _write(personal / "mine" / "SKILL.md", "# not owned by OMH\n")
+        entries = ["../../../omh/skills", "${OMH_TEST_STORE}/skills/", "../../../personal/skills"]
+        _write(bot / "config.yaml", "skills:\n  external_dirs:\n" + "".join(f"    - {entry}\n" for entry in entries))
+        self.assertEqual(external_dirs(read_config(bot / "config.yaml")), entries)
+
+        with mock.patch.dict(os.environ, {"OMH_TEST_STORE": self.omh.as_posix()}):
+            status, _, stderr = run_cli(
+                ["--hermes-home", str(bot), "--omh-home", str(self.omh), "uninstall", "--registration-only"]
+            )
+
+        self.assertEqual(status, 0, stderr)
+        self.assertEqual(external_dirs(read_config(bot / "config.yaml")), ["../../../personal/skills"])
+        self.assertTrue((personal / "mine" / "SKILL.md").is_file())
+
+
 class CorruptProfileUpdateTests(_Fixture):
     """F3: a bad profile is a named row, never an uncaught exception."""
 
@@ -303,6 +426,11 @@ class CorruptProfileUpdateTests(_Fixture):
         good = self.hermes / "profiles" / "z-good"
         bad.mkdir(parents=True)
         good.mkdir()
+        _write(good / "SOUL.md", "Healthy profile identity.\n")
+        ghost = self.hermes / "profiles" / "log-cache-shell"
+        _write(ghost / "logs" / "sentinel", "Keep incidental runtime files.\n")
+        (ghost / "cache").mkdir()
+        ghost_before = self._file_snapshot(ghost)
         (bad / "config.yaml").write_bytes(b"plugins:\n  x: \xff\n")
         bad_before = self._file_snapshot(bad)
 
@@ -323,6 +451,9 @@ class CorruptProfileUpdateTests(_Fixture):
         self.assertIn("z-good", by_profile)
         self.assertNotEqual(by_profile["z-good"]["status"], "failed")
         self.assertTrue((good / "plugins" / "omh").is_dir())
+        self.assertNotIn("log-cache-shell", by_profile)
+        self.assertEqual(self._file_snapshot(ghost), ghost_before)
+        self.assertEqual(sorted(p.name for p in ghost.iterdir()), ["cache", "logs"])
 
     def test_oserror_profile_config_is_a_named_failure(self) -> None:
         good = self.hermes / "profiles" / "z-good"
@@ -380,6 +511,7 @@ class UpdateJsonTests(_Fixture):
     def test_update_json_reports_a_profile_refresh_failure(self) -> None:
         bot = self.hermes / "profiles" / "bot"
         bot.mkdir(parents=True)
+        _write(bot / "SOUL.md", "Bot profile identity.\n")
         status, _, stderr = run_cli(
             [
                 "--hermes-home",
@@ -445,7 +577,9 @@ class GenerationOwnershipTests(_Fixture):
 
     @requires_symlinks
     def test_uninstall_removes_an_installer_owned_generation(self) -> None:
+        self._setup_primary()
         store, generation, generation_venv, bin_dir = self._generation_layout()
+        _write(generation_venv / "pyvenv.cfg", "home = synthetic-python\n")
         paths = OmhPaths(omh_home=self.omh, hermes_home=self.hermes)
 
         with mock.patch.dict(

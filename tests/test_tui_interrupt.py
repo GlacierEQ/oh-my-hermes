@@ -14,10 +14,13 @@ from __future__ import annotations
 import unittest
 
 from _tui_lines import lines_text
+from test_tui_app import info_row_of
+from test_tui_choice_ui import armed, press
 from test_tui_modes import SID, answer, drawn, make_app, notices, type_text
-from omh.tui.app import INTERRUPTING, QUEUE_HELD_HINT, QueuedLine, queue_lines
+from test_tui_questions import COLOUR, TELL_APPROVAL
+from omh.tui.app import EXIT_CONFIRM_SECONDS, UnsentPrompt, EXIT_HINT, INTERRUPTING, QUEUE_HELD_HINT, QueuedLine, Rewind, queue_lines
 from omh.tui.gateway import Event
-from omh.tui.keys import CHAR, ENTER, ESCAPE, UP, Key
+from omh.tui.keys import CHAR, DOWN, ENTER, ESCAPE, UP, Key
 from omh.tui.theme import DEFAULT_THEME
 from omh.tui.transcript import NOTICE_ERROR
 
@@ -33,6 +36,76 @@ def running(*queued: QueuedLine):
 
 def submitted(client) -> list[str]:
     return [params["text"] for params in client.named("prompt.submit")]
+
+
+class EscWithADraftTests(unittest.TestCase):
+    """Enter never interrupts a turn, so Esc is the one-key stop, as in Claude Code: with a draft too, which stays."""
+
+    def test_esc_with_a_draft_during_a_turn_interrupts_and_keeps_the_draft(self) -> None:
+        app, client = running(QueuedLine("queued"))
+        type_text(app, "half a thought")
+        app._on_input(Key(ESCAPE))
+        self.assertEqual(client.named("session.interrupt"), [{"session_id": SID}])
+        self.assertEqual(app.composer.text, "half a thought")
+        self.assertIsNone(app.escape_armed)  # nothing armed: a second Esc does not clear the draft
+        app._on_event(INTERRUPTED)
+        self.assertEqual(app.composer.text, "half a thought")  # what was queued waits instead of joining it
+        self.assertEqual([line.text for line in app.queued], ["queued"])
+
+    def test_esc_over_a_draft_while_a_prompt_is_unsent_leaves_the_draft_and_queues_the_prompt(self) -> None:
+        # #2726 review: the unsent prompt (its images still staging) used to come back after the draft.
+        app, client = make_app()
+        app.unsent.append(UnsentPrompt("the staging prompt", ()))
+        app.turn_pending = True  # it started the turn; nothing reached Hermes yet
+        type_text(app, "my draft")
+        app._on_input(Key(ESCAPE))
+        self.assertEqual(app.composer.text, "my draft")
+        self.assertEqual([line.text for line in app.queued], ["the staging prompt"])
+        self.assertTrue(app.queue_held)  # no turn ends to send it: it waits for the person, Up takes it back
+        self.assertEqual(client.named("prompt.submit"), [])
+
+    def test_esc_with_a_draft_between_turns_interrupts_nothing_and_still_clears_on_the_second(self) -> None:
+        app, client = make_app()
+        type_text(app, "a draft")
+        app._on_input(Key(ESCAPE))
+        self.assertEqual(client.calls, [])
+        self.assertEqual(app.composer.text, "a draft")
+        app._on_input(Key(ESCAPE))
+        self.assertEqual((client.calls, app.composer.text), ([], ""))
+
+    def test_esc_with_the_slash_menu_open_only_closes_it(self) -> None:
+        app, client = running()
+        type_text(app, "/he")
+        self.assertTrue(app._menu_entries())
+        app._on_input(Key(ESCAPE))
+        self.assertEqual(client.named("session.interrupt"), [])
+        self.assertEqual(app.composer.text, "/he")
+        self.assertFalse(app._menu_entries())
+        app._on_input(Key(ESCAPE))  # the menu is closed: Esc is the interrupt again
+        self.assertEqual(client.named("session.interrupt"), [{"session_id": SID}])
+
+    def test_in_vim_mode_esc_still_takes_two_on_an_empty_composer_and_never_stops_a_turn_over_a_draft(self) -> None:
+        app, client = running()
+        app.composer.set_vim(True)
+        app._on_input(Key(ESCAPE))  # INSERT to NORMAL
+        app._on_input(Key(ESCAPE))  # arms
+        self.assertEqual(client.named("session.interrupt"), [])
+        app._on_input(Key(ESCAPE))
+        self.assertEqual(client.named("session.interrupt"), [{"session_id": SID}])
+        drafted, drafted_client = running()
+        drafted.composer.set_vim(True)
+        type_text(drafted, "a draft")
+        for _ in range(3):
+            drafted._on_input(Key(ESCAPE))
+        self.assertEqual(drafted_client.named("session.interrupt"), [])
+
+    def test_ctrl_c_with_a_draft_during_a_turn_still_clears_it_first(self) -> None:
+        app, client = running()
+        type_text(app, "a draft")
+        app._on_input(CTRL_C)
+        self.assertEqual((client.named("session.interrupt"), app.composer.text), ([], ""))
+        app._on_input(CTRL_C)
+        self.assertEqual(client.named("session.interrupt"), [{"session_id": SID}])
 
 
 class InterruptingRowTests(unittest.TestCase):
@@ -141,9 +214,158 @@ class QueueAfterInterruptTests(unittest.TestCase):
         self.assertFalse(app.interrupting)
 
     def test_the_held_rows_say_why_they_wait(self) -> None:
-        rows = lines_text(queue_lines(["!ls"], 60, 3, DEFAULT_THEME, hint=QUEUE_HELD_HINT))
-        self.assertTrue(rows[0].endswith(QUEUE_HELD_HINT), rows)
+        rows = lines_text(queue_lines([("!ls", (), ())], 60, DEFAULT_THEME, hint=QUEUE_HELD_HINT))
+        self.assertEqual(rows, ["", "┃ ❯ !ls", f"  ⎿  {QUEUE_HELD_HINT}"])
+        self.assertEqual(QUEUE_HELD_HINT, "Held · ↑ to edit")
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CtrlCExitTests(unittest.TestCase):
+    """The Ctrl+C that interrupts a turn also arms the exit, so a second one leaves while the turn is still stopping."""
+
+    def test_a_second_ctrl_c_while_the_turn_is_still_stopping_exits(self) -> None:
+        now = [100.0]
+        app, client = make_app(busy=True, clock=lambda: now[0])
+        app._on_input(CTRL_C)
+        self.assertEqual(client.named("session.interrupt"), [{"session_id": SID}])
+        screen = drawn(app)
+        self.assertIn(INTERRUPTING, "\n".join(screen))  # the working row stays, and the info line names the exit
+        self.assertIn(EXIT_HINT, info_row_of(screen))
+        now[0] += 0.4
+        app._on_input(CTRL_C)
+        self.assertEqual(app.exit_code, 0)
+        self.assertTrue(app.interrupting)  # Hermes had not stopped the turn yet
+        self.assertEqual(len(client.named("session.interrupt")), 1)  # the second press leaves; it does not ask again
+
+    def test_past_the_window_a_ctrl_c_mid_turn_interrupts_again_and_arms_again(self) -> None:
+        now = [100.0]
+        app, client = make_app(busy=True, clock=lambda: now[0])
+        app._on_input(CTRL_C)
+        now[0] += EXIT_CONFIRM_SECONDS + 0.1
+        app._expire_exit()
+        self.assertNotIn(EXIT_HINT, info_row_of(drawn(app)))
+        app._on_input(CTRL_C)
+        self.assertIsNone(app.exit_code)
+        self.assertEqual(len(client.named("session.interrupt")), 2)
+        self.assertIn(EXIT_HINT, info_row_of(drawn(app)))
+
+    def test_ctrl_c_with_a_draft_clears_it_and_neither_interrupts_nor_arms(self) -> None:
+        app, client = make_app(busy=True)
+        type_text(app, "half a thought")
+        app._on_input(CTRL_C)
+        self.assertEqual(app.composer.text, "")
+        self.assertIsNone(app.exit_armed_at)
+        self.assertEqual(client.named("session.interrupt"), [])
+
+    def test_ctrl_c_on_a_question_declines_it_and_arms_nothing(self) -> None:
+        app, client = make_app(busy=True)
+        app._on_server_request(COLOUR)
+        armed(app)
+        app._on_input(CTRL_C)
+        self.assertIsNone(app.slot)
+        self.assertEqual(len(client.answers), 1)  # the decline
+        self.assertIsNone(app.exit_armed_at)
+        self.assertIsNone(app.exit_code)
+
+    def test_the_armed_second_press_exits_when_the_queue_came_back_into_the_composer(self) -> None:
+        # QA B3: the queue came back between the presses, and the second press cleared it instead of leaving.
+        now = [100.0]
+        app, client = make_app(busy=True, clock=lambda: now[0])
+        app.queued.append(QueuedLine("a queued prompt"))
+        app._on_input(CTRL_C)
+        app._on_event(INTERRUPTED)
+        self.assertEqual(app.composer.text, "a queued prompt")
+        self.assertIn(EXIT_HINT, info_row_of(drawn(app)))
+        now[0] += 0.6
+        app._on_input(CTRL_C)
+        self.assertEqual(app.exit_code, 0)
+        self.assertEqual(app.composer.text, "a queued prompt")  # not cleared; what was queued is in history too
+        self.assertEqual(submitted(client), [])
+
+    def test_the_armed_second_press_exits_over_a_draft_when_idle_too(self) -> None:
+        now = [100.0]
+        app, _client = make_app(clock=lambda: now[0])
+        app._on_input(CTRL_C)
+        type_text(app, "kept")
+        self.assertIn(EXIT_HINT, info_row_of(drawn(app)))  # what the line promises is what the press does
+        now[0] += 0.5
+        app._on_input(CTRL_C)
+        self.assertEqual(app.exit_code, 0)
+        self.assertEqual(app.composer.text, "kept")
+
+    def test_past_the_window_ctrl_c_clears_what_came_back_and_does_not_exit(self) -> None:
+        now = [100.0]
+        app, _client = make_app(busy=True, clock=lambda: now[0])
+        app.queued.append(QueuedLine("a queued prompt"))
+        app._on_input(CTRL_C)
+        app._on_event(INTERRUPTED)
+        now[0] += EXIT_CONFIRM_SECONDS + 0.1
+        app._on_input(CTRL_C)
+        self.assertIsNone(app.exit_code)
+        self.assertEqual(app.composer.text, "")
+
+    def test_any_ctrl_c_the_composer_takes_exits_once_armed(self) -> None:
+        # The composer takes Ctrl+C with Shift or Alt held as Ctrl+C: the armed press must too, not clear the text.
+        for key in (Key(CHAR, "c", ctrl=True, shift=True), Key(CHAR, "c", ctrl=True, alt=True)):
+            with self.subTest(key=key):
+                now = [100.0]
+                app, _client = make_app(clock=lambda: now[0])
+                app._on_input(CTRL_C)
+                type_text(app, "kept")
+                now[0] += 0.5
+                app._on_input(key)
+                self.assertEqual(app.exit_code, 0)
+                self.assertEqual(app.composer.text, "kept")
+
+    def test_an_idle_arm_gives_a_rewind_or_a_tell_its_own_keys_and_no_exit(self) -> None:
+        now = [100.0]
+        app, _client = make_app(clock=lambda: now[0])
+        app._on_input(CTRL_C)  # no turn: arms only
+        app.rewind = Rewind(row_id=7, ordinal=2, before=())
+        app._set_composer("picked prompt")
+        self.assertNotIn(EXIT_HINT, info_row_of(drawn(app)))
+        now[0] += 0.5
+        app._on_input(CTRL_C)
+        self.assertIsNone(app.exit_code)
+
+        app, _client = make_app(clock=lambda: now[0])
+        app._on_input(CTRL_C)  # no turn: arms only
+        app._on_server_request(TELL_APPROVAL)
+        armed(app)
+        press(app, *[Key(DOWN)] * 3, Key(ENTER))  # the tell row: a field of its own
+        self.assertIsNotNone(app.tell_draft)
+        self.assertNotIn(EXIT_HINT, info_row_of(drawn(app)))
+        app._on_input(CTRL_C)  # on the empty field
+        self.assertIsNone(app.exit_code)
+        type_text(app, "go left")
+        app._on_input(CTRL_C)
+        self.assertIsNone(app.exit_code)
+
+    def test_after_an_interrupt_the_second_press_exits_from_a_rewind_or_a_tell_too(self) -> None:
+        # The owner's rule (#2302): the press that interrupts arms the exit, and the next within 2 s leaves.
+        now = [100.0]
+        app, client = make_app(busy=True, clock=lambda: now[0])
+        app._on_input(CTRL_C)
+        app.rewind = Rewind(row_id=7, ordinal=2, before=())
+        app._set_composer("picked prompt")
+        self.assertIn(EXIT_HINT, info_row_of(drawn(app)))
+        now[0] += 0.5
+        app._on_input(CTRL_C)
+        self.assertEqual((app.exit_code, len(client.named("session.interrupt"))), (0, 1))
+
+        for typed in ("", "go left"):
+            with self.subTest(typed=typed):
+                app, client = make_app(busy=True, clock=lambda: now[0])
+                app._on_server_request(TELL_APPROVAL)
+                armed(app)
+                press(app, *[Key(DOWN)] * 3, Key(ENTER))  # the tell row: the turn goes on
+                app._on_input(CTRL_C)  # on the empty field: interrupts and arms
+                self.assertEqual(len(client.named("session.interrupt")), 1)
+                self.assertIsNotNone(app.tell_draft)
+                self.assertIn(EXIT_HINT, info_row_of(drawn(app)))
+                type_text(app, typed)
+                app._on_input(CTRL_C)
+                self.assertEqual((app.exit_code, len(client.named("session.interrupt"))), (0, 1))

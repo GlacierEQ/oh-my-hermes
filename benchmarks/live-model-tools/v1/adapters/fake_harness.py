@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -26,6 +27,67 @@ def locations(routes: Path):
     return rows
 
 
+# Reference-only edits for the lsp-ab rename templates (what a semantic rename produces).
+SEMANTIC_RENAMES = {
+    "RENAME-ALIAS": {
+        "src/benchapp/quota.py": [("def compute_quota(units", "def allocate_quota(units")],
+        "src/benchapp/api.py": [("import compute_quota", "import allocate_quota"), ('["compute_quota"]', '["allocate_quota"]')],
+        "src/benchapp/service.py": [("import compute_quota as", "import allocate_quota as")],
+        "src/benchapp/report.py": [("quota.compute_quota(units)", "quota.allocate_quota(units)")],
+        "tests/test_quota.py": [("api import compute_quota", "api import allocate_quota"), ("assert compute_quota(", "assert allocate_quota(")],
+    },
+    "RENAME-SHADOW": {
+        "src/benchapp/limits.py": [("def parse_limit(", "def read_limit(")],
+        "src/benchapp/cli.py": [("import parse_limit", "import read_limit"), ("return parse_limit(", "return read_limit(")],
+        "src/benchapp/batch.py": [("limits.parse_limit)", "limits.read_limit)")],
+        "tests/test_limits.py": [("limits import parse_limit", "limits import read_limit"), ("assert parse_limit(", "assert read_limit(")],
+    },
+    "RENAME-EXPORTS": {
+        "src/benchapp/store/rows.py": [("def fetch_rows(", "def load_rows(")],
+        "src/benchapp/store/__init__.py": [("import ROW_LIMIT, fetch_rows", "import ROW_LIMIT, load_rows"), ('"fetch_rows"', '"load_rows"')],
+        "src/benchapp/loader.py": [("import fetch_rows,", "import load_rows,"), ("(fetch_rows(count))", "(load_rows(count))")],
+        "tests/test_store.py": [("import fetch_rows", "import load_rows"), ("assert fetch_rows(", "assert load_rows(")],
+    },
+}
+
+
+# Reference edits for the impact-ab templates: (path, regex, replacement), applied in order.
+IMPACT_EDITS = {
+    "SIGNATURE": [
+        ("src/benchapp/pricing.py", r"rate_bp: int\) -> int:", "rate_bp: int, minimum_cents: int) -> int:"),
+        ("src/benchapp/pricing.py", r"return amount_cents \* rate_bp // 10000", "return max(amount_cents * rate_bp // 10000, minimum_cents)"),
+        ("src/benchapp/billing.py", r"\(amount_cents, (\d+)\)", r"(amount_cents, \1, 0)"),
+        ("src/benchapp/invoices.py", r"\(amount_cents, (\d+)\)", r"(amount_cents, \1, 0)"),
+        ("src/benchapp/report.py", r"\(amount_cents, 100\)", "(amount_cents, 100, 0)"),
+        ("src/benchapp/cli.py", r", 50\)", ", 50, 0)"),
+        ("tests/test_pricing.py", r"compute_fee\(10000, 250\)", "compute_fee(10000, 250, 0)"),
+    ],
+    "RETURN-SHAPE": [
+        ("src/benchapp/quotes.py", r'"""Quotes."""\n', '"""Quotes."""\n\nfrom dataclasses import dataclass\n'),
+        ("src/benchapp/quotes.py", r"def build_quote\(units: int\) -> dict\[str, int\]:\n    return \{\"units\": units, \"total_cents\": units \* UNIT_PRICE_CENTS\}",
+         "@dataclass(frozen=True)\nclass Quote:\n    units: int\n    total_cents: int\n\n\ndef build_quote(units: int) -> Quote:\n    return Quote(units, units * UNIT_PRICE_CENTS)"),
+        ("src/benchapp/checkout.py", r'quote\["total_cents"\]', "quote.total_cents"),
+        ("src/benchapp/emailer.py", r"quote\['units'\]", "quote.units"),
+        ("src/benchapp/ledger.py", r'\(quote\["units"\], quote.get\("total_cents", 0\)\)', "(quote.units, quote.total_cents)"),
+        ("tests/test_quotes.py", r'quote\["total_cents"\]', "quote.total_cents"),
+    ],
+    "KWARG": [
+        ("src/benchapp/http_client.py", r"\*, timeout: float", "*, timeout_s: float"),
+        ("src/benchapp/http_client.py", r'"timeout": timeout,', '"timeout": timeout_s,'),
+        ("src/benchapp/sync.py", r"timeout=", "timeout_s="),
+        ("src/benchapp/crawler.py", r'\{"timeout":', '{"timeout_s":'),
+        ("src/benchapp/health.py", r"timeout=", "timeout_s="),
+    ],
+    "CONTROL": [
+        ("src/benchapp/units.py", r"    return int\(round", "    if amount < 0:\n        raise ValueError('negative amount')\n    return int(round"),
+    ],
+    "DEFAULTED": [
+        ("src/benchapp/shipping.py", r"zone: int\) -> int:", "zone: int, *, handling_cents: int = 0) -> int:"),
+        ("src/benchapp/shipping.py", r"(    return weight_g \* zone \* \d+ // 1000)", r"\1 + handling_cents"),
+    ],
+}
+
+
 def main():
     request = json.loads(Path(os.environ["LMT_REQUEST"]).read_text(encoding="utf-8"))
     workspace = Path(os.environ["LMT_WORKSPACE"])
@@ -38,6 +100,57 @@ def main():
             path.write_text(path.read_text(encoding="utf-8").replace("DEFAULT_RETRY_LIMIT", "MAX_RETRY_ATTEMPTS"), encoding="utf-8")
         events.append({"sequence":1,"name":"edit","mutating":True,"arguments_digest":"0"*64,"started_ms":0,"ended_ms":1,"result":"success"})
         answer = {"changed_paths":["src/benchapp/retries.py","tests/test_retries.py"]}
+    elif name in SEMANTIC_RENAMES:
+        changed = []
+        for relative, edits in SEMANTIC_RENAMES[name].items():
+            path = workspace / relative
+            text = path.read_text(encoding="utf-8")
+            for before, after in edits:
+                if before not in text:
+                    raise SystemExit(f"fake rename anchor missing in {relative}: {before}")
+                text = text.replace(before, after)
+            path.write_text(text, encoding="utf-8")
+            changed.append(relative)
+        events.append({"sequence":1,"name":"edit","mutating":True,"arguments_digest":"0"*64,"started_ms":0,"ended_ms":1,"result":"success"})
+        answer = {"changed_paths":sorted(changed)}
+    elif name == "DUPLICATE":
+        changed = []
+        for path in sorted((workspace / "src/benchapp").glob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            if "ROUND_HALF_EVEN" in text:
+                path.write_text(text.replace("ROUND_HALF_EVEN", "ROUND_HALF_UP"), encoding="utf-8")
+                changed.append(path.relative_to(workspace).as_posix())
+        events.append({"sequence":1,"name":"edit","mutating":True,"arguments_digest":"0"*64,"started_ms":0,"ended_ms":1,"result":"success"})
+        answer = {"changed_paths":changed}
+    elif name == "DECOY":
+        path = next(p for p in sorted((workspace / "src/benchapp").glob("*.py"))
+                    if "ROUND_HALF_EVEN" in p.read_text(encoding="utf-8") and "intentionally" not in p.read_text(encoding="utf-8"))
+        path.write_text(path.read_text(encoding="utf-8").replace("ROUND_HALF_EVEN", "ROUND_HALF_UP"), encoding="utf-8")
+        events.append({"sequence":1,"name":"edit","mutating":True,"arguments_digest":"0"*64,"started_ms":0,"ended_ms":1,"result":"success"})
+        answer = {"changed_paths":[path.relative_to(workspace).as_posix()]}
+    elif name == "TEST-UPDATE":
+        sizes, test = workspace / "src/benchapp/sizes.py", workspace / "tests/test_sizes.py"
+        sizes.write_text(sizes.read_text(encoding="utf-8").replace('"kib": 1000', '"kib": 1024'), encoding="utf-8")
+        test.write_text(re.sub(r"kib\"\) == (\d+)000", lambda m: f'kib") == {int(m.group(1)) * 1024}', test.read_text(encoding="utf-8")),
+                        encoding="utf-8")
+        events.append({"sequence":1,"name":"edit","mutating":True,"arguments_digest":"0"*64,"started_ms":0,"ended_ms":1,"result":"success"})
+        answer = {"changed_paths":["src/benchapp/sizes.py", "tests/test_sizes.py"]}
+    elif name == "SCOPE-TRAP":
+        path = workspace / "src/benchapp/units.py"
+        path.write_text(path.read_text(encoding="utf-8").replace('{"s": 60,', '{"s": 1,'), encoding="utf-8")
+        events.append({"sequence":1,"name":"edit","mutating":True,"arguments_digest":"0"*64,"started_ms":0,"ended_ms":1,"result":"success"})
+        answer = {"changed_paths":["src/benchapp/units.py"]}
+    elif name in IMPACT_EDITS:
+        changed = []
+        for relative, pattern, replacement in IMPACT_EDITS[name]:
+            path = workspace / relative
+            text, count = re.subn(pattern, replacement, path.read_text(encoding="utf-8"))
+            if count != 1:
+                raise SystemExit(f"fake impact anchor matched {count} times in {relative}: {pattern}")
+            path.write_text(text, encoding="utf-8")
+            changed.append(relative)
+        events.append({"sequence":1,"name":"edit","mutating":True,"arguments_digest":"0"*64,"started_ms":0,"ended_ms":1,"result":"success"})
+        answer = {"changed_paths":sorted(set(changed))}
     elif name == "BUGFIX":
         path = workspace / "src/benchapp/provider_select.py"
         text = path.read_text(encoding="utf-8")

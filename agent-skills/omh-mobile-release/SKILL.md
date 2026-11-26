@@ -1,6 +1,6 @@
 ---
 name: "omh-mobile-release"
-description: "[omh] Releasing an iOS or Android app through the stores -- signing, the privacy manifest, a TestFlight or Play beta, a staged rollout, a hotfix: prepare each gate the store enforces, and plan the halt and the next build before the rollout starts, because a store release cannot be rolled back. Use when the user says: mobile-release, mobile release, mobile app release, ios release, android release, app store release, app store submission, submit to the app store."
+description: "[omh] Releasing an iOS or Android app through a store."
 license: MIT
 metadata:
   hermes:
@@ -17,7 +17,7 @@ This is an OMH `mobile-release` workflow skill, projected for Agent Skills hosts
 
 ## Why This Exists
 
-`mobile-release` exists because store releases had no owner: `release-cut` decides a service release that can roll back, `deploy-and-monitor` watches a deploy, and `production-audit` audits readiness platform-neutrally, while signing, a privacy manifest, a TestFlight beta or a Play staged rollout had nothing that knew the store's gates.
+`mobile-release` exists because store releases had no owner: `omh-release-cut` decides a service release that can roll back, `omh-deploy-and-monitor` watches a deploy, and `omh-production-audit` audits readiness platform-neutrally, while signing, a privacy manifest, a TestFlight beta or a Play staged rollout had nothing that knew the store's gates.
 
 ## First Steps
 

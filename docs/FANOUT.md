@@ -29,17 +29,18 @@ environment is a separate contract with its own default of least privilege:
    expensive for agent context.
    For user-facing briefings, `omh coding fanout brief <id>` renders one
    line per unit in merge-plan order — unit, owner, `(model effort)` label
-   (for example `(gpt-5.6-sol xhigh)`), status, elapsed seconds, token
+   (for example `(gpt-6.1-sol xhigh)`), status, elapsed seconds, token
    count, session ref, last observed summary — as plain text by default
    with `--json` for the `fanout_briefing/v1` payload. It joins the
    contract, the persisted dispatch summary, and a one-event journal tail;
    unknown fields stay the literal `unknown` rather than being inferred,
    and never-dispatched units keep `prepared_not_observed`. Without an id
-   it lists known fanouts. Session refs and token counts are `unknown`
-   until a structured-output dispatch contract lands (deliberate deferral
-   — the current templates keep executor stdout as opaque bounded text);
-   executor-progress bindings for `omh runtime progress-status` are
-   deferred with that same follow-up.
+   it lists known fanouts. Session refs and token counts come from the
+   executor's structured output when the resolved binary negotiates one
+   (Codex JSON lines, Claude Code stream JSON) and stay the literal
+   `unknown` otherwise; see
+   [Fanout Executor Evidence](FANOUT-EXECUTOR-EVIDENCE.md) and
+   [Coding Observability](CODING-OBSERVABILITY.md).
 5. **Merge (human/agent-gated)** — dispatch never merges. The summary lists
    merge-ready units in the contract's `merge_order`; merging and the final
    integration gate remain the operator's or reviewing agent's job.
@@ -76,7 +77,19 @@ on the operator's own owner-naming message) typing the command.
 ```sh
 omh coding run --owner claude-code --goal "Research pricing approaches and write a summary." \
   [--goal-file prompt.md] [--unit-id run] [--file-scope . ] [--repo-root .] [--base-ref HEAD] \
-  [--timeout 1800] [--dry-run] [--run-verification] [--model opus] [--effort high]
+  [--timeout 1800] [--dry-run] [--run-verification] [--verification-command <cmd> ...] \
+  [--model opus] [--effort high]
+```
+
+`--verification-command` (repeatable, one command each, at most 8) is the
+single run's own `verification_commands`, frozen through the same checks a
+fanout unit's are, and declaring one implies `--run-verification`. Without
+one, a run whose work completed ends `unverified`, never `verified`:
+
+```sh
+omh coding run --owner codex --goal "write one line to NOTES.md" --file-scope NOTES.md \
+  --verification-command "test -f NOTES.md" \
+  --verification-command "grep -qx 'OMH green B' NOTES.md"
 ```
 
 The claude-code dispatch template's `--allowedTools "Bash(git add:*),Bash(git
@@ -222,23 +235,37 @@ Rules, all applied at freeze time:
   the prepared ceiling on what one unit may read; it is not evidence that the
   unit read the range, stayed within the budget, or covered it.
 
+Any unit may also declare an optional `review_focus`: one string, at most 150
+UTF-8 bytes after whitespace collapse (one sentence; about 50 Hangul
+characters). It never pushes the unit prompt over its 8,000-byte ceiling:
+when the whole focus would, it is cut at a character boundary to the bytes
+left and ends in an ellipsis, or dropped when not even its label fits, and a
+prompt already over the ceiling without it is sent exactly as it would be
+without it. It says what the reviewer will check in
+the unit's result. The executor prompt states it right after the numbered
+criteria as `Review focus (what the reviewer will check): <text>`. A unit
+that declares none (or an empty string) carries no key: its contract is
+byte-identical and its prompt gains no focus block (every unit prompt does
+carry the shared-machine line, which is separate). A review focus is prepared guidance, not evidence
+of review.
+
 ## Dispatch bridge semantics
 
-- **Concurrency is fixed by default and adaptive only when requested.** The dispatch pool width comes from
-  the setup profile's `parallelism` block — `default_concurrency` (5) sized
-  against a `global_concurrency` ceiling (8), the same defaults OMO's task
-  engine ships. A fresh `omh setup` writes the block into the profile so it
-  is visible and editable; an explicit `--concurrency` flag still wins,
-  clamped to the ceiling. Without another flag, scheduling remains fixed-width.
-  `--adaptive-concurrency` makes that resolved concurrency the ceiling, starts
-  the admission window at 2 (capped by the ceiling), grows it by one after an
-  observed clean completion, and halves it with a floor of 1 after observed
-  provider-limit pressure. Pressure includes a final `limit_shaped` result or
-  a `transient_provider_limit` retry decision even when the retry recovered;
-  auth, timeout, missing-binary, crash, terminal test/code, and ordinary
-  transport failures do not reduce the window. Ready dependency-frontier units
-  are submitted only while they fit the current window; a reduction does not
-  cancel units already running.
+- **Concurrency is fixed by default and adaptive only when requested.** The
+  dispatch pool width comes from the setup profile's `parallelism` block —
+  `default_concurrency` (5) sized against a `global_concurrency` ceiling (8). A
+  fresh `omh setup` writes the block into the profile so it is visible and
+  editable; an explicit `--concurrency` flag still wins, clamped to the ceiling.
+  Without another flag, scheduling remains fixed-width. `--adaptive-concurrency`
+  makes that resolved concurrency the ceiling, starts the admission window at 2
+  (capped by the ceiling), grows it by one after an observed clean completion,
+  and halves it with a floor of 1 after observed provider-limit pressure.
+  Pressure includes a final `limit_shaped` result or a
+  `transient_provider_limit` retry decision even when the retry recovered; auth,
+  timeout, missing-binary, crash, terminal test/code, and ordinary transport
+  failures do not reduce the window. Ready dependency-frontier units are
+  submitted only while they fit the current window; a reduction does not cancel
+  units already running.
 
   The dispatch summary's `concurrency` block records the requested and applied
   ceiling plus its source. Adaptive mode additionally emits a bounded,
@@ -258,23 +285,21 @@ Rules, all applied at freeze time:
   re-running `omh setup` writes it out, and rewrites the whole profile
   while doing so. `lane_budget_default` is advisory context for
   Hermes-native lanes — OMH never enforces a lane count inside Hermes.
-- **Dispatch does not nest, and one run has a total spawn budget.** Every
-  child this command starts — the agent CLI and any declared verification
-  command — is stamped with `OMH_FANOUT_DEPTH` and `OMH_FANOUT_LINEAGE`. A
-  dispatch that starts inside such a child reads its inherited depth and
-  refuses before any subprocess exists, returning a dispatch summary carrying
-  `refused: true`, `refusal_reason: "fanout_depth_exceeded"`, and a
-  `spawn_guard` block naming the depth, the cap, and the lineage it came down;
-  the CLI exits 1. Separately, one run may only ever START
-  `run_spawn_ceiling` agent processes (default 60, OMO's own
-  `DEFAULT_FANOUT_LIMIT`); a unit that arrives after the budget is spent
-  returns `spawn_ceiling_reached` before its worktree is created, so nothing
-  is left behind to clean up. Both are `parallelism` block tunables
-  (`max_depth`, default 1) read with the same validated-override-plus-
-  disclosure shape as the widths, and both are recorded in the summary's
-  `spawn_guard` block alongside how much of the budget the run used. Neither
-  is verification, review, or merge evidence — a run inside its bounds is not
-  thereby correct.
+- **Dispatch does not nest, and one run has a total spawn budget.** Every child
+  this command starts — the agent CLI and any declared verification command — is
+  stamped with `OMH_FANOUT_DEPTH` and `OMH_FANOUT_LINEAGE`. A dispatch that
+  starts inside such a child reads its inherited depth and refuses before any
+  subprocess exists, returning a dispatch summary carrying `refused: true`,
+  `refusal_reason: "fanout_depth_exceeded"`, and a `spawn_guard` block naming
+  the depth, the cap, and the lineage it came down; the CLI exits 1. Separately,
+  one run may only ever START `run_spawn_ceiling` agent processes (default 60);
+  a unit that arrives after the budget is spent returns `spawn_ceiling_reached`
+  before its worktree is created, so nothing is left behind to clean up. Both
+  are `parallelism` block tunables (`max_depth`, default 1) read with the same
+  validated-override-plus-disclosure shape as the widths, and both are recorded
+  in the summary's `spawn_guard` block alongside how much of the budget the run
+  used. Neither is verification, review, or merge evidence — a run inside its
+  bounds is not thereby correct.
 - **Retries are classified, and never replayed over observed work.** A failed
   unit is retried only when both answers come back yes, in this order. First,
   is the failure transient? A provider rate limit, an overload, an HTTP 5xx, a
@@ -302,16 +327,19 @@ Rules, all applied at freeze time:
 - **Admission is dependency-frontier, not wave-barrier.** A unit starts the
   moment every unit it depends on has completed and a pool slot is free —
   never because a wave boundary was reached — so an unrelated slow sibling
-  cannot starve ready dependents (OMO's DAG scheduler discipline). The
+  cannot starve ready dependents. The
   wave grouping in `merge_order` is informational; merge order itself is
   unchanged. A seeded chaos bench (`tests/test_fanout_chaos.py`, replay
   with `SEED=<n>`) drives random DAGs, outcomes, pool widths, and owner
   lanes through the real engine and holds the scheduler invariants.
 - **Units are process groups; interrupts are honest.** The default runner
   spawns each unit as its own session/process group and records the leader
-  pid in the unit's inflight marker. A timeout kills the whole group (no
-  surviving grandchildren against the worktree). Ctrl-C stops admitting
-  work, terminates every live group, marks never-started units
+  pid in the unit's inflight marker. A unit's stdin is the null device, never
+  the dispatcher's: `codex exec` reads a piped stdin to EOF even with the
+  prompt in argv, so a unit started from an agent shell that holds an open
+  pipe would otherwise wait out its deadline (#2402). A timeout kills the
+  whole group (no surviving grandchildren against the worktree). Ctrl-C stops
+  admitting work, terminates every live group, marks never-started units
   `interrupted`, prints the summary with `"interrupted": true`, and exits
   130. SIGTERM writes the same summary FILE but prints nothing: the
   original termination is re-raised after the write so a supervisor
@@ -352,15 +380,23 @@ Rules, all applied at freeze time:
 - **Spawnability is data.** `DISPATCH_COMMAND_TEMPLATES` in
   `src/coding/fanout_dispatch.py` maps profiles with a local headless CLI to
   fixed argv templates — currently codex (`codex exec`), claude-code
-  (`claude -p`), and omo-runtime. The omo runtime's host CLI is DETECTED at
-  dispatch/readiness time in a fixed order (`pi`, then its `senpi`
-  distribution, then `opencode`) — first on PATH wins, no personal stack is
-  hardcoded, and the selected host is visible in the planned argv and the
-  probed command. The pi-family surface was validated in a live bridge
-  dispatch; the opencode template is prepared from its verified flags and
-  validates on first live dispatch (claude-template precedent).
-  Profiles without a template (hermes, omx/omc runtimes, generic,
-  unassigned) are reported `unsupported_for_local_dispatch` with the unit
+  (`claude -p`), and `pi-family-runtime`. The pi-family runtime's host CLI is
+  DETECTED at dispatch/readiness time in the fixed host-candidate order declared
+  in `src/coding/fanout_dispatch.py` — first on PATH wins, no personal stack is
+  hardcoded, and the selected host is visible in the planned argv and the probed
+  command. The pi fork host comes after pi and its distribution host and
+  before opencode; its argv has no permission preset (that host has none, and
+  its default approval mode applies) and puts the prompt after `--`. The
+  pi-family surface was validated in a live bridge dispatch; the
+  opencode template is prepared from its verified flags and validates on first
+  live dispatch (claude-template precedent). Beyond that table, spawnability
+  is also operator data: an executor declared in
+  `<omh_home>/routing/executors.toml`, or one of the nine presets opted in with
+  `omh coding executors add`, is spawned from its declared argv with the same
+  lane guarantees (see **Your own harness**). The presets are marked
+  unvalidated until a live dispatch. Built-in profiles without a template
+  (hermes, omx/omc runtimes, generic, unassigned) and any owner with no
+  declared executor are reported `unsupported_for_local_dispatch` with the unit
   handoff as a prepared-prompt fallback — no profile is privileged.
 - **Bridge dispatch is a separate axis from chat prompt-handoff.** Chat
   surfaces keep their prompt-only semantics for prompt-only profiles (a
@@ -399,12 +435,20 @@ Rules, all applied at freeze time:
   `verification_commands: [...]` beside its prose `integration_checks`. The
   field is optional and additive — a unit that declares none carries no key and
   its contract stays byte-identical to one frozen before the field existed. At
-  freeze time each command is bounded (at most 8 per unit, 240 chars each), may
+  freeze time each command is bounded (at most 8 per unit, 240 UTF-8 bytes each), may
   not be blank, and is split with `shlex` so a command no dispatcher could run
   is refused while the operator is still holding it. Leading `NAME=VALUE`
   tokens become environment overrides (this repo's own gate is spelled
   `PYTHONPATH=tests uv run ...`); everything after them is an argv run with
-  `shell=False`, so pipes and redirections are argument text, not operators.
+  `shell=False`. An unquoted shell operator (`&&`, `||`, `|`, `;`, `&`, `>`,
+  `<`, `$(`, a backtick) would therefore reach the program as a literal
+  argument and the check could never pass, so freeze (and `fanout validate`)
+  refuses it and names both fixes: declare each step as its own command, or
+  wrap the line in a shell explicitly (`sh -c "test -f X && grep -q Y X"`).
+  Operator characters inside quotes (`grep -E 'a|b'`) are ordinary text. The
+  same refusal covers `reproduction_command` and `task_linked_test_runner`,
+  and a contract frozen before it existed has such a check refused unrun, as
+  `invalid verification command`, rather than run and misreported.
   `omh coding fanout dispatch --run-verification` — explicit, never on by
   default — runs those commands with `cwd` set to the unit's own worktree,
   after that unit's process exited 0 *and* its sidecar validated, with a
@@ -421,7 +465,11 @@ Rules, all applied at freeze time:
   tail. A command that cannot start is a failed check, never a failed dispatch.
   A unit that ends with `unit_state_reason: verification_failed` makes the
   batch exit 1, the same code as a failed unit, even though its process exited
-  0 and it carries no `failure_kind`.
+  0 and it carries no `failure_kind`. A unit whose process exited 0 with a
+  validated result but whose verification was never observed (none declared,
+  or `--run-verification` not given) ends `unit_state: unverified` with
+  `unit_state_reason: verification_not_observed`: nothing ran and failed, so
+  it is not `failed`, and nothing was verified, so it is not `verified` either.
   Under `--dry-run` the flag only names the commands in
   `planned_verification_commands`. This runs inside the same sanctioned
   dispatch bridge as the unit spawns themselves: still operator-invoked, still
@@ -430,7 +478,7 @@ Rules, all applied at freeze time:
   operator chose to check, and nothing ties them to the task: a compile pass
   and a few same-package modules pass whether or not the change is right. A
   unit may also declare `task_linked_test_runner`, a command prefix such as
-  `PYTHONPATH=tests python -m unittest` (at most 200 chars, parsed at freeze
+  `PYTHONPATH=tests python -m unittest` (at most 200 UTF-8 bytes, parsed at freeze
   like any verification command). The frozen unit carries it, and its prose
   "unit tests covering the unit's file_scope pass" check becomes a criterion
   naming the runner and the rule. Under `--run-verification`, after the
@@ -681,7 +729,7 @@ Rules, all applied at freeze time:
   so the template additionally grants `--allowedTools
   "Bash(git add:*),Bash(git commit:*)"` — exactly those two git verbs,
   nothing broader. The pi-family template was validated in a live bridge
-  dispatch (2026-07, senpi distribution): a routed unit spawned non-interactively via
+  dispatch (2026-07): a routed unit spawned non-interactively via
   `--print --no-session`, the `workspace` permission preset allowed file
   creation plus the exact `git add`/`git commit` the unit prompt asks for
   (the unit completed with a real commit inside its isolated worktree, no
@@ -750,7 +798,8 @@ Rules, all applied at freeze time:
   writes this entry only after the operator confirms a Claude Code
   subscription and only when none is set, and it writes the head of the
   Maestro lane's Claude chain: the pinned `claude-opus-5-5` since 2026-10-13
-  (the chain is `claude-opus-5-5`, then `claude-fable-5-1`, then `opus`). The
+  (the chain is `claude-opus-5-5`, then `claude-fable-5-2`, then `opus`; the
+  Fable entry needs Claude Code v2.1.290 or later, observed 2026-11-10). The
   preference has no fallback walk, so an account that does not serve the
   pinned id changes the entry to `opus`. `codex` has no
   recommended value either (no local `codex` CLI in this repo to confirm its
@@ -770,11 +819,11 @@ Rules, all applied at freeze time:
   so a frozen contract names the exact basis it was resolved from; the
   file's presence is the opt-in, and codex/claude-only contracts stay
   byte-identical across machines that have not created it. The built-in
-  `codex` table names `gpt-6.1-sol` in every category GPT-6 Astra does not
-  head; the Codex client repository's model catalog lists 0.153.0 as its
-  minimum client version (official-client, openai/codex `models.json`, read
-  2026-10-01), so run Codex CLI 0.153.0 or later for those rows or override
-  them. Edit it with
+  `codex` table names `gpt-6.2-sol` in every category GPT-6.2 Astra does not
+  head; Codex CLI 0.169.0's served model catalog lists both GPT-6.2 ids and
+  names no minimum client version for them (official-client, read
+  2026-11-18), so run a Codex CLI whose catalog lists them, or override
+  those rows. Edit it with
   `omh coding category-maestro set <profile> <category> <model[:effort]>...`
   (the tail after the last colon is the effort only when it is a known level
   — off/minimal/low/medium/high/xhigh/max/auto — so colon-tagged model ids
@@ -791,6 +840,19 @@ Rules, all applied at freeze time:
   deliberately not configurable here — the local-inventory catalog remains
   their single override source, so "which basis resolved this route" always
   has one answer.
+- **Identity profiles (explicit prompt + chain).** A unit's optional
+  `identity` field (token `[a-z0-9_-]{1,64}`; `omh coding run --identity`,
+  `model-route --identity`, `delegate --identity` for one run) names an entry
+  of `<omh_home>/routing/identities.json` (`omh_identity_profiles/v1`; schema,
+  marker, and precedence in `docs/INSTALLATION.md`). The identity chain sits
+  below an explicit `--model`/unit `model` and above category, role, depth and
+  scale. The frozen `handoff.model_route` carries `identity_id`,
+  `identity_fingerprint`, `catalog_kind: "user_identity_config"` and
+  `provenance: "identity_chain_head"`, never the prompt, and a spawned agent
+  CLI does not receive the identity prompt. A malformed `identity` name fails
+  at freeze; an unknown one resolves `unknown` in `attempted[]` with no
+  silent switch to another identity. Editing `identities.json` after prepare
+  surfaces as a `config_fingerprint` note with `match: false` at dispatch.
 - **Request complexity (advisory).** `omh coding complexity "<request>"`
   scores a request deterministically — no model, no network — and returns a
   tier (`light` / `standard` / `deep`) with every contributing signal named,
@@ -817,48 +879,47 @@ Rules, all applied at freeze time:
   phrasing.
 - **Model inventory (reporting-only).** `omh coding model-inventory` reports
   which coding models the user has locally activated before any split or
-  delegation is proposed: agent CLIs on PATH (codex, claude, opencode,
-  gemini, grok, qwen), models named by the oh-my-openagent config
-  (`~/.config/opencode/oh-my-openagent.json` — model/variant/fallback ids
-  only), opencode provider-config and auth provider key NAMES
-  (presence-only, values never read), and the existing executor login
-  markers. Every identifier passes the opaque-metadata shape gate; rejects
-  are counted, never echoed, and unreadable sources report a status without
-  a path. The payload aggregates models with their `model_family()` and
-  ships static domain-affinity notes (for example X-platform data work
-  favors the grok family) under their own claim boundary: editorial
-  defaults, not observed capability, no routing effect. The inventory never
-  enters a model route, a frozen contract, or persisted state — it is
-  read-time advisory context for the operator or wrapper proposing a split.
-  A compact hint (families present, model count, the full-report command)
+  delegation is proposed: agent CLIs on PATH (codex, claude, opencode, gemini,
+  grok, qwen), models named by the pi-family runtime's agent config (its path
+  is declared in `src/coding/model_inventory.py`; model/variant/fallback ids
+  only), opencode provider-config and auth provider key NAMES (presence-only,
+  values never read), and the existing executor login markers. Every identifier
+  passes the opaque-metadata shape gate; rejects are counted, never echoed, and
+  unreadable sources report a status without a path. The payload aggregates
+  models with their `model_family()` and ships static domain-affinity notes (for
+  example X-platform data work favors the grok family) under their own claim
+  boundary: editorial defaults, not observed capability, no routing effect. The
+  inventory never enters a model route, a frozen contract, or persisted state —
+  it is read-time advisory context for the operator or wrapper proposing a
+  split. A compact hint (families present, model count, the full-report command)
   rides the choose-executor context automatically, so Hermes proposes owners
   from what the user actually has instead of asking blind.
-- **Inventory-derived routing (fingerprint-recorded).** For profiles without
-  a built-in model catalog, the command layer derives a
-  `local_model_catalog/v1` from the observed inventory — today that means
-  the OMO runtime, whose role chains come from the user's own omo category
-  config (ordered category→role sources declared as data). Built-in
-  catalogs always win; the derived catalog applies only to the profile it
-  names; and it never gains effort authority (observed config variants are
-  evidence of use, not of a model's effort vocabulary, so requested ladder
-  efforts pass through untouched). A route resolved this way records
+- **Inventory-derived routing (fingerprint-recorded).** For profiles without a
+  built-in model catalog, the command layer derives a `local_model_catalog/v1`
+  from the observed inventory — today that means the pi-family runtime, whose
+  role chains come from the user's own category config for that runtime (ordered
+  category→role sources declared as data). Built-in catalogs always win; the
+  derived catalog applies only to the profile it names; and it never gains
+  effort authority (observed config variants are evidence of use, not of a
+  model's effort vocabulary, so requested ladder efforts pass through
+  untouched). A route resolved this way records
   `catalog_kind: "local_inventory"` plus a `catalog_fingerprint` (model-set
-  digest, per-source statuses, observation time) so the frozen contract
-  names the exact basis it was resolved from. At dispatch, units carrying a
-  fingerprint gain an advisory `inventory_fingerprint` note comparing the
-  frozen digest against the current one — a mismatch never blocks (the
-  frozen contract stays the instruction; provider truth adjudicates), it
-  only makes prepare-vs-dispatch skew visible. `omh coding model-route
-  --from-inventory` previews these routes; fanout prepare consults the
-  derived catalog automatically. A unit may additionally declare an explicit
-  work `domain` (closed vocabulary riding the catalog payload — for example
-  `x_platform_data`, whose affine family is grok): affine-family entries are
-  stably moved to the front of the locally-derived chain, the reorder (or
-  the reason none happened) is recorded in the route's `attempted[]` trail,
-  and the declared domain rides the frozen route. Never a veto: every entry
-  stays in the chain, built-in chains are never reordered (a domain there is
-  recorded and explicitly skipped), a requested model still wins, and no
-  text matching ever infers a domain.
+  digest, per-source statuses, observation time) so the frozen contract names
+  the exact basis it was resolved from. At dispatch, units carrying a
+  fingerprint gain an advisory `inventory_fingerprint` note comparing the frozen
+  digest against the current one — a mismatch never blocks (the frozen contract
+  stays the instruction; provider truth adjudicates), it only makes
+  prepare-vs-dispatch skew visible. `omh coding model-route --from-inventory`
+  previews these routes; fanout prepare consults the derived catalog
+  automatically. A unit may additionally declare an explicit work `domain`
+  (closed vocabulary riding the catalog payload — for example `x_platform_data`,
+  whose affine family is grok): affine-family entries are stably moved to the
+  front of the locally-derived chain, the reorder (or the reason none happened)
+  is recorded in the route's `attempted[]` trail, and the declared domain rides
+  the frozen route. Never a veto: every entry stays in the chain, built-in
+  chains are never reordered (a domain there is recorded and explicitly
+  skipped), a requested model still wins, and no text matching ever infers a
+  domain.
 - **Composer calibration.** The MAIN agent composing the split runs on
   whatever model the user configured (a claude-family fable/opus, a
   gpt-family sol/terra, a gemini, a kimi, ...), and each family fails
@@ -871,8 +932,9 @@ Rules, all applied at freeze time:
 - **Unit prompt protocol.** Every dispatched unit prompt carries a fixed
   verification discipline (`src/coding/unit_prompt_protocol.py`): the
   subagent first echoes the goal, its deliverable, and the numbered
-  completion criteria back before any tool use (and stops to report a
-  conflict instead of guessing); "done" is pre-declared as numbered
+  completion criteria back before any tool use (the brief outranks the
+  repository's workflow rules, and only a brief that contradicts itself is
+  stopped on and reported); "done" is pre-declared as numbered
   criteria derived from the frozen contract (boundary confinement, the
   unit's integration checks, committed work); and verification is
   mandatory-but-bounded — exactly one full pass is the floor, a finding
@@ -1160,6 +1222,215 @@ Rules, all applied at freeze time:
   work that cannot resolve an executor becomes an explicit user choice, not
   retained Hermes implementation).
 
+## Your own harness
+
+OMH spawns codex, claude-code and the pi family from fixed argv templates. Any
+other headless coding CLI can own fanout lanes too, once you declare it. A
+declared executor gets the same lane the built-ins get: a worktree per unit,
+the unit commits, `fanout_unit_result/v1`, postconditions judged from git, the
+confinement fence, and a HUD executor-progress row. Declaring one is opt-in;
+with no file, nothing changes. The external executor lane is supported only on
+macOS and Linux; Windows refuses it with
+`user_executor_platform_unsupported`.
+
+### Where the file lives
+
+`<omh_home>/routing/executors.toml`, next to `dispatch-models.json` (the
+default home is `~/.omh`; the top-level `--omh-home` flag moves it). Without
+`--omh-home`, an explicit top-level `--hermes-home <dir>` selects the OMH store
+that profile's own `config.yaml` names, and `omh coding executors list`,
+`executor-readiness` and dispatch all read that same store, under `--scope user`
+and `--scope project` alike. `--scope project` moves artifacts into the checkout,
+not this file. OMH reads this one path and nothing else: never the repository,
+its parents or the working directory, so a checked-in file cannot become an
+executor, and a `.hermes` directory implied by the checkout is not adopted as the
+Hermes home. The file may
+not be a symlink or resolve outside the home, must be UTF-8, and is read only up
+to 256 KiB.
+
+```toml
+schema_version = 1
+
+[executors.my-agent]
+label = "My Agent"
+argv = ["my-agent", "run", "--", "{prompt}"]
+model = ["--model", "{model}"]          # optional; spliced in only when a model is routed
+effort = ["--effort", "{effort}"]       # optional
+insert = 2                              # optional; where model/effort/session tokens go in argv
+version = ["my-agent", "--version"]     # optional; defaults to [argv[0], "--version"]
+
+[executors.my-agent.session]            # optional
+export = ["--export", "{session_file}"] # required when a session table exists
+resume = ["--resume", "{session_id}"]   # optional
+
+[executors.devin]
+preset = "devin"                        # opts in to a shipped preset
+```
+
+A preset entry holds only `preset` (and `remote_pr`, below) and its table name
+must equal the preset id. A custom entry needs `argv`; every other key is
+optional. Unknown keys are refused.
+
+### Adding a preset
+
+```sh
+omh coding executors list [--json]       # built-ins, enabled entries, available presets, rejected entries
+omh coding executors add <preset> [--force]
+omh coding executors remove <id>
+omh coding executors check [<id>]        # version probe of one or all enabled entries
+```
+
+`add` writes `[executors.<preset>] preset = "<preset>"` and nothing else. It
+installs no software, runs no probe, sends no prompt and starts no dispatch.
+`add` on an id that already exists is refused with `already_exists`; `--force`
+re-writes an existing reference to the same preset and cannot overwrite a custom
+entry. `add` and `remove` write one atomic mode-0600 replacement under a lock and
+may reformat the TOML and drop its comments. They refuse a file that does not load
+in full (`invalid_file`) rather than rewrite it lossily, so fix or delete a
+rejected entry by hand first. `list` never probes. `check` runs only the declared
+version argv, exits nonzero when any checked entry is not ready, and a check with
+no id also exits nonzero while the file has rejected entries.
+
+A configured id is then accepted wherever a built-in owner is: `--owner <id>` on
+`omh coding run` and `omh coding fanout prepare`, the `owner` field of a unit in
+the `--units` JSON (checked by `fanout prepare` and `fanout validate`),
+`--on-failure=retarget:<id>`, and `omh coding executor-readiness --executor <id>`.
+A dag-ulw node's `owner` may name a configured id too, but only when the request
+names that executor as the one to do the work; an executor's presence in the file
+is not consent, and the ids a run was defined with are frozen with it.
+
+### Presets
+
+All nine are opt-in and **not validated**. Each row is the vendor's documented
+headless invocation, and a test with a fake process proves the argv shape and
+nothing else: no account, no permission policy, no real committed run. A
+preset's first live dispatch is its validation, the same precedent as the
+opencode template. `omh coding executors list` prints every preset as
+unvalidated. If an installed CLI refuses to write or commit by its own policy,
+the unit fails and says so; OMH does not retry in a looser permission mode.
+
+| id | CLI | argv (prompt is one element) | `--model` fragment | validated |
+| --- | --- | --- | --- | --- |
+| `devin` | `devin` | `devin -p --permission-mode accept-edits --respect-workspace-trust false -- {prompt}` | `--model {model}` | no |
+| `gemini` | `gemini` | `gemini -p {prompt} --approval-mode auto_edit` | `-m {model}` | no |
+| `qwen` | `qwen` | `qwen -p {prompt} --approval-mode auto-edit` | `-m {model}` | no |
+| `kimi` | `kimi` | `kimi --print -c {prompt}` | `--model {model}` | no |
+| `cursor-agent` | `cursor-agent` | `cursor-agent -p --force {prompt}` | `--model {model}` | no |
+| `amp` | `amp` | `amp -x {prompt}` | `--model {model}` | no |
+| `droid` | `droid` | `droid exec --auto low {prompt}` | `--model {model}` | no |
+| `aider` | `aider` | `aider --yes-always --message {prompt}` | `--model {model}` | no |
+| `goose` | `goose` | `goose run -t {prompt}` | `--model {model}` | no |
+
+- Devin runs the Devin CLI **locally** (`devin -p ...`). The preset never emits
+  `--cloud`.
+- Devin alone declares a session export (`--export {session_file}`) and resume
+  (`-r {session_id}`); see **Sessions and resume** below.
+- `cursor-agent --force` broadens the CLI's tool approvals. The preset requires
+  the `cursor-agent` name on PATH and never substitutes an unrelated `agent`.
+- `droid --auto low` is the edit level; `medium` also grants git and remote
+  operations, so it is not used to obtain a commit.
+- Each row's vendor page is its `source_url` in
+  `src/coding/executor_presets.py`; flags were read on 2026-11-22.
+
+### Validation rules
+
+Each entry is checked when the file loads. A bad entry is left out with a closed
+reason and the valid entries beside it still load; a bad file gives an empty
+registry plus a reason. Nothing crashes dispatch, and `omh coding executors list`
+shows what was rejected.
+
+- **argv is data, not a shell.** `argv` is a list of 1 to 64 non-empty strings,
+  each at most 4096 UTF-8 bytes with no control characters. A string command is
+  refused. There is no `sh -c` anywhere.
+- **Exactly one prompt placeholder.** `argv` holds exactly one whole element that
+  is `{prompt}` or `{prompt_file}`, and no other braces. `{prompt}` is replaced by
+  the prompt as a single argv element, whatever it contains. `{prompt_file}` is
+  replaced by the path of a private file the dispatcher writes for that attempt.
+  `model`, `effort`, `session.export` and `session.resume` each hold exactly one
+  matching whole-element placeholder (`{model}`, `{effort}`, `{session_file}`,
+  `{session_id}`).
+- **The program is a bare PATH name.** Not a path, not a shell, interpreter or
+  launcher (`sh`, `bash`, `env`, `python`, `node`, `sudo`, `xargs`, `busybox`, and
+  similar), and not a script or batch file (`.sh`, `.py`, `.bat`, `.cmd`, `.ps1`,
+  and similar). This checks the declaration's shape. OMH cannot sandbox what a
+  binary you installed does once it runs.
+- **`version` is a version query.** It starts with the same program as `argv`
+  and ends in `--version`, `-V` or `version`, with no placeholders.
+- **`insert`** is an integer from 1 to the length of `argv` (default 1). Model,
+  effort, export and resume tokens are spliced in at that index in that order.
+- **Ids** match `[a-z][a-z0-9-]{1,31}` exactly, with no case folding or aliases. An
+  id may not shadow a built-in owner (`codex`, `claude-code`, `hermes`, ...), a
+  preset name, `choose`, `unassigned`, `maestro`, `omo-runtime`, `senpi` or `omp`.
+- **No cloud argv.** `--cloud`, `--cloud=...` or `cloud` as the first argument
+  after the program is refused under any id, in `argv` and in every other
+  fragment: `model`, `effort`, `session.export`, `session.resume` and `version`.
+  The entry is left out of the registry with `cloud_refused`, and a `version`
+  vector that declares cloud is never probed. The argv rendered for the worker is
+  checked the same way and refused as `remote_pr_not_available` before any child
+  starts.
+- **A model or effort the entry cannot carry is refused**, never dropped, so a
+  run is never reported as using a model that nothing passed to the CLI.
+
+### How a lane runs
+
+The lane is the built-in lane with a different argv. The contract freezes the
+owner's id and a digest of its definition; if the entry changes or disappears
+before dispatch, the unit comes back `user_executor_binding_refused` before any
+probe or child, and the contracts must be re-frozen. The CLI runs inside the
+unit's worktree, fenced, by the name you declared. The unit is complete only when
+the CLI exits 0 **and** left a clean commit descending from the base; prose on
+stdout, a claimed commit or exit 0 with no commit does not count, and a nonzero
+exit fails the unit. Readiness is the declared version probe, which proves the
+binary runs, not that you are logged in or allowed to use a provider
+(`omh coding executors check` says the same in its `claim_boundary`). Neither the
+config nor the probe is dispatch evidence.
+
+### Sessions and resume
+
+An entry that declares `session.export` gets a session receipt per attempt. The
+dispatcher passes the CLI a fresh export path inside that attempt's private
+scratch directory, hashes the file afterwards, and records a bounded
+`fanout_executor_session/v2` receipt. The receipt is journaled before the
+post-run Git gates, so a unit those gates then refuse
+(`executor_history_unverified`, `executor_scratch_committed`) still carries
+`executor_session` and `executor_session_status`; the refusal is not hidden by
+the receipt, and the receipt does not make the unit succeed. Those gates require
+that `HEAD` descends from the frozen base (`git merge-base --is-ancestor`) and
+that no commit between the base and `HEAD` touches a scratch path, even if a
+later commit removes it. A branch that forked before the base can still merge
+cleanly when it changes only ordinary files. The record format and what it never
+holds are in [`FANOUT-EXECUTOR-EVIDENCE.md`](FANOUT-EXECUTOR-EVIDENCE.md#executor-sessions-for-user-executors).
+
+An entry that also declares `session.resume` can continue one session on a
+budgeted repair. The repair re-enters the same session with the declared tokens
+only when the previous attempt's receipt carried a session id, still describes the
+same unit, owner, contract, base, worktree and head, the same CLI binary, and no
+other unit claims that id. Otherwise the repair starts fresh and its receipt says
+which check it failed. Resume is never automatic outside the repair budget, and
+`fanout status` never launches a resume.
+
+### Remote PR lane: not available yet
+
+A cloud lane, where a harness such as Devin Cloud returns a pull request instead
+of a local commit, **has not shipped**. It is refused as a closed
+`remote_pr_not_available` while a policy decision is pending on whether the
+dispatcher may run a network `git fetch` to import a PR head. It has two opt-ins,
+and both are refused today:
+
+- `remote_pr = true` on the executor entry. It loads only on a preset that names a
+  cloud adapter (`devin`), never on a custom entry. `fanout dispatch` then refuses
+  the whole batch with `remote_pr_not_available` before any probe, worktree or
+  child.
+- `--allow-remote-pr` on `omh coding run` or `omh coding fanout dispatch`
+  (default off). The command exits with `remote_pr lane not available`. At the
+  dispatcher the flag alone is refused the same way.
+
+Neither opt-in falls back to a local run. When refused, nothing is launched,
+nothing is fetched, no session or PR is created, no commit is imported, and no
+socket is opened. OMH opens no network connection of its own; any network use
+would stay inside a CLI you installed. Do not read the config key or the flag as
+a working cloud lane.
+
 ## Workspace preflight
 
 `git worktree add` creating the isolation, and an executor readiness probe
@@ -1305,10 +1576,11 @@ funnel into the same engine.
       reads `commit` with its code.
     - **State.** The attempt's `unit_state` is `verified` only when the child
       changed something, all of it was committed, and those checks ran on it
-      and passed; otherwise it is `failed` with `unit_state_reason`
+      and passed. A committed attempt whose checks were not run is
+      `unverified` with `unit_state_reason` `verification_not_observed`;
+      otherwise it is `failed` with `unit_state_reason`
       `process_not_completed`, `no_changes`, `untracked_leftovers`,
-      `out_of_scope_files`, `commit_failed`, `verification_failed`, or
-      `verification_not_observed`.
+      `out_of_scope_files`, `commit_failed`, or `verification_failed`.
   - **Wait** marks the unit `awaiting_retry` in the run journal with its
     failure kind. The next `--resume-journal` run re-dispatches exactly those
     units under the `rerun_awaiting_retry` action; units whose success was
@@ -1406,7 +1678,7 @@ on the prose.
   reads the owner's own CLI config — `~/.claude.json` `oauthAccount`, falling
   back to the single `claudeAiOauth` slot in `~/.claude/.credentials.json`; or
   `~/.codex/auth.json` `tokens.account_id`, falling back to whether an API key
-  is configured — and records a redacted tag (`claude:kh...@gmail.com`,
+  is configured — and records a redacted tag (`claude:de...@example.org`,
   `codex:<8 hex>`) on the unit envelope and in the limit signal, where the
   readiness advisory already surfaces every stored key. **No token, key, or
   secret value is read**: the only inputs are an email address, an account
@@ -1459,8 +1731,8 @@ probed source reports a status: `present`, `absent`, `unreadable`, or
 - **codex** probes custom prompts at `~/.codex/prompts` (addressed by file
   stem, invoked `/<name>`) and OMX-style skill directories at
   `~/.codex/skills` (invoked `$<name>`).
-- **omo-runtime** reports one explicit `unsupported` source with a reason
-  instead of silence: its host CLIs (pi/senpi/opencode) declare no skill
+- **`pi-family-runtime`** reports one explicit `unsupported` source with a reason
+  instead of silence: its host CLIs declare no skill
   layout this repo can verify, so nothing is scanned — a dry run then shows
   WHY no skills are sequenced rather than an empty payload with no trace.
 - **Dry-run surface.** Each planned unit carries `skill_sequence_source`:
@@ -1472,12 +1744,16 @@ probed source reports a status: `present`, `absent`, `unreadable`, or
 
 ## Command reference
 
+`omh coding fanout dispatch --help` is the authoritative flag list. The safety
+flags described in prose on this page are `--allow-unconfined`,
+`--ignore-limit-signal`, and `--on-failure`.
+
 ```sh
 # units.json is either a JSON list of units, or an object:
 #   {"units": [...], "spawn_plan": {...}}   <- spawn_plan required above 4 units
 omh coding fanout prepare --goal <words...> --units units.json [--record] [--source discord]
 omh coding fanout prepare --from-document-plan plan.json [--goal <words...>] \
-  [--report-dir <dir>] [--owner <profile>] [--record]   # one unit per document range
+  [--report-dir <dir>] [--owner <profile-or-configured-id>] [--record]   # one unit per document range
 omh coding fanout validate --units units.json   # also reports spawn_plan_required
 omh coding fanout show <fanout-id> [--limit 20] [--full]
 omh coding fanout brief [<fanout-id>] [--json]
@@ -1494,10 +1770,15 @@ omh coding fanout dispatch <fanout-id> --goal-file goal.txt \
   [--resume-journal ~/.omh/coding/fanout/<fanout-id>/run_journal.json]
 omh coding run --owner <profile> (--goal <words...> | --goal-file goal.txt) \
   [--unit-id run] [--file-scope <path> ...] [--repo-root .] [--base-ref HEAD] \
-  [--timeout 1800] [--dry-run] [--run-verification] [--source discord] \
-  [--model <id>] [--effort <level>] [--category <category>]
+  [--timeout 1800] [--dry-run] [--run-verification] [--verification-command <cmd> ...] \
+  [--source discord] [--model <id>] [--effort <level>] [--category <category>]
   # single-invocation: builds and dispatches a one-unit fanout_contract/v2 through
   # the same engine as `fanout dispatch`; see "Single-run entry" above
+omh coding executors list [--json]            # see "Your own harness"
+omh coding executors add <preset> [--force]
+omh coding executors remove <id>
+omh coding executors check [<id>]
+omh coding executor-readiness --executor <profile-or-configured-id> [--force] [--dry-run]
 omh coding fanout reap <fanout-id> [--pid N ...]  # terminate marker-named
   # unit process groups (verify the dispatcher is dead first); refuses any
   # pid the inflight markers do not name — never kills by process name

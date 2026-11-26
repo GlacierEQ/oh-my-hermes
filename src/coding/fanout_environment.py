@@ -8,22 +8,27 @@ import json
 import re
 from typing import Mapping
 
+from .pi_family_interop import PI_DISTRIBUTION_AGENT_DIR_ENV, PI_DISTRIBUTION_BRAND_ENV
+
 CHILD_ENVIRONMENT_POLICY_SCHEMA_VERSION = "child_environment_policy/v1"
 CHILD_ENVIRONMENT_POLICY_CLAIM_BOUNDARY = (
     "This receipt records environment variable names selected at the local child-process boundary. "
     "It stores no environment values and is not evidence that a child read, used, or protected a capability."
 )
 _RECEIPT_NAMES = ("approved", "denied", "missing", "passed", "removed")
+# SYSTEMDRIVE belongs with SYSTEMROOT and WINDIR: a non-sensitive Windows base
+# variable. Codex's MXC sandbox refuses to start any shell command without it
+# ("MXC requires nonempty Unicode host SystemDrive", #2471).
 _PORTABLE_BASE_NAMES = frozenset({
     "APPDATA", "COLORTERM", "COMSPEC", "HOME", "HOMEDRIVE", "HOMEPATH", "LANG", "LC_ALL",
-    "LC_CTYPE", "LOCALAPPDATA", "LOGNAME", "NO_COLOR", "PATH", "PATHEXT", "SHELL", "SYSTEMROOT",
-    "TEMP", "TERM", "TMP", "TMPDIR", "USER", "USERPROFILE", "WINDIR",
+    "LC_CTYPE", "LOCALAPPDATA", "LOGNAME", "NO_COLOR", "PATH", "PATHEXT", "SHELL", "SYSTEMDRIVE",
+    "SYSTEMROOT", "TEMP", "TERM", "TMP", "TMPDIR", "USER", "USERPROFILE", "WINDIR",
 })
 _OWNER_STATE_NAMES = {
     "codex": frozenset({"CODEX_HOME"}),
     "claude-code": frozenset({"CLAUDE_CONFIG_DIR"}),
     "hermes": frozenset({"HERMES_HOME"}),
-    "omo-runtime": frozenset({"PI_CODING_AGENT_DIR", "SENPI_BRAND", "SENPI_CODING_AGENT_DIR"}),
+    "pi-family-runtime": frozenset({"PI_CODING_AGENT_DIR", PI_DISTRIBUTION_BRAND_ENV, PI_DISTRIBUTION_AGENT_DIR_ENV}),
 }
 _LINEAGE_NAMES = frozenset({"OMH_FANOUT_DEPTH", "OMH_FANOUT_LINEAGE"})
 _SENSITIVE_NAME_TOKENS = frozenset({

@@ -11,6 +11,7 @@ from ..awareness import awareness_route_hint
 from ..degradation import safe_error_type as _safe_error_type
 from ..host_context import active_main_agent_model
 from ..host_observation import OBSERVATION_SCHEMA, attach_public_observation, host_session_id, observe_plugin_tool_call
+from ..package_backend import classify_backend_failure, package_backend_detail
 from ..route_answerers import answerer_ladder
 
 OMH_INTERACT_SCHEMA = {
@@ -77,11 +78,11 @@ OMH_INTERACT_SCHEMA = {
             },
             "omh_home": {
                 "type": "string",
-                "description": "Standalone operator override only. Native Hermes calls reject this field; omit it to use the active profile.",
+                "description": "Standalone operator use only. Native Hermes calls reject it; omit.",
             },
             "hermes_home": {
                 "type": "string",
-                "description": "Standalone operator override only. Native Hermes calls reject this field; omit it to use the active profile.",
+                "description": "Standalone operator use only. Native Hermes calls reject it; omit.",
             },
             "observation": OBSERVATION_SCHEMA,
         },
@@ -115,7 +116,7 @@ _SENSITIVE_VALUE_PATTERN = re.compile(
 
 def omh_interact_handler(args: dict, **kwargs) -> str:
     if error := runtime_paths.tool_home_error(args):
-        return json.dumps(error, sort_keys=True)
+        return json.dumps(error, ensure_ascii=False, sort_keys=True)
     observation = observe_plugin_tool_call("omh_interact", args, kwargs)
     message = str(args.get("message") or "").strip()
     if not message:
@@ -125,7 +126,7 @@ def omh_interact_handler(args: dict, **kwargs) -> str:
             "error": "omh_interact.message is required",
             "claim_boundary": _CLAIM_BOUNDARY,
         }
-        return json.dumps(attach_public_observation(payload, observation), sort_keys=True)
+        return json.dumps(attach_public_observation(payload, observation), ensure_ascii=False, sort_keys=True)
 
     # Validate the requested source before any package or fallback work: an
     # unknown source fails closed here, and every later path -- including the
@@ -134,7 +135,7 @@ def omh_interact_handler(args: dict, **kwargs) -> str:
         _source(args)
     except _UnsupportedSourceError:
         payload = _invalid_input_interaction(error="unsupported_source")
-        return json.dumps(attach_public_observation(payload, observation), sort_keys=True)
+        return json.dumps(attach_public_observation(payload, observation), ensure_ascii=False, sort_keys=True)
 
     try:
         payload = _package_interaction(
@@ -146,11 +147,11 @@ def omh_interact_handler(args: dict, **kwargs) -> str:
     except _InvalidPlatformContextError:
         payload = _invalid_input_interaction(error="invalid_platform_context")
     except (ImportError, ModuleNotFoundError) as exc:
-        payload = _fallback_interaction(args, message, error=str(exc))
+        payload = _fallback_interaction(args, message, error=str(exc), backend=classify_backend_failure(exc))
     except Exception as exc:
         payload = _backend_error_interaction(args, message, error_type=type(exc).__name__)
     _attach_answerer_ladder(payload, args)
-    return json.dumps(attach_public_observation(payload, observation), sort_keys=True)
+    return json.dumps(attach_public_observation(payload, observation), ensure_ascii=False, sort_keys=True)
 
 
 def _attach_answerer_ladder(payload: dict[str, Any], args: dict) -> None:
@@ -344,7 +345,9 @@ def _backend_error_interaction(args: dict[str, Any], message: str, *, error_type
     }
 
 
-def _fallback_interaction(args: dict[str, Any], message: str, *, error: str) -> dict[str, Any]:
+def _fallback_interaction(
+    args: dict[str, Any], message: str, *, error: str, backend: dict[str, Any] | None = None
+) -> dict[str, Any]:
     source = _source(args)
     metadata = _source_metadata(args)
     route_hint = awareness_route_hint(message, max_hints=_bounded_limit(args.get("limit"), default=3))
@@ -391,6 +394,13 @@ def _fallback_interaction(args: dict[str, Any], message: str, *, error: str) -> 
         "source_backend": "standalone_plugin_bundle_fallback",
         "claim_boundary": _CLAIM_BOUNDARY,
     }
+    if backend is not None:
+        # Which failure the package import met, from the classifier the Loop
+        # and decision-gate refusals use, so `package_backend_unavailable`
+        # also says why: absent, an install the import path skips (#2415),
+        # incompatible or broken.
+        payload["package_backend"] = backend
+        payload["package_backend_detail"] = package_backend_detail(backend, feature="chat/session recording")
     return payload
 
 

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 PROVIDED_TOOLS = (
+    "lsp_definition",
+    "lsp_diagnostics",
+    "lsp_references",
+    "lsp_rename",
     "omh_agent_board",
     "omh_capabilities",
     "omh_context",
@@ -14,6 +18,7 @@ PROVIDED_TOOLS = (
     "omh_jev_ask",
     "omh_loop",
     "omh_memory",
+    "omh_omher_terminal",
     "omh_probe",
     "omh_recommend",
     "omh_resume",
@@ -32,7 +37,9 @@ REQUIRED_HOOKS = ("on_session_end", "pre_llm_call", "pre_tool_call")
 # capability; no native board action may be armed for receipt correlation.
 OPTIONAL_HOOKS = (
     "on_session_start",
+    "post_api_request",
     "post_tool_call",
+    "pre_gateway_dispatch",
     "pre_verify",
     "subagent_start",
     "subagent_stop",
@@ -47,6 +54,10 @@ OPTIONAL_HOOKS = (
 PROVIDED_HOOKS = tuple(sorted(REQUIRED_HOOKS + OPTIONAL_HOOKS))
 
 TOOL_FILE_STEMS = {
+    "lsp_definition": "lsp_nav_tool",
+    "lsp_diagnostics": "lsp_nav_tool",
+    "lsp_references": "lsp_nav_tool",
+    "lsp_rename": "lsp_nav_tool",
     "omh_agent_board": "agent_board_tool",
     "omh_capabilities": "capability_tool",
     "omh_context": "context_tool",
@@ -60,6 +71,7 @@ TOOL_FILE_STEMS = {
     "omh_jev_ask": "jev_ask_tool",
     "omh_loop": "loop_tool",
     "omh_memory": "memory_tool",
+    "omh_omher_terminal": "omher_terminal_tool",
     "omh_probe": "probe_tool",
     "omh_recommend": "recommend_tool",
     "omh_resume": "resume_tool",

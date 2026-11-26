@@ -25,7 +25,8 @@ import select
 import sys
 from typing import TextIO
 
-from ..skin_pack import SkinTheme, hex_to_rgb, skin_colors
+from ..skin_pack import SHORT_NAME_WIDTH, SkinTheme, hex_to_rgb, skin_colors
+from ..system.stdin_probe import stdin_is_tty
 
 try:  # pragma: no cover - exercised by platform, not by a branch test
     import termios
@@ -50,6 +51,7 @@ KEY_RIGHT = "right"
 KEY_MINUS = "minus"
 KEY_PLUS = "plus"
 KEY_DEFAULT = "default"
+KEY_TOGGLE = " "
 KEY_ENTER = "enter"
 KEY_QUIT = "quit"
 KEY_NONE = ""
@@ -58,12 +60,15 @@ KEY_NONE = ""
 # tokens only and ignores the rest; the chain picker (`model_chain_picker`)
 # steps a row's model with left/right and its effort with -/+.
 _PLAIN_KEYS = {
+    " ": KEY_TOGGLE,
     "\r": KEY_ENTER,
     "\n": KEY_ENTER,
     "q": KEY_QUIT,
     "Q": KEY_QUIT,
     "\x03": KEY_QUIT,  # Ctrl-C: raw mode swallows the signal, so read it as cancel
     "\x04": KEY_QUIT,  # Ctrl-D
+    "\x0e": KEY_DOWN,  # Ctrl-N
+    "\x10": KEY_UP,  # Ctrl-P
     "j": KEY_DOWN,
     "J": KEY_DOWN,
     "k": KEY_UP,
@@ -113,12 +118,13 @@ def picker_available(*, stdin: TextIO | None = None, stdout: TextIO | None = Non
         return False
     if os.environ.get("TERM", "") == "dumb" or os.environ.get("OMH_NO_TUI", "") == "1":
         return False
-    source = stdin if stdin is not None else sys.stdin
     sink = stdout if stdout is not None else sys.stdout
     try:
-        return bool(source.isatty() and sink.isatty())
-    except (OSError, ValueError):
+        source_is_tty = stdin.isatty() if stdin is not None else stdin_is_tty()
+        return bool(source_is_tty and sink.isatty())
+    except (AttributeError, OSError, ValueError):
         # A closed or non-file stream is not a terminal; degrade to the list.
+        # `>&-` leaves sys.stdout None, which raises AttributeError.
         return False
 
 
@@ -224,7 +230,7 @@ def render_frame(
     for index, theme in enumerate(themes):
         pointer = ">" if index == cursor else " "
         active = "*" if theme.skin_name == active_skin else " "
-        row = f" {pointer} [{active}] {theme.short_name:<8} {theme.summary}"
+        row = f" {pointer} [{active}] {theme.short_name:<{SHORT_NAME_WIDTH}} {theme.summary}"
         if index == cursor and use_color:
             row = truecolor(row, skin_colors(theme.skin_name).get("ui_accent", ""), bold=True)
         lines.append(row)

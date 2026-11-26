@@ -260,14 +260,16 @@ class CategoryMaestroResolverTests(unittest.TestCase):
         self.assertIn("category_config", stages)
 
     def test_role_chain_derives_from_the_merged_table(self) -> None:
-        # brain = (deep, unspecified-low); deep is overridden, the tail is not.
+        # brain = (ultrabrain, deep, unspecified-low); ultrabrain and deep are
+        # overridden to one model, so ultrabrain's entry wins and deep's is
+        # dropped as a repeat; the tail is not overridden.
         route = resolve_model_route("codex", role="brain", category_config=_CONFIG)
         self.assertEqual(route["selected_model"], "gpt-5.6-sol")
-        self.assertEqual(route["selected_reasoning_effort"], "high")
+        self.assertEqual(route["selected_reasoning_effort"], "xhigh")
         self.assertEqual(route["provenance"], "role_chain_head")
         chain_models = [entry["model_id"] for entry in route["chain"]]
         # The overridden head, then the built-in unspecified-low tail.
-        self.assertEqual(chain_models, ["gpt-5.6-sol", "gpt-6.1-sol"])
+        self.assertEqual(chain_models, ["gpt-5.6-sol", "gpt-6.2-sol"])
 
     def test_depth_and_scale_chains_derive_from_the_merged_table(self) -> None:
         deep = resolve_model_route(
@@ -294,7 +296,7 @@ class CategoryMaestroResolverTests(unittest.TestCase):
     def test_unconfigured_profile_keeps_the_builtin_basis(self) -> None:
         route = resolve_model_route("claude-code", role="brain", category_config=_CONFIG)
         # The built-in Claude chain heads on the pinned Opus 5.5 id (Opus 5.5
-        # before Fable 5.1, owner decision 2026-10-13).
+        # before Fable, owner decision 2026-10-13).
         self.assertEqual(route["selected_model"], "claude-opus-5-5")
         self.assertEqual(route["catalog_kind"], "built_in_defaults")
         self.assertNotIn("catalog_fingerprint", route)
@@ -352,10 +354,10 @@ class CategoryMaestroFanoutTests(unittest.TestCase):
             [self._unit(category="ultrabrain")],
         )
         route = contract["units"][0]["handoff"]["model_route"]
-        self.assertEqual(route["selected_model"], "gpt-6-astra")
+        self.assertEqual(route["selected_model"], "gpt-6.2-astra")
         # Sol no longer trails Astra (superseded generations left the shipped
         # chains, 2026-09-11); the codex frontier slots name Astra alone.
-        self.assertEqual([entry["model_id"] for entry in route["chain"]], ["gpt-6-astra"])
+        self.assertEqual([entry["model_id"] for entry in route["chain"]], ["gpt-6.2-astra"])
         self.assertEqual(route["catalog_kind"], "built_in_defaults")
 
     def test_unit_scale_survives_normalization_into_routing(self) -> None:
@@ -414,7 +416,7 @@ class CategoryMaestroCliTests(unittest.TestCase):
                 output_json=False,
             )
             self.assertEqual((status, stderr), (0, ""))
-            self.assertEqual(json.loads(stdout)["selected_model"], "gpt-6-astra")
+            self.assertEqual(json.loads(stdout)["selected_model"], "gpt-6.2-astra")
 
     def test_colon_tagged_model_ids_stay_intact_and_efforts_still_split(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -471,7 +473,7 @@ class CategoryMaestroCliTests(unittest.TestCase):
             self.assertIn("no-such", stderr)
 
     def test_show_names_where_catalogless_profiles_route_categories(self) -> None:
-        # pi/omo-runtime is deliberately absent from this table (one-basis
+        # pi/pi-family-runtime is deliberately absent from this table (one-basis
         # rule); show must say where its categories DO come from instead of
         # reading as "no category routing there".
         with TemporaryDirectory() as tmp:
@@ -480,15 +482,15 @@ class CategoryMaestroCliTests(unittest.TestCase):
                 base + ["coding", "category-maestro", "show"], output_json=False
             )
             self.assertEqual((status, stderr), (0, ""))
-            self.assertIn("omo-runtime (host CLI: pi/senpi)", stdout)
+            self.assertIn("pi-family-runtime (host CLI: pi or its distribution host)", stdout)
             self.assertIn("--from-inventory", stdout)
             status, stdout, stderr = run_cli(
                 base + ["coding", "category-maestro", "show", "--json"], output_json=False
             )
             self.assertEqual((status, stderr), (0, ""))
             note = json.loads(stdout)["catalogless_note"]
-            self.assertIn("omo-runtime", note)
-            self.assertIn("omo config", note)
+            self.assertIn("pi-family-runtime", note)
+            self.assertIn("pi-family runtime config", note)
 
     def test_interview_refuses_without_a_terminal_and_names_the_scriptable_path(self) -> None:
         with TemporaryDirectory() as tmp:

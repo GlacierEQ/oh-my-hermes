@@ -16,6 +16,7 @@ this module matches that convention.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,15 +27,23 @@ from ..coding.model_recommendations import (
     SHIPPED_MODEL_RECOMMENDATIONS,
     resolve_model_recommendation,
 )
-from ..config_adapter import external_dirs, read_config
+from ..config_adapter import anchor_external_dir_entry, external_dirs, read_config
 from ..paths import default_hermes_home, expand_path, find_project_root
 from ..plugin_bundle.omh import hermes_memory
 from ..plugin_bundle.omh.memory_dreaming import MODE_SETTING_UNRECOGNIZED, read_dreaming_mode_setting
+from ..plugin_bundle.omh.memory_recall_settings import (
+    RECALL_LINES,
+    RECALL_MODES,
+    RECALL_SETTING_UNRECOGNIZED,
+    read_recall_line_setting,
+    read_recall_mode_setting,
+)
+from ..plugin_bundle.omh.runtime_paths import RuntimeBindingError, plugin_setting_text
 from ..routing.owner_preference import owner_preference_path, validate_owner_preference
 from ..surfaces.hermes_model_settings import HERMES_AUX_ALIASES
 from ..system.local_store import read_json_object_result
 from ..system.metadata_safety import require_opaque_metadata_ref
-from ..system.paths import OmhPaths
+from ..system.paths import OmhPaths, managed_workflow_pack_dir
 
 CONTRACT = "hermes_config_advice/v1"
 
@@ -83,14 +92,16 @@ _WORKFLOW_ENGINE_REACH_REMEDIATION = (
 @dataclass(frozen=True)
 class AdviceEntry:
     check_id: str
-    status: str  # "advice" | "ok" | "unobserved"
+    status: str  # "advice" | "ok" | "unobserved" | "skipped"
     remediation: str
     evidence_boundary: str
     observed: str
     read_only: bool = True
+    # Set only on a `skipped` entry: why the inspector was not run at all.
+    reason: str = ""
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "check_id": self.check_id,
             "status": self.status,
             "read_only": self.read_only,
@@ -98,6 +109,9 @@ class AdviceEntry:
             "evidence_boundary": self.evidence_boundary,
             "observed": self.observed,
         }
+        if self.reason:
+            payload["reason"] = self.reason
+        return payload
 
 
 @dataclass(frozen=True)
@@ -302,6 +316,11 @@ def parse_hermes_model_aliases(text: str) -> tuple[dict[str, str], str]:
     them the same way: both halves of every entry go through
     `require_opaque_metadata_ref`, so a credential cannot arrive as an alias
     target. A second parser would be a second place for that screen to lapse.
+
+    Entries are the flat `alias: target` form or the nested mapping Hermes
+    writes (`alias:` with `model:`, `provider:`, `base_url:`, `key_env:` ...
+    children, one level deep). A nested entry's target is its `model` child;
+    every other child is read past, and its value is never kept or returned.
     """
     if "\t" in text or "\x00" in text:
         return {}, "config contains unsupported tab indentation or NUL bytes"
@@ -310,12 +329,45 @@ def parse_hermes_model_aliases(text: str) -> tuple[dict[str, str], str]:
     in_model = False
     in_aliases = False
     model_indent = aliases_indent = -1
+    # State for a nested (Hermes-style) alias entry whose children follow
+    # on deeper-indented lines, e.g. `mistral:` then `model: ...`.
+    pending_alias: str | None = None
+    pending_children: dict[str, str] = {}
+    pending_had_children = False
+    entry_indent = -1
+    child_indent = -1
+
+    def _flush_pending() -> str | None:
+        # Commit a pending nested alias entry (or report why it is invalid) and
+        # reset the entry state. Returns the error message, or None on success.
+        # The `model` child was already screened when it was read.
+        nonlocal pending_alias, pending_children, pending_had_children
+        nonlocal entry_indent, child_indent
+        if pending_alias is not None:
+            if "model" in pending_children:
+                aliases[pending_alias] = pending_children["model"]
+            elif pending_had_children:
+                # Leave the pending state untouched: the caller aborts on error.
+                return "model alias entry shape is unsupported"
+            else:
+                # `alias:` with no value and no children.
+                return "model alias entry is malformed or unsafe"
+        pending_alias = None
+        pending_children = {}
+        pending_had_children = False
+        entry_indent = -1
+        child_indent = -1
+        return None
+
     for line in lines:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
         indent = len(line) - len(line.lstrip(" "))
         if indent == 0:
+            err = _flush_pending()
+            if err:
+                return {}, err
             in_model = stripped == "model:"
             in_aliases = False
             model_indent = 0 if in_model else -1
@@ -325,7 +377,14 @@ def parse_hermes_model_aliases(text: str) -> tuple[dict[str, str], str]:
                 in_aliases = True
                 aliases_indent = 0
             continue
-        if in_model and indent > model_indent and stripped.startswith("aliases:"):
+        # Inside the alias block an `aliases:` line is an entry's child key,
+        # not the block's own header; re-entering here would read that
+        # child's sub-block as top-level aliases.
+        inside_alias_block = in_aliases and indent > aliases_indent
+        if in_model and not inside_alias_block and indent > model_indent and stripped.startswith("aliases:"):
+            err = _flush_pending()
+            if err:
+                return {}, err
             if stripped != "aliases:":
                 return {}, "model.aliases must be a mapping"
             in_aliases = True
@@ -333,19 +392,69 @@ def parse_hermes_model_aliases(text: str) -> tuple[dict[str, str], str]:
             continue
         if in_aliases:
             if indent <= aliases_indent:
+                err = _flush_pending()
+                if err:
+                    return {}, err
                 in_aliases = False
                 continue
-            if ":" not in stripped:
-                return {}, "model alias entry is malformed"
-            alias, _, target = stripped.partition(":")
-            alias = alias.strip().strip("'\"")
-            target = target.strip().strip("'\"")
-            try:
-                safe_alias = require_opaque_metadata_ref(alias, field="model alias")
-                safe_target = require_opaque_metadata_ref(target, field="model alias target")
-            except ValueError:
-                return {}, "model alias entry is malformed or unsafe"
-            aliases[safe_alias] = safe_target
+            # New entry or child of a pending nested entry.
+            if entry_indent == -1 or indent <= entry_indent:
+                # Finalize any pending nested entry first.
+                err = _flush_pending()
+                if err:
+                    return {}, err
+                if ":" not in stripped:
+                    return {}, "model alias entry is malformed"
+                alias, _, target = stripped.partition(":")
+                alias = alias.strip().strip("'\"")
+                target = target.strip().strip("'\"")
+                try:
+                    safe_alias = require_opaque_metadata_ref(alias, field="model alias")
+                except ValueError:
+                    return {}, "model alias entry is malformed or unsafe"
+                if target != "":
+                    # Flat form: alias: target
+                    try:
+                        safe_target = require_opaque_metadata_ref(target, field="model alias target")
+                    except ValueError:
+                        return {}, "model alias entry is malformed or unsafe"
+                    aliases[safe_alias] = safe_target
+                else:
+                    # Nested form: alias: (children follow)
+                    pending_alias = safe_alias
+                entry_indent = indent
+                child_indent = -1
+                continue
+            else:
+                # Child line of a pending nested entry.
+                if pending_alias is None:
+                    return {}, "model alias entry is malformed"
+                if child_indent == -1:
+                    child_indent = indent
+                elif indent != child_indent:
+                    # A deeper (or misaligned) child would be a nested sub-block,
+                    # which this parser does not support; reject rather than absorb.
+                    return {}, "model alias entry is malformed or unsafe"
+                pending_had_children = True
+                if ":" not in stripped:
+                    return {}, "model alias entry is malformed"
+                ckey, _, cval = stripped.partition(":")
+                ckey = ckey.strip().strip("'\"")
+                cval = cval.strip().strip("'\"")
+                if ckey == "model":
+                    if "model" in pending_children:
+                        # Duplicate `model:` line: only one target is allowed.
+                        return {}, "model alias entry is malformed or unsafe"
+                    try:
+                        safe_val = require_opaque_metadata_ref(cval, field="model alias target")
+                    except ValueError:
+                        return {}, "model alias entry is malformed or unsafe"
+                    pending_children["model"] = safe_val
+                continue
+    # End of input: finalize any pending nested entry.
+    err = _flush_pending()
+    if err:
+        return {}, err
     return dict(sorted(aliases.items())), ""
 
 
@@ -385,17 +494,18 @@ def _owner_learning_status(paths: OmhPaths) -> dict[str, object]:
         if not isinstance(route, dict):
             continue
         count = int(route.get("consecutive_accepted_explicit_choices", 0) or 0)
-        route_status = "learned" if count >= 3 else "learning"
-        if count == 0 and route.get("reset_at"):
-            route_status = "reset"
+        # A stored choice is history: a coding-owner choice counts only for the request it was made in, so no
+        # count of them selects an owner.
+        route_status = "recorded" if count else "reset" if route.get("reset_at") else "none"
         routes[str(family)] = {
             "status": route_status,
-            "selected_owner": str(route.get("selected_owner", "")),
+            "recorded_owner": str(route.get("selected_owner", "")),
+            "selects_owner": False,
             "evidence_count": count,
             "reset_at": str(route.get("reset_at", "")),
             "reset_reason": str(route.get("reset_reason", "")),
         }
-    overall = "learned" if any(value.get("status") == "learned" for value in routes.values() if isinstance(value, dict)) else "unlearned"
+    overall = "recorded" if any(value.get("status") == "recorded" for value in routes.values() if isinstance(value, dict)) else "none"
     return {"status": overall, "path": str(path), "routes": routes}
 
 
@@ -423,7 +533,7 @@ def _model_routing_next_action(
     if owner_learning.get("status") == "corrupt":
         return f"Repair or archive the corrupt owner preference at {owner_learning['path']}, then run `omh coding model-routing status`."
     if not confirmed:
-        return "Confirm locally active models in OMO configuration, then run `omh coding model-routing status`."
+        return "Confirm locally active models in the pi-family runtime configuration, then run `omh coding model-routing status`."
     if hermes.get("status") in {"missing", "aliases_unset"}:
         return "Preview and apply Hermes model aliases for confirmed models, then run `omh coding model-routing status`."
     if missing_heads:
@@ -720,7 +830,8 @@ def check_legacy_plan_artifacts(hermes_home: str | Path | None = None) -> Advice
     remediation = (
         "OMH used to write plan artifacts into Hermes' own home. It now writes them to "
         "`<repo>/.omh/plans`, so these older files are no longer read by anything. They are "
-        "plain markdown: `omh hermes plan-accept <path>` still works on one, and they are "
+        "plain markdown: `omh hermes plan-accept <path>` still works on one (a scaffold-only "
+        "file needs `--allow-scaffold`), and they are "
         "safe to delete or archive by hand. OMH will not touch them."
     )
     counts: list[str] = []
@@ -858,7 +969,7 @@ def _derive_skill_dirs(hermes_home: Path) -> list[Path]:
     config_text = read_config(config_path)
     dirs: list[Path] = []
     for raw in external_dirs(config_text):
-        candidate = Path(raw).expanduser()
+        candidate = anchor_external_dir_entry(raw, hermes_home)
         if candidate.is_dir():
             dirs.append(candidate)
     return dirs
@@ -924,6 +1035,7 @@ def check_workflow_engine_reach(
     hermes_home: str | Path | None = None,
     *,
     omh_home: str | Path | None = None,
+    skills_dir: str | Path | None = None,
 ) -> AdviceEntry:
     """Say when the recorded profile cannot reach the ULW workflow engines.
 
@@ -950,6 +1062,14 @@ def check_workflow_engine_reach(
     The finding is derived from which engines are absent, never from the
     profile label, so an install that has them stays silent whatever it
     recorded.
+
+    It measures the pack in use. Doctor passes the directory it already
+    resolved as `skills_dir`; without one, the pack is found the way
+    `resolve_paths(scope="user")` finds it: the running generation's own
+    pack on a managed install, else `<omh_home>/skills`. Building the paths
+    from `omh_home` alone measured the frozen pre-pointer copy a migrated
+    install keeps, which lacks every engine released after the migration,
+    or found no install at all where that copy was never made (#2358).
     """
     from ..install.installer import installed_skill_names
     from ..manifest import read_manifest
@@ -959,6 +1079,7 @@ def check_workflow_engine_reach(
     paths = OmhPaths(
         omh_home=Path(omh_home).expanduser() if omh_home is not None else home.parent / ".omh",
         hermes_home=home,
+        managed_skills_dir=Path(skills_dir).expanduser() if skills_dir is not None else managed_workflow_pack_dir(),
     )
     evidence_boundary = (
         "Local install manifest and on-disk skill directories only; whether Hermes would "
@@ -981,12 +1102,19 @@ def check_workflow_engine_reach(
     command = "omh update" if profile == "full" else "omh update --full"
     remediation = _WORKFLOW_ENGINE_REACH_REMEDIATION.format(command=command)
     if manifest is None or not installed:
+        # Name the one thing that was missing, so the report can be checked
+        # against the disk rather than read as "OMH is not installed".
+        missing = (
+            f"no OMH install manifest at {paths.manifest_path}"
+            if manifest is None
+            else f"no OMH skills in {paths.skills_dir}"
+        )
         return AdviceEntry(
             "workflow_engine_reach",
             "unobserved",
             remediation,
             evidence_boundary,
-            "no OMH skill install found to measure reach against",
+            f"{missing} to measure reach against",
         )
     engines = ulw_inventory_payload()["canonical_engines"]
     absent = sorted(
@@ -1267,6 +1395,54 @@ def check_dreaming_mode_setting(hermes_home: str | Path | None = None) -> Advice
     return AdviceEntry(MODE_SETTING_UNRECOGNIZED, "advice", remediation, evidence_boundary, observed)
 
 
+def check_recall_settings(hermes_home: str | Path | None = None) -> AdviceEntry:
+    """Are this profile's `recall_line` and `recall_mode` settings values OMH reads?
+
+    The same advice as `dreaming_mode`'s: a value OMH does not read leaves the
+    default in force (`console`, `auto`) while the person who wrote, say,
+    `recall_line: discord` believes it chose something. Report-only; `omh
+    memory recall-line` and `recall-mode` write these keys.
+    """
+    home = _resolve_hermes_home(hermes_home)
+    config_path = home / "config.yaml"
+    evidence_boundary = (
+        "Local read of this profile's config.yaml `plugins.entries.omh.settings.recall_line` and "
+        "`recall_mode` with the block-style scan the OMH memory provider reads them with. The managed "
+        "config overlay is not read."
+    )
+    remediation = (
+        "Run `omh memory recall-line all|console|off` or `omh memory recall-mode auto|on_demand|off`, "
+        "or write one of those values in block style in this profile's config.yaml. Any other value, "
+        "or a file OMH cannot read, keeps the default."
+    )
+    if not config_path.exists():
+        return AdviceEntry(RECALL_SETTING_UNRECOGNIZED, "unobserved", remediation, evidence_boundary, f"{config_path} not found")
+    readings = (
+        ("recall_line", read_recall_line_setting(home), RECALL_LINES),
+        ("recall_mode", read_recall_mode_setting(home), RECALL_MODES),
+    )
+    unread = [(name, setting, values) for name, setting, values in readings if not setting["recognized"]]
+    if not unread:
+        observed = "; ".join(
+            f"{name}: {setting['raw'] if setting['raw'] is not None else 'unset'}, {setting['value']} is in force"
+            for name, setting, _values in readings
+        )
+        return AdviceEntry(RECALL_SETTING_UNRECOGNIZED, "ok", remediation, evidence_boundary, observed)
+    if any(setting.get("reason") != "unknown_value" for _name, setting, _values in unread):
+        observed = (
+            "config.yaml could not be read by OMH's block-style scan (a tab indent, an inline section, "
+            "or a `<<:` merge key a recall setting could be inherited through); "
+            + ", ".join(f"{name} {setting['value']}" for name, setting, _values in readings)
+            + " is in force"
+        )
+    else:
+        observed = "; ".join(
+            f"{name} is {setting['raw']!r}, which is not {', '.join(values)}; {setting['value']} is in force"
+            for name, setting, values in unread
+        )
+    return AdviceEntry(RECALL_SETTING_UNRECOGNIZED, "advice", remediation, evidence_boundary, observed)
+
+
 # What a nested-scalar read can conclude. "absent" and "ambiguous" are
 # different answers and the two advisories say different things about them:
 # an absent key means the host default is in force and can be named, while a
@@ -1347,13 +1523,105 @@ def _yaml_bool(value: str) -> bool | None:
     return None
 
 
+PERSONAL_FILES_SKIPPED_REASON = (
+    "not run: personal-file reads are off (--no-personal-files); "
+    "the file body was not opened or read"
+)
+
+
+def _personal_file_skipped(check_id: str, files: str) -> AdviceEntry:
+    """The entry an inspector that would read a Hermes personal file body leaves when told not to."""
+    return AdviceEntry(
+        check_id,
+        "skipped",
+        "",
+        f"Not observed: {files} was not opened, so nothing about its contents is reported.",
+        f"skipped; {files} not read",
+        reason=PERSONAL_FILES_SKIPPED_REASON,
+    )
+
+
+_LSP_TOOLS_ON = frozenset({"1", "true", "yes", "on"})
+
+
+def check_lsp_tools_disabled(hermes_home: str | Path | None = None) -> AdviceEntry:
+    """Is the opt-in `omh-lsp` toolset enabled for this profile?
+
+    The `lsp_definition` / `lsp_references` / `lsp_rename` / `lsp_diagnostics`
+    tools stay out of every turn's schema unless the operator sets
+    `OMH_LSP_TOOLS=1` or `plugins.entries.omh.settings.lsp_tools`. The
+    cross-file impact check runs without them; the tools only add direct
+    semantic navigation and re-check. An unset or off value is advice, not a
+    health failure, so this lives in the advisory lane.
+
+    Report-only. OMH does not write this key.
+    """
+    home = _resolve_hermes_home(hermes_home)
+    config_path = home / "config.yaml"
+    evidence_boundary = (
+        "Local read of this profile's config.yaml `plugins.entries.omh.settings.lsp_tools` "
+        "plus the `OMH_LSP_TOOLS` environment, with the same block-style scan the tool gate "
+        "reads it with. The managed config overlay is not read."
+    )
+    remediation = (
+        "Set `OMH_LSP_TOOLS=1` or `plugins.entries.omh.settings.lsp_tools` to `true` in this "
+        "profile's config.yaml (block style), then restart Hermes so the `omh-lsp` toolset "
+        "registers."
+    )
+    if os.environ.get("OMH_LSP_TOOLS", "").strip().lower() in _LSP_TOOLS_ON:
+        return AdviceEntry(
+            "lsp_tools_disabled",
+            "ok",
+            remediation,
+            evidence_boundary,
+            "lsp_tools is enabled via OMH_LSP_TOOLS",
+        )
+    if not config_path.exists():
+        return AdviceEntry(
+            "lsp_tools_disabled", "unobserved", remediation, evidence_boundary, f"{config_path} not found"
+        )
+    try:
+        text = config_path.read_text(encoding="utf-8")
+        value = plugin_setting_text(text, "lsp_tools")
+    except (OSError, UnicodeDecodeError, RuntimeBindingError):
+        return AdviceEntry(
+            "lsp_tools_disabled",
+            "unobserved",
+            remediation,
+            evidence_boundary,
+            "config.yaml could not be read by the block-style scan, so the setting is unknown",
+        )
+    if value is not None and value.strip().lower() in _LSP_TOOLS_ON:
+        return AdviceEntry(
+            "lsp_tools_disabled",
+            "ok",
+            remediation,
+            evidence_boundary,
+            f"lsp_tools: {value.strip()}; the omh-lsp toolset is enabled",
+        )
+    observed = (
+        "lsp_tools is unset; the omh-lsp toolset stays hidden and the impact check "
+        "reports without direct re-check"
+        if value is None
+        else f"lsp_tools is {value.strip()!r}; the omh-lsp toolset stays hidden"
+    )
+    return AdviceEntry("lsp_tools_disabled", "advice", remediation, evidence_boundary, observed)
+
+
 def run_config_advisories(
     hermes_home: str | Path | None = None,
     *,
     omh_home: str | Path | None = None,
     discovery_home: str | Path | None = None,
+    personal_files: bool = True,
+    skills_dir: str | Path | None = None,
 ) -> AdvisoryReport:
-    """Run every read-only inspector and return the separate advisory report."""
+    """Run every read-only inspector and return the separate advisory report.
+
+    ``personal_files=False`` never calls the two inspectors that read the body
+    of SOUL.md, memories/MEMORY.md or memories/USER.md; each leaves a
+    ``skipped`` entry with its reason in the same position instead.
+    """
     return AdvisoryReport(
         contract=CONTRACT,
         entries=[
@@ -1363,14 +1631,24 @@ def run_config_advisories(
                 discovery_home=discovery_home,
             ),
             check_auxiliary_routing_unset(hermes_home),
-            check_soul_missing_or_starter(hermes_home),
-            check_hermes_memory_staleness(hermes_home),
+            (
+                check_soul_missing_or_starter(hermes_home)
+                if personal_files
+                else _personal_file_skipped("soul_missing_or_starter", "SOUL.md")
+            ),
+            (
+                check_hermes_memory_staleness(hermes_home)
+                if personal_files
+                else _personal_file_skipped("hermes_memory_staleness", "memories/MEMORY.md and memories/USER.md")
+            ),
             check_legacy_plan_artifacts(hermes_home),
             check_orphaned_project_scope_store(hermes_home),
             check_installed_skill_context_weight(hermes_home),
-            check_workflow_engine_reach(hermes_home, omh_home=omh_home),
+            check_workflow_engine_reach(hermes_home, omh_home=omh_home, skills_dir=skills_dir),
             check_turn_budget_loop_exposure(hermes_home),
             check_loop_hard_stop_disabled(hermes_home),
             check_dreaming_mode_setting(hermes_home),
+            check_recall_settings(hermes_home),
+            check_lsp_tools_disabled(hermes_home),
         ],
     )

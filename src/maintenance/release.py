@@ -36,7 +36,7 @@ from ..plugin_bundle.omh.awareness import (
     awareness_workflow_context_markdown,
 )
 # Re-exported under their old names; each limit and its history live in the bundle.
-from ..plugin_bundle.omh import turn_budget
+from ..plugin_bundle.omh import runtime_paths, turn_budget
 from ..plugin_bundle.omh.turn_budget import (
     AWARENESS_PRIMER_CONTEXT_CHAR_LIMIT as AWARENESS_PRIMER_CONTEXT_CHAR_LIMIT,
     AWARENESS_PRIMER_MARKDOWN_CHAR_LIMIT as AWARENESS_PRIMER_MARKDOWN_CHAR_LIMIT,
@@ -80,6 +80,17 @@ from ..use_cases import (
 REPOSITORY_ARCHIVE_ROOT = "https://github.com/rlaope/oh-my-hermes/archive/refs"
 RELEASE_ASSET_ROOT = "https://github.com/rlaope/oh-my-hermes/releases/download"
 RELEASE_CHANNELS = ("stable", "preview", "local")
+# `preview` is the channel that tracks branch `main`, so `--channel main` names
+# it in the words people use for it. Only the CLI flag reads the alias; every
+# record and URL keeps the canonical `preview`.
+RELEASE_CHANNEL_ALIASES = {"main": "preview"}
+
+
+def normalize_release_channel(value: str) -> str:
+    """The canonical channel for a `--channel` value (`main` -> `preview`)."""
+    return RELEASE_CHANNEL_ALIASES.get(value, value)
+
+
 # `.github/workflows/release.yml` refuses any tag that is not `vX.Y.Z` and
 # names the wheel it uploads after that version, so a stable version of this
 # shape has a predictable release-asset URL. Anything else does not, and falls
@@ -181,10 +192,31 @@ CONCEPTUAL_AWARENESS_SURFACES = ("request-to-handoff", "executor selection", "co
 # plus its newline (+86), measured against clean 85673e100. This exposes the
 # complete career workflow; no eager toolkit text or standing padding is added.
 # test_ai_job_search_context_budget pins the legacy index and marginal cost.
-SKILL_INDEX_CHAR_LIMIT = 13243
+# 13243 -> 13327: one repro-audit index line, measured from the producer.
+# 13243 -> 13328: one index line for the new `sprite-forge` skill; its name
+# and visible description window (+85). Re-derived from the producer.
+# Merged with main: 13327 (main) + 85 = 13412, re-derived from the producer.
+# 13412 -> 13502: one `systematic-review` index line plus newline (+90),
+# measured from the producer; no headroom.
+# 13502 -> 13592: one `model-compression` index line plus newline (+90),
+# measured from the producer; no headroom.
+# 13592 -> 12970: the producer now cuts descriptions the way Hermes'
+# `clip_skill_description` does, at the last word boundary inside 58
+# characters with trailing punctuation dropped, instead of a fixed 57; every
+# line that was cut mid-word gets shorter. Measured from the producer; no headroom.
+# 12970 -> 13051: one `skill-eval` index line plus newline, measured from
+# the producer after merging fix/skill-harness-fit; no headroom.
+# 13051 -> 13054: model-compression's clause says "smaller or cheaper via its
+# weights" again (+3 in its index line), measured from the producer; no headroom.
+# 13054 -> 13141: one `app-work-intake` index line (the cross-platform workflows' one new
+# skill), measured from the producer; no headroom.
+# 13141 -> 13223: one `bot-template` index line plus newline (+82), measured
+# from the producer; no headroom.
+SKILL_INDEX_CHAR_LIMIT = 13223
 # The longest single skill line in that index. Every description is already cut
 # to 60 characters, so what moves this is a longer skill name.
-SKILL_INDEX_LINE_CHAR_LIMIT = 100
+# 100 -> 99: same word-boundary cut as above, measured from the producer.
+SKILL_INDEX_LINE_CHAR_LIMIT = 99
 # The plugin bundle's registered tool schemas, 19 tools when the budget landed
 # (20 with `omh_jev_ask`), serialized as JSON with
 # sorted keys (`src/maintenance/per_turn_context.py`); `omh_todo` and `omh_loop`
@@ -319,7 +351,143 @@ SKILL_INDEX_LINE_CHAR_LIMIT = 100
 # combinators from every tool schema before any provider sees it
 # (`tools/schema_sanitizer.py`), so those bytes are counted here but not sent.
 # Re-derived from the producer.
-PLUGIN_TOOL_SCHEMA_CHAR_LIMIT = 68757
+# 68757 -> 69186: `omh_dag` adds parked waits (+429): the bounded-wait
+# description (+152), outcome enum (+10), and handle / wake_at properties
+# (+267). A live wait keeps its resume handle without spending a repair cycle;
+# the schema must name that outcome and its required metadata. Only omh_dag
+# moves (2479 -> 2908); measured by per_turn_context's register() recorder
+# against pinned main eeebba5bb. Composed preflight retains its approved
+# 947-character marker/cap description and adds only the same parked note;
+# the recorder still measures exactly 69186. No headroom: test_per_turn_budgets
+# holds the +429 parked cap against the intact approved preflight schema.
+# 69186 -> 69431: `omh_delegate_route` learns Hermes' delegation backends
+# (+245): one description sentence (under model_map set/fallback return the
+# `option` and write nothing; other backends answer not_applied) and the
+# `option` property fallback takes. Without them a parent under model_map
+# cannot learn that the config write it expects never happens. Only
+# omh_delegate_route moves (4770 -> 5015); re-derived from the producer.
+# 69431 -> 69644: six routing-recipe categories join the closed mixture
+# vocabulary (google-search, x-search, review, swarm, forensics, synthesize;
+# 2026-10-28). Both tools whose `category` enum is that vocabulary grow by
+# the six values -- omh_dag 2908 -> 2983 (+75) and omh_delegate_route
+# 5015 -> 5153 (+138, the enum plus the description's category list, which
+# names every routable category). An enum value cannot be shortened without
+# renaming the category; measured per tool against base 49f8c35f6.
+# 69644 -> 71831: `lsp_definition` (621), `lsp_references` (710) and
+# `lsp_rename` (856), the opt-in semantic navigation tools registered under
+# the `omh-lsp` toolset (+2187). All three are gated by a check_fn on env
+# `OMH_LSP_TOOLS` or the profile setting `lsp_tools`, so they cost schema
+# bytes only when explicitly enabled; measured by per_turn_context's
+# register() recorder against base 7a2de348a. No headroom.
+# 71831 -> 72227: `lsp_diagnostics` (+396), the fourth opt-in omh-lsp tool:
+# language-server errors for a file or glob, so a model can re-check the
+# callers the opt-in impact check named. Same toolset and check_fn as the
+# three above, so it costs schema bytes only when `lsp_tools` is on;
+# measured by per_turn_context's register() recorder against base 5cc1ed311.
+# No headroom.
+# 72227 -> 72370: the `identity` argument on omh_delegate_route (+143, 5153 ->
+# 5296), the custom identity profile name. Its description is the shortest form
+# that still names the source and the choice_required answer for an unknown
+# name; the chain-head and model_map behavior is enforced in code. Measured by
+# per_turn_context.plugin_tool_schema_chars_by_tool() against base 812ec53.
+# No headroom.
+# 72370 -> 72455: the node `role` field on omh_dag (+85, 2983 -> 3068): a bare
+# four-value enum (build, baseline, verify, review) and the word in the
+# description's field list. Roles were guessed from labels and misread checks
+# and producers; the explicit field is what the run's goal verdict reads. The
+# enum carries no description (the skill and the tool's results explain it).
+# Measured by per_turn_context.plugin_tool_schema_chars_by_tool() against base
+# c90d94551. No headroom.
+# 72455 -> 72525: the node `owner` field on omh_dag (+70, 3068 -> 3138): a bare
+# two-value enum (claude-code, codex) and the word in the description's field
+# list, so one run can send different coding nodes to different external
+# owners. No description (the skill's run-loop reference explains it).
+# Measured by per_turn_context.plugin_tool_schema_chars_by_tool() against base
+# df07e3573. No headroom.
+# 72525 -> 72561: the node `local` field on omh_dag (+37, 3138 -> 3175): a bare
+# boolean and the word in the description's field list, so a node whose
+# material must not leave the machine runs only on a local model_map option
+# and is held otherwise. No description (the skill's run-loop reference
+# explains it). omh_delegate_route's fallback sentence was corrected in the
+# same change (-1, 5296 -> 5295). Measured by
+# per_turn_context.plugin_tool_schema_chars_by_tool() against base a72f02362.
+# No headroom.
+# 72561 -> 72566: omh_delegate_route's category example names the shipped
+# ultrabrain head, which became claude-fable-5-1 in place of gpt-6-astra
+# (+5, 5295 -> 5300; owner decision, 2026-11-09). The example has to track the
+# head (tests/test_delegate_route_tool.py). Measured by
+# per_turn_context.plugin_tool_schema_chars_by_tool() against base b38ff85a1.
+# No headroom.
+# 72566 -> 72792: omh_dag takes the goal's criteria at define and extend
+# (+226, 3175 -> 3401): a bare `criteria` array of {id, text} with no
+# description, one clause in the tool description, and the goal parameter no
+# longer calls itself "goal criteria". The refusals, the handoff line format
+# and the limits live in the engine's own say and the skill's run-loop
+# reference. Measured by
+# per_turn_context.plugin_tool_schema_chars_by_tool() against base 0cba53d76.
+# No headroom.
+# 72792 -> 72887: the `criteria` parameter gains a description saying a
+# criterion keeps the request's own condition, never weakened to "reported"
+# (+95, 3401 -> 3496): in the 2026-11-10 baseline runs the model shortened a
+# refused goal's "confirm it works on staging" into "staging check reported".
+# Measured by per_turn_context.plugin_tool_schema_chars_by_tool() against
+# base d00be3a6e. No headroom.
+# 72887 -> 72895: that description says it in the positive form, "the state
+# the person asked for, not that a check ran or was reported" (+8, 3496 ->
+# 3504): live runs still weakened the staging criterion to "run and its real
+# result reported" under the word list. Measured by
+# per_turn_context.plugin_tool_schema_chars_by_tool() against base d00be3a6e.
+# No headroom.
+# 72895 -> 72940: omh_dag nodes gain an optional `read_only` boolean (its
+# child writes nothing in the workspace but its handoff), named in the
+# description's node field list (+45, 3504 -> 3549). Measured by
+# per_turn_context.plugin_tool_schema_chars_by_tool() against base 55c802b39.
+# No headroom.
+# 72940 -> 63324: the shared `observation` parameter (on 20 tools) keeps its
+# fields but drops the per-field descriptions a model never fills (-452 per
+# tool, -9040), and the twelve `omh_home`/`hermes_home` override descriptions
+# say the same refusal in fewer words (-576). Every rule a model acts on is
+# unchanged. Measured by per_turn_context.plugin_tool_schema_chars_by_tool()
+# against base 32a8217f8. No headroom.
+# 63324 -> 62099: the omh_todo, omh_loop, omh_document_plan and
+# omh_delegate_route descriptions say the same rules in fewer words (-1225;
+# 7811 -> 7545, 6856 -> 6726, 5512 -> 5336, 4764 -> 4111). An A/B of the
+# first tool call on 11 scenarios (claude-haiku-5-5 and claude-sonnet-5-5, 3
+# reps per arm) kept every scenario the old text passed; two sentences cut in
+# a first draft (a route set in an earlier turn runs on the previous model;
+# OMH mirrors each todo_list write) lost passes and were restored. Measured by
+# per_turn_context.plugin_tool_schema_chars_by_tool() against base a3068c323.
+# No headroom.
+# 62099 -> 62744: unified identities add the identity reference on omh_dag
+# nodes (+122, 3549 -> 3671), `attempt` and the qualified-reference identity
+# description on omh_delegate_route (+303, 4111 -> 4414), and the common
+# directory description and `identity` argument on omh_role (+220, 921 ->
+# 1141). Measured by per_turn_context.plugin_tool_schema_chars_by_tool()
+# against base 8c70948f6. No headroom.
+# 62744 -> 62968: omh_dag settles a node escalated when its child stops on a
+# judgement it cannot settle (+224; omh_dag 3671 -> 3895): one description
+# sentence (+211) and the outcome enum's "escalated" (+13). Measured by
+# per_turn_context.plugin_tool_schema_chars_by_tool() against main 8f09d0147.
+# No headroom.
+# 62968 -> 63156: omh_dag define takes the opt-in `carry_forward` base revision
+# that carries a re-run's unchanged accepted nodes (+188; omh_dag 3895 ->
+# 4083): one optional string property and its description. Measured by
+# per_turn_context.plugin_tool_schema_chars_by_tool() against main a5649293b.
+# No headroom.
+# 63156 -> 63824: omh_omher_terminal reads an omher terminal's status from its
+# link and asks omher to type a prompt the person allows (+668; 62968 -> 63636
+# on its own branch). Registered with a check_fn on omher's own folder, so
+# installs without omher never carry it. Measured by
+# per_turn_context.plugin_tool_schema_chars_by_tool() against c16924f2a, then
+# summed with main's carry_forward. No headroom.
+# 63824 -> 63954: omh_dag node `review_focus` (+130): one optional string property
+# with its description, and the field named in the tool description. Measured by
+# per_turn_context.plugin_tool_schema_chars_by_tool() against c5a909c6b. No headroom.
+# 2026-11-22: omh_dag node `owner` takes a configured executor id: the closed enum becomes a
+# pattern plus the description "Coding owner: built-in or configured id." (the export owner
+# takes the same pattern). Measured by per_turn_context.plugin_tool_schema_chars_by_tool()
+# against the schema before this change. No headroom.
+PLUGIN_TOOL_SCHEMA_CHAR_LIMIT = 64019
 # PRE_LLM_CALL_CONTEXT_CHAR_LIMIT, PRE_LLM_CALL_CONTEXT_FALLBACK_CHAR_LIMIT: moved with
 # their history to src/plugin_bundle/omh/turn_budget.py; imported at the top of this file.
 # 340000 -> 349637: three capability-skill sections were added by the domain
@@ -821,7 +989,152 @@ PLUGIN_TOOL_SCHEMA_CHAR_LIMIT = 68757
 # (+3072) for career discovery/drafting/interviews/evidenced outcomes. Retire
 # the old 22 unused characters, not carry them forward. Existing rows are
 # byte-stable and test_ai_job_search_context_budget pins them and this delta.
-FULL_CAPABILITY_SKILL_SECTION_CHAR_LIMIT = 525379
+# 525379 -> 525403: the pi-family runtime's profile was renamed; four
+# capability rows name it in a runtime list ("pi-family" for the old
+# three-letter name, +6 each, +24). No other row moved. Re-derived from the
+# producer.
+# 525403 -> 525400: the model-setup row drops the retired Apitopia, Qwen and
+# realtime-search/design wording and names Kimi K3 as superseded and DeepSeek
+# as a candidate (-3). Re-derived from the producer; the slack is retired.
+# 525400 -> 526271: only the `visual-qa` row moves (+871). Its quality bar
+# gains the composed-frame rule from the 2026-10-26 promo postmortem: a
+# look-alike of an existing UI in place of its renderer's output is BLOCK
+# (labeled concept and brief-requested stylised treatments are not), and
+# fill (full-bleed minus the edge inset without subtitles, the body safe area
+# with them), logo clear space, decorative meta text and per-locale count
+# agreement are measured. No other row changed. Re-derived from the producer.
+# 526271 -> 526315: the shipped `ru` (Russian) trigger language pack, after
+# its review (#2301) dropped the phrases everyday sentences contain and kept
+# one phrase of each nested held-back pair. Its Cyrillic phrases merge into
+# rows' trigger previews: `dag-ulw` shows `даг ультраворк` and `+2 more
+# triggers`, `running-work-board` trades its eighth trigger for a `+N more
+# triggers` count, and other rows' `+N more` counts move. Re-derived from the
+# producer on the tree merged with main.
+# 526315 -> 529305: one repro-audit capability row (+2990); no other row
+# moved. Re-derived from the producer on the tree merged with main.
+# 529305 -> 529306: show-reel adds 8 promo/launch/product video triggers;
+# its row only counts the ones past those it shows ("+5 more triggers" becomes
+# "+13 more triggers", +1). Re-derived from the producer on the tree merged
+# with main.
+# 525379 -> 528553: only the new `sprite-forge` capability row (3172) plus its
+# separator (+3174); no eager toolkit bytes or headroom. Re-derived from the producer.
+# 528553 -> 528574: the `deliverable-package` row description adds the
+# `archived` and `published` states ("attached, archived, and published" over
+# "and attached", +21). Measured by release drift; no headroom.
+# Merged with main: 529306 (main) + 3174 + 21 = 532501, re-derived from the
+# producer on the merged tree; no headroom.
+# 532501 -> 532741: the `show-reel` row only. Its description widens from a
+# product film to every authored video (explainer, motion graphics, kinetic
+# type, logo intro, 3D scene, data-viz, music visual, short), and its four
+# genre triggers move "+N more triggers". Measured by release drift; no headroom.
+# 532741 -> 533028: the `app-debugging` row only (#2499). Its quality bar gains
+# the `symptom_match` and `minimised` lines and its safety rules the redaction
+# rule (+287). Re-derived from the producer on the tree merged with main; no
+# headroom.
+# 532741 -> 533078: the `llm-app-dev` row (+307) and the `rust` row (+30) only.
+# The llm-app-dev quality bar gains the three rules that are wrong to discover
+# after the call sites exist: a deterministic fake adapter at the client
+# boundary so the code around the model is unit-tested offline, the stop reason
+# read before validation (a response cut at the output cap is truncation, never
+# re-asked under the same cap), and tool arguments validated before the tool
+# runs with invalid calls and tool failures returned as tool results. The rust
+# line only names the new binary-interface and dependency sections it loads;
+# the gate flags, the CLI contract, and the dependency rules stay in
+# `references/rust-discipline.md`. Re-derived from the producer; no headroom.
+# Merged with #2499 and #2497 after #2498: 533028 (#2499's tree: +287 app-debugging) and
+# 533078 (#2498: +307 llm-app-dev, +30 rust) each grew a different row over 532741, so the
+# merged value is re-derived from the producer: 533365 (532741 + 287 + 307 + 30); no headroom.
+# Architecture deepening (#2501) adds: the `refactor-plan` row's first
+# required input admits a chosen deepening candidate whose interface is shaped
+# first by `references/interface-shaping.md` (+136); the `tech-debt-audit`
+# row's description names architecture deepening and drops "against the
+# previous ledger" from its rerun clause (-2). No other row moved.
+# Merged with main after #2506: 533365 (main) + 136 - 2 = 533499, measured from the producer
+# on the merged tree; no headroom.
+# Planning skills offer dag-ulw after acceptance: the `ralplan` row's node-prompt
+# line names `dag-ulw` nodes beside `ultrawork` board rows (+12). No other row
+# moved. 533499 + 12 = 533511, measured from the producer; no headroom.
+# 533511 -> 533758: the `dag-ulw` row only. Its category-ladder quality-bar line
+# says a `role=review` node takes the `review` category where the routes serve
+# it, a `role=baseline` node stays `quick` or `unspecified-low`, and a
+# `role=verify` node, which judges the run goal, climbs the ladder (+247).
+# Measured from the producer; no headroom.
+# 533758 -> 536969: one `systematic-review` capability row (3209) plus its
+# separator (+3211); no other row moved. Measured from the producer.
+# 536969 -> 536979: the `dag-ulw` row only. Its handoff policy names the third
+# way an external coding owner is chosen (naming it in a dag-ulw request) and
+# the per-owner `exports` list (+10). Measured from the producer; no headroom.
+# 536979 -> 539268: the skill audit round, +2,289 net, each lane read at its own head against
+# main and the sum exact on the merged tree. Plan record +6 (the plan, ralplan and
+# adversarial-consensus artifact lines name `--plan-file`); research +485
+# (biomedical-evidence +190, data-analysis +2, live-info-operator +23, long-document-reading
+# +174, research-department +96); memory and Jev +234 (the memory-new and memory-sync
+# descriptions, decision-recall's Do Not Use lines, jev-action-check's third safety rule, the
+# jev-review-gate test diff); business +347 (required-input words and the redline rule); coding
+# core +1,207 (quality bars, safety rules and inputs on ten skills); build, infra and security
+# +27 (application-threat-model -4, security-event-response +31); host readiness -17
+# (executor-runtime-readiness -16, provider-profile-posture -14, capability-toggle +13). The
+# operations lane moves no row, and design and media moves sprite-forge at the same length.
+# 539268 -> 540929: the code-quality skills fix round (+1,661) on top of the audit round, each read at
+# its own head: native-debugging, build-failure-triage, verification-gate, github-event-ops, agent-debug,
+# codebase-onboarding, github-issue-intake, frontend-refactor, repro-audit, codegraph-refresh, codebase-uml,
+# rust, and the todo-checklist path in three rows. Measured from the producer on the merged tree; no headroom.
+# 540929 -> 541026: the cross-lane rail fix, +97. Sibling hand-offs gain backticks or labels in the rows that
+# carry them: apple-design, award-bar-score, codebase-onboarding, codegraph-refresh, design-orchestration,
+# executor-runtime-readiness, external-connector-readiness, memory-new, memory-sync, physical-device-readiness,
+# prompt-import-readiness, ralplan, research, research-brief, research-department, source-finder,
+# toolbelt-readiness, ultraperf. Measured from the producer; no headroom.
+# 541026 -> 540901: the routing reach round, measured per row from the producer: research-brief's description
+# keeps its exclusions in do_not_use_when only (-104), model-optimization drops two triggers (-44),
+# morning-brief's and native-debugging's index text (-6, -4), and the named phrases joining agent-ops-review,
+# code-review, security-event-response, verification-gate and wiki (+3, +2, +14, +6, +8); -125 in all.
+# 540901 -> 541076: a coding-owner choice counts only for the request it was made in. dag-ulw's handoff policy and
+# fourth safety rule drop the one-day window (+90); ulw-maestro's required input, first safety rule and owner-choice
+# quality bar say the same (+85). Measured per row from the producer; no headroom.
+# 541076 -> 541116: no learned coding-owner default. ulw-maestro's owner-choice quality bar names the setup-profile
+# default as a choice that stands and drops "recorded or learned" (+30); dag-ulw's handoff policy says the owner is
+# named in a request that invokes dag-ulw (+10). Measured per row from the producer; no headroom.
+# 540901 -> 544876: one `model-compression` capability row (3973) plus its
+# separator (+3975); no other row moved. Measured per row from the producer.
+# Merged with main: 541076 (main) + 3975 for the `model-compression` row = 545051,
+# re-derived from the producer.
+# Merged with main again: 541116 (main) + 3975 for the `model-compression` row =
+# 545091, re-derived from the producer.
+# 545091 -> 545113: ultrawork's handoff policy routes planning, decomposition and hard-debugging lanes to
+# ultrabrain and ideation to deep (+22); no other row moved. Measured per row from the producer; no headroom.
+# 545113 -> 545231: dag-ulw's ladder quality bar gives `ultrabrain` to the one build node whose judgement decides
+# the run (a design decision, a root cause, a contested trade-off), at most one, and says the verify node is not
+# that node (+118); no other row moved. Measured from the producer; no headroom.
+# 545231 -> 545258: the same sentence gives `ultrabrain` only "where your routes serve it", as the review clause
+# says for `review` (+27); no other row moved. Measured from the producer; no headroom.
+# 545258 -> 545272: merged with the plain-words branch, whose release-cut required inputs say "every file that
+# carries the version" where they said "every version surface", a skill term replies copied to people (+14, only
+# that row); that branch's pin was 545127 and main's 545258. Measured from the producer.
+# 545272 -> 545582 (2026-11-10): dag-ulw's split quality bar says to split for work that can run side by side,
+# keep a small follow-on step in the node it follows, and still run a graph when nothing runs side by side (+310,
+# only the dag-ulw row, 4454 -> 4764); measured from the producer against main 7fb251ab6. No headroom.
+# 545582 -> 545712 (2026-11-12): design-orchestration's quality bar had three items, so its new fourth line
+# (direction options shown as rendered images) enters the capability row's first-four slice (+130, only that
+# row, 3915 -> 4045); measured from the producer against main 2fcbef29f. No headroom.
+# 545712 -> 545683: twenty descriptions end their situation clause inside Hermes' 60-character index
+# window, the detail moved after the colon (-29 across those rows); measured from the producer. No headroom.
+# 545683 -> 549541: one `skill-eval` capability row plus its separator; dropping only that row
+# reproduces 545683. Measured from the producer.
+# 549541 -> 549528: model-compression's description says "smaller or cheaper via its weights" in place of
+# "smaller by changing its weights: cheaper through" (-13); measured from the producer. No headroom.
+# 549528 -> 549751 (2026-11-20): OpenAI's GPT-6.2 Codex guide lines: dag-ulw's node-prompt line briefs like a
+# colleague and names `review_focus` (+161), agent-instructions' infer-from-code rule enters its first-four
+# quality-bar slice (+62); only those two rows. Measured from the producer against main c5a909c6b. No headroom.
+# 549751 -> 554000: one `app-work-intake` capability row (4247, its workflow-skill exposure and
+# preferred usage included) plus its separator (+4249); the operating-rhythm, wiki and frontend rows
+# did not move (their new lines sit past the first-four slice). Measured per row from the producer.
+# No headroom.
+# 554000 -> 554104 (2026-11-25): automation-blueprint keeps its scheduled-spend guardrail inline in
+# safety_rules under universal progressive disclosure (+104, only that row); measured from producer.
+# 554104 -> 558514: merged with the bot-template branch, one `bot-template` capability row (4408)
+# plus its separator (+4410); dropping only that row reproduces 554104. Measured from the producer.
+# No headroom.
+FULL_CAPABILITY_SKILL_SECTION_CHAR_LIMIT = 558514
 FULL_CAPABILITY_SKILL_ITEM_CHAR_LIMIT = 9000
 # 100000 -> 102070: the same three domain workflows each add one standalone
 # capability row, again measured on the merged tree; warranted growth for three
@@ -925,7 +1238,21 @@ FULL_CAPABILITY_SKILL_ITEM_CHAR_LIMIT = 9000
 # separator (+935), measured against clean 85673e100; the complete method and
 # offline companion stay on demand. No sibling row or per-item limit moves;
 # test_ai_job_search_context_budget pins existing rows and the feature delta.
-STANDALONE_CAPABILITY_SKILL_SECTION_CHAR_LIMIT = 142635
+# 142635 -> 143564: one standalone repro-audit summary row, producer measured.
+# 142635 -> 143595: one 958-character standalone `sprite-forge` summary +
+# separator (+960); the method and Pillow companion stay on demand.
+# Merged with main: 143564 (main) + 960 = 144524, re-derived from the producer.
+# 144524 -> 145471: one 945-character standalone `systematic-review` row plus
+# separator (+947); the procedure stays in the skill body.
+# 145471 -> 146418: one 945-character standalone `model-compression` row plus
+# separator (+947); the method stays in its on-demand reference.
+# 146418 -> 147355: one 935-character standalone `skill-eval` row plus
+# separator (+937); the lift method stays in its on-demand reference.
+# 147355 -> 148307: one 950-character standalone `app-work-intake` row plus
+# separator (+952); its three recipes stay in on-demand references.
+# 148307 -> 149250: one 941-character standalone `bot-template` row plus
+# separator (+943); the templates stay in its on-demand reference.
+STANDALONE_CAPABILITY_SKILL_SECTION_CHAR_LIMIT = 149250
 STANDALONE_CAPABILITY_SKILL_ITEM_CHAR_LIMIT = 2200
 # ULW fold context ceiling (issue #954, PR D). The limit is the pre-D measured
 # value of the full profile's `skill_body` chars on `main` @ acb9a060, in the
@@ -2006,7 +2333,29 @@ STANDALONE_CAPABILITY_SKILL_ITEM_CHAR_LIMIT = 2200
 # body (+11,249), merged over the Vietnamese pack. Its own measurement on
 # 32878e25d (1,332,345) and this pack's (1,325,671) each raised the ceiling to
 # 1,500,000; together they read 1,336,920, whose 10% still rounds to it.
-FULL_PROFILE_SKILL_BODY_MEASURED_CHARS = 1336920
+# 1336920 -> 1511394 (measured; the ceiling 1500000 -> 1700000): the pack had grown to
+# 1,471,273 on main without a re-measure, because a floor the producer reads above fires no
+# re-derive signal, and `test_one_more_ordinary_lane_member_fits_every_body_budget` found that
+# the largest lane-mate copy (`ultrawork`) no longer fits. The skill audit round adds 40,121,
+# each lane read at its own head against main and the sum exact on the merged tree: plan
+# record +843, research +11,359, operations +5,958, memory and Jev +6,241, business +5,740,
+# coding core +2,599, design and media +2,329, build, infra and security +2,798, host
+# readiness +2,254. 1,511,394 plus 10%, rounded up to the next 50,000, is 1,700,000.
+# 1511394 -> 1521089 (the ceiling stays 1700000): the code-quality skills fix round adds 9,695 on the merged
+# tree; 1,521,089 plus 10%, rounded up to the next 50,000, is still 1,700,000.
+# 1521089 -> 1499208 (the ceiling 1700000 -> 1650000): each body's `Current lane` line drops its sample of up to
+# eight member names and a `+N more` count, none of which `skill_view` loads, and the cross-lane rail fix adds its
+# hand-off labels. 1,499,208 plus 10%, rounded up to the next 50,000, is 1,650,000.
+# 1499208 -> 1450927 (the ceiling 1650000 -> 1600000): every body's reply-voice paragraph becomes one line; the
+# record-term and turn-ending clauses it repeated live in the shared rail's Reply Language And Host Voice and Turn
+# Ending sections, which already held them. 1,450,927 plus 10%, rounded up to the next 50,000, is 1,600,000.
+# 1450927 -> 1348078 (the ceiling 1600000 -> 1500000): universal progressive disclosure across all non-bespoke
+# `omh-*` workflow skills moves heavy examples, sibling routing boundaries, and verbose input/output/artifact
+# lists into `references/full-contract.md` while keeping all actionable counter-default rules (`Quality bar`,
+# `Handoff policy`, `Safety rules`, `First Steps`, `Expert clarification questions`, upstream deferrals) inline
+# (-200,979 bytes from 1,549,057 pre-change; repeated bytes also fell 95,280 -> 94,401). 1,348,078 plus 10%,
+# rounded up to the next 50,000, is 1,500,000.
+FULL_PROFILE_SKILL_BODY_MEASURED_CHARS = 1348078
 FULL_PROFILE_SKILL_BODY_HEADROOM_PERCENT = 10
 FULL_PROFILE_SKILL_BODY_CEILING_STEP_CHARS = 50000
 FULL_PROFILE_SKILL_BODY_CHAR_LIMIT = 1500000
@@ -2054,7 +2403,7 @@ FULL_PROFILE_SKILL_BODY_REVIEWED_EXCEPTION_CHARS = 0
 # 120,000 -> 130,000: the reply rule on every body's tail now says the host
 # persona owns the reply language, tone, speech level, and sentence endings,
 # progress updates included, with the user's language only where the persona
-# sets none (miku, 2026-09-30: 13 of 17 interim lines in English). Measured
+# sets none (mbot, 2026-09-30: 13 of 17 interim lines in English). Measured
 # 117,742; one worst-case ordinary lane member (+2,547) no longer fit under
 # 120,000, which is the re-derive signal above. 117,742 plus 10%, rounded up
 # to the next 10,000, is 130,000.
@@ -2107,9 +2456,24 @@ FULL_PROFILE_SKILL_BODY_REVIEWED_EXCEPTION_CHARS = 0
 # +512) then took the reading to 113,986.
 # Three compact science bodies and their shared lane/evidence rails cross the
 # ceiling: reading 122343; plus 10%, rounded up to 10000, derives 140000.
-FULL_PROFILE_SKILL_BODY_REPEATED_MEASURED_CHARS = 122343
+# 122343 -> 117436 (the ceiling 140000 -> 130000): the skill audit round gives skills their own
+# Completion Checklist, Why and Recovery lines in place of the defaults they repeated, so the
+# reading falls below this floor. From main's 126,756 it falls 9,320: research -1,199,
+# operations -1,735, memory and Jev -593, business -1,600, coding core -246, design and media
+# -1,251, build, infra and security -1,402, host readiness -1,547, each lane read at its own
+# head; the merged tree is 253 above that sum, all under `Completion Checklist`, whose last
+# copy of a default stops counting as a duplicate only once. 117,436 plus 10%, rounded up to
+# the next 10,000, is 130,000.
+# 117436 -> 116571 (the ceiling stays 130000): agent-debug states its own Why and Do Not Use When, and
+# github-event-ops and github-issue-intake their own Completion Checklists, in place of the feature-surface
+# defaults those bodies repeated (-865). 116,571 plus 10%, rounded up to the next 10,000, is still 130,000.
+# 116571 -> 94049 (the ceiling 130000 -> 110000): the same lane line, whose sample of names was the same text in
+# every lane mate. 94,049 plus 10%, rounded up to the next 10,000, is 110,000.
+# 94049 -> 84569 (the ceiling 110000 -> 100000): the same one-line reply-voice rule, shorter in every section that
+# repeats it. 84,569 plus 10%, rounded up to the next 10,000, is 100,000.
+FULL_PROFILE_SKILL_BODY_REPEATED_MEASURED_CHARS = 84569
 FULL_PROFILE_SKILL_BODY_REPEATED_CEILING_STEP_CHARS = 10000
-FULL_PROFILE_SKILL_BODY_REPEATED_CHAR_LIMIT = 140000
+FULL_PROFILE_SKILL_BODY_REPEATED_CHAR_LIMIT = 100000
 
 
 @dataclass(frozen=True)
@@ -2154,6 +2518,53 @@ def package_url_for(channel: str, version: str = "", package_url: str = "") -> R
         # endpoint the release workflow does not produce.
         return ReleaseSelection(channel, version, f"{REPOSITORY_ARCHIVE_ROOT}/heads/main.zip", "main", "repository-archive")
     return ReleaseSelection(channel, version, "local", "local", "local")
+
+
+REPOSITORY_URL = "https://github.com/rlaope/oh-my-hermes"
+COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def release_from_direct_url(record: object) -> ReleaseSelection | None:
+    """The release an installed distribution came from, read from its PEP 610 record.
+
+    pip and uv write `direct_url.json` beside the package they installed from
+    a URL, naming exactly what they fetched. The curl and PowerShell
+    installers, a SHA-pinned archive, and `pip`/`uv tool install git+...` all
+    leave one, so `omh setup` can record the artifact that is actually
+    installed instead of a channel nobody asked for.
+
+    Only this repository's own artifact shapes are recognized, each mapped
+    by what it is: a release wheel or tag archive is `stable`, the `main`
+    archive or a commit is `preview` (an unreleased revision, which is what
+    `omh update` on preview tracks). Anything else, a local file, a fork, a
+    mirror, returns None rather than a guessed channel.
+    """
+    if not isinstance(record, dict):
+        return None
+    url = str(record.get("url") or "")
+    vcs = record.get("vcs_info")
+    if isinstance(vcs, dict):
+        commit = str(vcs.get("commit_id") or "")
+        if vcs.get("vcs") != "git" or url.removesuffix(".git") != REPOSITORY_URL or not COMMIT_SHA_RE.fullmatch(commit):
+            return None
+        requested = str(vcs.get("requested_revision") or "")
+        if requested.startswith("v") and RELEASE_WHEEL_VERSION_RE.fullmatch(requested[1:]):
+            return ReleaseSelection("stable", requested[1:], f"git+{url}@{requested}", requested, "git")
+        return ReleaseSelection("preview", "", f"git+{url}@{commit}", commit, "git")
+    if not isinstance(record.get("archive_info"), dict):
+        return None
+    tag, _, wheel = url.removeprefix(f"{RELEASE_ASSET_ROOT}/").partition("/")
+    if url.startswith(f"{RELEASE_ASSET_ROOT}/") and tag.startswith("v") and wheel == release_wheel_name(tag[1:]):
+        return ReleaseSelection("stable", tag[1:], url, tag, "release-wheel")
+    tag = url.removeprefix(f"{REPOSITORY_ARCHIVE_ROOT}/tags/").removesuffix(".zip")
+    if url == repository_archive_url(tag) and tag.startswith("v") and "/" not in tag:
+        return ReleaseSelection("stable", tag[1:], url, tag, "repository-archive")
+    if url == f"{REPOSITORY_ARCHIVE_ROOT}/heads/main.zip":
+        return ReleaseSelection("preview", "", url, "main", "repository-archive")
+    commit = url.removeprefix(f"{REPOSITORY_URL}/archive/").removesuffix(".zip")
+    if url == f"{REPOSITORY_URL}/archive/{commit}.zip" and COMMIT_SHA_RE.fullmatch(commit):
+        return ReleaseSelection("preview", "", url, commit, "repository-archive")
+    return None
 
 
 def release_artifact_note(selection: ReleaseSelection) -> str:
@@ -3251,7 +3662,11 @@ def hermes_release_smoke_steps(
 
 
 def _skill_name_for_hermes(skill: str) -> str:
-    return skill.rstrip("/").split("/")[-1]
+    if "/" in skill:
+        return skill.rstrip("/").split("/")[-1]
+    # Hermes checks a skill by its frontmatter name, which is the display
+    # label the install step also uses; the canonical name names no skill.
+    return omh_skill_display_name(skill)
 
 
 def _normalize_release_version(version: str) -> str:
@@ -4861,7 +5276,10 @@ def run_installed_command_smoke(
 
 def _target_binding(*, omh_home: str | Path | None = None, hermes_home: str | Path | None = None) -> dict[str, object]:
     omh = expand_home(omh_home, "OMH_HOME", "~/.omh")
-    hermes = expand_home(hermes_home, "HERMES_HOME", "~/.hermes")
+    # Hermes' own platform default, not a POSIX literal: on Windows the live
+    # smoke would otherwise bind every Hermes subprocess to a second, empty
+    # home instead of %LOCALAPPDATA%\\hermes.
+    hermes = expand_home(hermes_home, "HERMES_HOME", str(runtime_paths.platform_default_hermes_home()))
     return {
         "omh_home": str(omh),
         "hermes_home": str(hermes),

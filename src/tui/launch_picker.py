@@ -6,7 +6,8 @@ previews the look under the highlight after every move, and on Enter keeps it
 
 Keys: Up/Down (or k/j, as in the pagers) move one row; Enter keeps the
 highlighted look; Esc or Ctrl+C closes. A click on a row moves the highlight
-there. Where the launch card is no longer on screen to show the look, the app
+there. Where the slot holds fewer rows than there are looks, the list scrolls so
+the highlighted one shows. Where the launch card is no longer on screen to show the look, the app
 puts a compact preview (`preview`) above the list.
 """
 
@@ -15,7 +16,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from .keys import CHAR, DOWN, ENTER, ESCAPE, UP, Key, Paste
+from .keys import CHAR, DOWN, ENTER, ESCAPE, UP, Key, Paste, list_nav_step
+from .session_picker import CURRENT_MARK, pointer
 from .style import Line, Span, Style
 from .theme import LAUNCH_PRESETS, Theme
 from .width import truncate_line
@@ -32,6 +34,11 @@ SUMMARIES = {
     "violet": "violet to magenta, the skill hue's family · one box",
     "gold": "caduceus gold · one box in two columns",
     "graphite": "grey and white, turquoise hyphens · rules, no side edges",
+    "sakura": "pastel pink, sky blue and cream · one box",
+    "moonlit": "moonlight yellow and silver over navy · rules, no side edges",
+    "aurora": "emerald and teal into violet · a box per section",
+    "ember": "amber through orange to crimson · one box in two columns",
+    "kanagawa-wave": "indigo, spring teal and violet over sumi-ink · rules, no side edges",
 }
 SWATCH = "■"
 
@@ -40,7 +47,8 @@ SWATCH = "■"
 class LaunchPicker:
     current: str  # the look in use as it opened: what Esc puts back
     index: int = 0
-    first_row: int = 1  # the last render's row of the first look, under the preview and the header
+    first_row: int = 1  # the last render's row of the first look it showed, under the preview and the header
+    top: int = 0  # the last render's first look shown: the list scrolls when the slot is shorter than it
 
     def __post_init__(self) -> None:
         self.index = LAUNCH_PRESETS.index(self.current) if self.current in LAUNCH_PRESETS else 0
@@ -57,9 +65,11 @@ class LaunchPicker:
             return CLOSE
         if event.name == ENTER:
             return PICK
+        step = list_nav_step(event)
         plain = event.name == CHAR and not (event.ctrl or event.alt)
-        if event.name in (UP, DOWN) or (plain and event.char in ("j", "k")):
-            return self.move_to(self.index + (1 if event.name == DOWN or event.char == "j" else -1))
+        if step != 0 or event.name in (UP, DOWN) or (plain and event.char in ("j", "k")):
+            delta = step if step != 0 else (1 if event.name == DOWN or (plain and event.char == "j") else -1)
+            return self.move_to(self.index + delta)
         return None
 
     def move_to(self, index: int) -> str | None:
@@ -73,15 +83,24 @@ class LaunchPicker:
     def lines(self, width: int, theme: Theme, max_rows: int, swatches: Mapping[str, Sequence[Style]],
               preview: Sequence[Line] = ()) -> list[Line]:
         """`preview` (when the rest still fits under it), a header row, then a row per look (its name, its colours,
-        what it is), as many as `max_rows` holds."""
+        what it is), as many as `max_rows` holds, scrolled so the highlighted one shows."""
         shown = list(preview) if len(preview) + 1 + len(LAUNCH_PRESETS) <= max_rows else []
         rows: list[Line] = [*shown, truncate_line((Span(TITLE, theme.heading),), width)]
         self.first_row = len(rows)
-        for index, name in enumerate(LAUNCH_PRESETS):
-            style = theme.menu_current if index == self.index else theme.menu
-            mark = "›" if name == self.current else " "
-            row: list[Span] = [Span(f" {mark} {name:<10}", style)]
+        widest = max((len(swatches.get(name, ())) for name in LAUNCH_PRESETS), default=0)  # one summary column
+        name_width = max(map(len, LAUNCH_PRESETS)) + 2  # the longest name, then the gap the others had
+        room = max(max_rows - len(rows), 0)
+        # The list moves only when the highlight would leave it, and never past its last look.
+        top = max(min(self.top, self.index), self.index - room + 1)
+        self.top = min(max(top, 0), max(len(LAUNCH_PRESETS) - room, 0))
+        for index in range(self.top, min(self.top + room, len(LAUNCH_PRESETS))):
+            name = LAUNCH_PRESETS[index]
+            highlighted = index == self.index
+            mark = CURRENT_MARK if name == self.current else " "
+            row: list[Span] = [pointer(highlighted, theme),
+                               Span(f"{mark} {name:<{name_width}}", theme.menu_current if highlighted else theme.menu)]
             row += [Span(SWATCH, swatch) for swatch in swatches.get(name, ())]
-            row.append(Span(f"  {SUMMARIES[name]}", style))
+            row.append(Span(" " * (widest - len(swatches.get(name, ())))))
+            row.append(Span(f"  {SUMMARIES[name]}", theme.text if highlighted else theme.muted))
             rows.append(truncate_line(tuple(row), width))
         return rows[: max(max_rows, 0)]

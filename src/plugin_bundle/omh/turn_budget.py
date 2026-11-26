@@ -46,12 +46,41 @@ from .awareness import awareness_primer_context, awareness_primer_markdown
 # updates included, with the user's language only where the persona sets
 # none -- and says OMH shapes structure and content only. "The
 # host's own voice" alone named none of them, and a casual-register Korean
-# persona (miku, deepseek-v4.1-flash-ultrafast, 2026-09-30) kept its voice in
+# persona (mbot, deepseek-v4.1-flash-ultrafast, 2026-09-30) kept its voice in
 # the final answer while 13 of 17 interim progress lines in one session came
 # out in English. The compact rail measured 1434 and the markdown 3509
 # (re-derived from the producers, standing headroom kept as above).
-AWARENESS_PRIMER_CONTEXT_CHAR_LIMIT = 1440
-AWARENESS_PRIMER_MARKDOWN_CHAR_LIMIT = 3520
+# 1440 -> 1560 and 3520 -> 3630: the reply line gains one sentence carrying the
+# human-voice pass into every session (result first, no chatbot openers or
+# closers, staged contrasts, or decoration); the full pass is the on-demand
+# `omh-routing/references/human-voice.md`. Owners read OMH-guided replies that
+# opened with praise and closed with offers while the persona held. The compact
+# rail measured 1550 and the markdown 3619 (re-derived from the producers,
+# standing headroom kept as above).
+# 3630 -> 3685: the markdown's generic-tool checkpoint names each skill by its
+# full catalog name (`accessibility-audit`, not `a11y`), because the shorthand
+# was nothing a model could load. It measured 3677 (standing headroom kept as
+# above); the compact rail does not carry the line.
+# 3685 -> 3734: the same line writes each target as the label `skill_view`
+# loads (`omh-accessibility-audit`, `ulw-research`), because a catalog name
+# reaches the model through this primer with no render pass and is not a name
+# it can load either. It measured 3726 (standing headroom kept as above).
+# 3734 -> 3973: the workflow context cards and the common cues before generic
+# tools write their targets as labels too, so the primer names one skill one
+# way; the cards also drop shorthand that was no skill (`automation`,
+# `workspace`, `learning`). It measured 3965 (standing headroom kept as above).
+# 3973 -> 4051: each lane's `Key:` names are written as loadable labels
+# (`ulw-research`, `omh-routing`) instead of catalog names, so the primer no
+# longer shows `research` and `ulw-research` for one skill. It measured 4043
+# (standing headroom kept as above).
+# 1560 -> 1677 and 4051 -> 4170: the reply line gains one sentence: a message
+# the user sends mid-turn (a steer) gets one line before the next tool call,
+# saying what was taken from it and what changes. Owner (2026-11-19): a bot
+# that took a steer only changed its next command, silently, and the person
+# could not tell it was read. The compact rail measured 1667 and the markdown
+# 4160 (re-derived from the producers, standing headroom kept as above).
+AWARENESS_PRIMER_CONTEXT_CHAR_LIMIT = 1677
+AWARENESS_PRIMER_MARKDOWN_CHAR_LIMIT = 4170
 AWARENESS_WORKFLOW_CONTEXT_CHAR_LIMIT = 1500
 ROLE_CONTEXT_CHAR_LIMIT = 2600
 # Per-request budgets, zero-slack: each is the value its producer measured,
@@ -110,7 +139,33 @@ ROLE_CONTEXT_CHAR_LIMIT = 2600
 # longer pointed at todo_list, whose write would then be held. Its "(they
 # carry plan_stage)" reason is dropped to pay for the third plan (-1 on the
 # routed request). Re-derived from the producer.
-PRE_LLM_CALL_CONTEXT_CHAR_LIMIT = 5780
+# 5780 -> 5786: the pi-family runtime's profile was renamed, and the routed
+# coding handoff policy names it in its runtime list ("OMX/pi-family/OMC",
+# +6). Re-derived from the producer.
+# 5786 -> 5632 (2026-10-28): the route hint stops repeating itself. A hint's
+# `adjacent_workflows=` line equal to the block's top-level one is dropped
+# (-81 on the routed request's largest role, `handoff-guide`), and a
+# fallback label that only respells the action's underscores is dropped
+# (-73). Re-derived from the producer.
+# 5632 unchanged: the `plan_acceptance` scenario joins the set so the plan
+# follow-on line (`plan_follow_on`, 479 with its join) is measured on the turn
+# that accepts a plan Hermes' `/plan` just wrote, beside the route hint and
+# the active plan line (2759). It rides at most once per plan made, and on
+# `/plan`'s own turn (410 fenced alone), so it is under `all_surfaces`, which still sets the maximum,
+# and the fallback maximum is unchanged with it. Re-derived from the producer.
+# 5632 -> 6041 (2026-11-05): the console choices line (`console_choices`, 407
+# plus its join) asks a console session (cli, tui, desktop) to put a choice
+# its reply stops on through Hermes' `clarify` picker rather than a prose
+# list, with its context in the reply text, a one-sentence question and
+# `label — clause` choices the TUI draws as a label and a dim description. It
+# rides the session's first turn, so `all_surfaces` now runs as a
+# console session's first turn (`platform="tui"`) and carries it (+409); a
+# messaging platform's turn renders exactly what it rendered before. Its
+# re-ask variant (255) rides only the person's turn after a clarify timed
+# out, measured alone by the new `clarify_timed_out` scenario (374 fenced),
+# under `all_surfaces`. Re-derived from the producer.
+# 6041 -> 5977: the delegation prompt rule drops its rationale tail (-64) in the coding-core audit round.
+PRE_LLM_CALL_CONTEXT_CHAR_LIMIT = 5977
 # The same scenario set on the fallback: a session the awareness section did
 # not render for (a restart resume, a legacy id-rotating compaction, a refused
 # section, an older host) still gets the primer in the fenced context, so its
@@ -135,7 +190,20 @@ PRE_LLM_CALL_CONTEXT_CHAR_LIMIT = 5780
 # producer.
 # 7217 -> 7216: the same `plan_todo` change (-1). Re-derived from the
 # producer.
-PRE_LLM_CALL_CONTEXT_FALLBACK_CHAR_LIMIT = 7216
+# 7216 -> 7222: the same runtime-list rename (+6). Re-derived from the
+# producer.
+# 7222 -> 7338: the primer's reply line gains its human-voice sentence (+116),
+# and it rides the fenced context on this fallback. The section-host limit
+# above does not move. Re-derived from the producer.
+# 7338 -> 7184 (2026-10-28): the same route-hint dedup (-154). Re-derived
+# from the producer.
+# 7184 -> 7593 (2026-11-05): the same console choices line on the same
+# console first turn (+409). Re-derived from the producer.
+# 7593 -> 7529: the same rule, same -64.
+# 7529 -> 7646: the primer's reply line gains its mid-turn steer sentence
+# (+117), and it rides the fenced context on this fallback. The section-host
+# limit above does not move. Re-derived from the producer.
+PRE_LLM_CALL_CONTEXT_FALLBACK_CHAR_LIMIT = 7646
 
 SLOT_LIMITS: dict[str, int] = {
     "primer": AWARENESS_PRIMER_CONTEXT_CHAR_LIMIT,

@@ -14,7 +14,10 @@ has, never by what an error said:
   ships) is attached to as Ink attaches (`ui-tui/scripts/gateway_bootstrap.py`,
   `gatewayClient.ts`): the profile's gateway is ensured (started with idle
   exit when none runs) or found, a session ticket is minted over its private
-  control socket, and its loopback WebSocket is dialled with that ticket.
+  control socket (on Windows, where that endpoint is a named pipe, Hermes'
+  own `attach_gateway` ensures the gateway and mints the ticket, as Ink's
+  bootstrap does; Hermes 0.23.1 and later ship it), and its loopback
+  WebSocket is dialled with that ticket.
   Since Hermes 9595c3f345 the stdio entry refuses a home a running gateway
   owns, so on such a Hermes this is the way in, gateway running or not, as it
   is for Ink.
@@ -35,19 +38,55 @@ the stdio entry's in a closed set of places. `Adapter` translates those, after
 * `session.resume` asks for the display projection; a create or resume
   answer's `display_messages` are its `messages`, and an approval or clarify
   still open in it is sent as a request.
+* `session.resume` with `lazy` (the subagent session view's watch of a child,
+  which only Hermes' stdio entry serves) is answered here, never sent: the
+  owner refuses the key, and a plain resume would mount the child read-only
+  (empty while it runs) and become the session `shell.exec` runs in. The
+  refusal (REFUSED, LAZY_WATCH_UNSUPPORTED) moves nothing; the view reads that
+  child with `session.transcript {subagent_id, cursor}`, which passes through.
 * `session.close` is the owner's `session.detach` of this connection's view.
 * `prompt.submit` gets an `input_id` and the images queued for its session;
   one that truncates (a rewind) first reads the session's revision and
   rewinds through the owner's revision-fenced `session.mutate`.
-* `session.steer` gets the execution generation of the turn it steers,
+* `config.set model` (a `/model` switch of this session) is the owner's
+  revision-fenced `session.mutate model`, read and sent as Ink's
+  `canonicalSessionControls.ts` does, and answered in the stdio entry's
+  shape: the model (and the provider the owner committed), `deferred` while a turn runs, or `confirm_required` and
+  Hermes' message for a guarded target; the owner's one-time token for that
+  target is kept and rides the same switch sent again with
+  `confirm_expensive_model`. Every other `config.set` passes.
+* `session.title` with a title (the session picker's rename) and
+  `session.delete` (its delete) are the owner's revision-fenced
+  `session.mutate rename` (`{title}`, at the revision only: a metadata edit
+  carries no generation fence) and `session.mutate delete` (at the revision
+  and the generation), read first by a `session.resume` as Ink's
+  `mutateCanonical` reads them, and answered in the stdio entry's shapes
+  (`{title}`, `{deleted}`). That read attaches this connection to the
+  session; unless this connection already viewed it, the attachment is
+  handed back with a plain `session.detach` once the edit is answered (a
+  deleted session excepted), as Ink's `useSessionDelete.ts` hands back a
+  refused delete's.
+* `session.steer` and `session.redirect` get the execution generation of the turn they steer,
   `shell.exec` the session it runs in, and `session.list` is the owner's live
   listing followed by its stored one.
+* `session.interrupt` gets the execution generation of the turn it stops, as
+  Ink's `interruptTurn` sends it; the owner refuses any other generation
+  (`stale_generation`). Refused so, or with no generation known, it reads the
+  session (`session.resume`) and sends once more at the generation read, only
+  while that read says a turn runs.
 * `image.attach`, an image `input.detect_drop` and `clipboard.paste` stage
   the image with Hermes' own `image.attach_bytes` (or Hermes' clipboard
   helper, into Hermes' image staging directory) and queue it for the
-  session's next prompt, as the stdio entry queued it; `image.detach` takes it
-  out of that queue. A drop that is not an image is answered as no drop, as
+  session's next prompt, as the stdio entry queued it; `image.attach_bytes`
+  stages the bytes the TUI sends the same way; `image.detach` takes one out
+  of that queue by the path it was answered with. A drop that is not an image is answered as no drop, as
   Ink answers it, so the TUI pastes the text.
+* `slash.exec` goes as sent; when the owner refuses a command in
+  `SLASH_VERBS` with `unsupported_command` (`/compress`, `/branch`,
+  `/retry`, `/undo`, `/stop`, `/bg`, `/btw`, `/rollback`, `/reload`,
+  `/reload-mcp`, `/tools`, `/plugins`, `/config`), it runs through the
+  owner's own call for it, as Ink sends it (`session.mutate`,
+  `process.stop`, `prompt.background`, ...), answered in `slash.exec`'s shape.
 * An approval or one-question clarify arrives as an event and is answered
   with `approval.respond` / `clarify.respond`; here it is the server request
   the TUI answers, and its `.settled` event, or the session's detach, a
@@ -79,6 +118,10 @@ import threading
 from typing import Any
 import uuid
 
+_PICKER_SOURCE_LIMIT = 200  # the owner's maximum per request; stored history may need many pages
+# Desktop's conversations omit background runs. A local-* id is not a source: real chats use that prefix too.
+_PICKER_NOISE_SOURCES = frozenset({"acp", "cron", "kanban", "oneshot", "subagent", "tool"})
+
 TO_CLIENT = "client"
 TO_OWNER = "owner"
 Action = tuple[str, dict[str, Any]]
@@ -107,7 +150,10 @@ LIFECYCLE_EVENTS = frozenset({"session.info", "message.start", "message.complete
 # `useSessionLifecycle.ts`: the stamp of a view the TUI closes for good, applied once no other viewer is left.
 CLOSE_END_REASON = "tui_close"
 REFUSED = 4001  # the owner's own refusal code; not a drift code (4000, -32601), so the TUI keeps the session
+# `gateway_contract.LAZY_WATCH_UNSUPPORTED`, the same text: this file imports nothing of `omh`.
+LAZY_WATCH_UNSUPPORTED = "lazy watch unsupported on the shared gateway"
 PARAM_REJECTED = 4000
+STALE_GENERATION = "stale_generation"  # the owner's refusal of a control sent for a generation it has moved past
 NOT_FOUND = 4016  # the stdio entry's "image not found" / "unsupported image"
 ANSWER_NOTICE_KEY = "omh-attach-answer"
 ANSWER_NOTICE_TTL_MS = 15000
@@ -117,9 +163,59 @@ IMAGE_SIGNATURES = (
     (b"GIF89a", "image/gif"),
 )
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
+# The type of a file the owner staged, by the suffix it named it with (`_sniff_image_ext`).
+IMAGE_SUFFIX_MIMES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+                      ".webp": "image/webp"}
 TICKET_TIMEOUT_SECONDS = 5
+# The `/model` flags the owner's model switch takes, as `canonicalSessionControls.ts` `modelPayload` reads them:
+# `--session` (and Ink's `--tui-session`) say what a switch here always is, `--provider <slug>` names the route
+# and `--reasoning <level>` commits a level with the pick. Any other flag (`--global`, `--once`, `--refresh`) is
+# refused with the owner's own reason before anything is sent: a session cannot write every new session's default.
+MODEL_SESSION_FLAGS = frozenset({"--session", "--tui-session"})
+MODEL_REASONING_LEVELS = frozenset({
+    "none", "false", "disabled", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+})
+UNSUPPORTED_MODEL_OPTIONS = "unsupported_model_options"
+UNSUPPORTED_COMMAND = "unsupported_command"
+# Hermes' commands the owner's `slash.exec` refuses (`unsupported_command`, `gateway/session_commands.py`) and runs
+# through a verb of its own instead, as Ink runs each on a shared gateway (`ui-tui/src/app/slash/`): the name typed,
+# lowercased, Hermes' registry aliases (`/compact`, `/fork`) and Ink's (`/background`) included, to the command.
+SLASH_VERBS = {
+    "compress": "compress", "compact": "compress", "branch": "branch", "fork": "branch", "retry": "retry",
+    "undo": "undo", "stop": "stop", "bg": "bg", "background": "bg", "btw": "btw", "rollback": "rollback",
+    "reload": "reload", "reload-mcp": "reload-mcp", "reload_mcp": "reload-mcp", "tools": "tools",
+    "plugins": "plugins", "config": "config",
+}
+# `canonicalSessionCommands.ts` `isUserTurn`: a row carrying one of these is a compression's handoff, not a turn.
+COMPACTION_MARKERS = ("[CONTEXT COMPACTION", "[CONTEXT SUMMARY]:", "[END OF PRIOR CONTEXT")
+# `retryText`: the content parts /retry can send again as text; any other part (an image) has no replay.
+TEXT_PARTS = frozenset({"input_text", "output_text", "text"})
+# Ink's `/reload-mcp now`: the words that confirm a reload of every chat of the profile.
+RELOAD_MCP_CONFIRM_WORDS = frozenset({"always", "approve", "now", "once", "yes"})
 ENSURE_TIMEOUT_SECONDS = 30
+# What this child exits with when the gateway is there but not answering yet, so the TUI waits and tries again
+# instead of falling back (`omh.tui.gateway.GATEWAY_NOT_READY_EXIT`, the same number): Hermes' verdict that the
+# gateway is starting or draining (a restart), or a control socket or WebSocket that is missing, refuses, or is
+# silent. EX_UNAVAILABLE. A refusal of this client (a bad ticket, an upgrade turned down) stays 1.
+NOT_READY_EXIT = 69
+# The socket failures that mean the gateway is not answering yet: refused or reset, silent, or its socket not there
+# (a restart removes and recreates it). A denied socket (PermissionError) and any other OSError stay 1.
+NOT_READY_OS_ERRORS = (ConnectionError, TimeoutError, FileNotFoundError)
+GOING_AWAY = 1001  # the WebSocket close code of a server going down (RFC 6455): a gateway that restarts
+NOT_READY_STATES = frozenset({"starting", "draining"})
+NOT_READY_REASONS = frozenset({"control_timeout", "runtime_exited"})
+# Windows: Hermes' `mint_ticket` reports a failed control-pipe exchange as `TicketUnavailable(type(exc).__name__)`.
+# These are the names of `NOT_READY_OS_ERRORS` and their subclasses (an absent pipe, a deadline, a pipe that closed),
+# so a gateway coming up there is waited for as it is on POSIX.
+NOT_READY_TICKET_REASONS = frozenset({
+    "BrokenPipeError", "ConnectionAbortedError", "ConnectionError", "ConnectionRefusedError", "ConnectionResetError",
+    "FileNotFoundError", "TimeoutError",
+})
+# Hermes' gateway control endpoint is a Unix-domain socket only off Windows. On Windows the grant takes the attach
+# Hermes' own Ink bootstrap takes (`ui-tui/scripts/gateway_bootstrap.py`), which mints the ticket its own way.
+WINDOWS = os.name == "nt"
 OPEN_TIMEOUT_SECONDS = 10
+STDIN_READ_BYTES = 64 * 1024
 # After the TUI closes its input: how long the answers to calls already sent (the last session's detach) may take.
 # The TUI waits 0.5 s, then terminates, then waits 2 s more before the kill (`app.CLOSE_GRACE_SECONDS`,
 # `app.TERMINATE_GRACE_SECONDS`): this ends inside that, and a loopback detach answers in milliseconds.
@@ -129,6 +225,69 @@ DRAIN_SECONDS = 1.5
 def _whole(value: object) -> bool:
     """An int that is not a bool, as a JSON integer arrives."""
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+# What names the same conversation across the owner's live and stored answers: the id the row is listed under, the
+# id it resolves to, and the root of the lineage it belongs to (a compressed session is listed by its tip).
+CONVERSATION_IDS = ("id", "resolved_id", "_lineage_root_id")
+
+# What one listing row's latest activity is, in the order the answers name it: an owner that fills its picker
+# answers `activity_at`, and a live row is timed by when it started.
+ACTIVITY_FIELDS = ("activity_at", "last_active_at", "last_active", "started_at")
+
+
+def _activity_at(row: dict[str, Any]) -> float:
+    """The row's latest activity in seconds (one given in milliseconds is scaled down); 0 when it names none."""
+    for name in ACTIVITY_FIELDS:
+        value = row.get(name)
+        if isinstance(value, int | float) and not isinstance(value, bool) and value > 0:
+            number = float(value)
+            return number / 1000 if number > 1e11 else number
+    return 0.0
+
+
+def _picker_conversation(row: dict[str, Any], *, live: bool = False) -> bool:
+    """Desktop-like conversation feed; canonical local-* ids are not the noisy cron source.
+
+    A missing count from an older owner is unknown rather than empty. An empty live chat remains selectable before
+    its first message; stored zero-message runs do not crowd the conversation list.
+    """
+    source = row.get("source")
+    return (isinstance(row.get("id"), str) and bool(row["id"])
+            and (not isinstance(source, str) or source.strip().lower() not in _PICKER_NOISE_SOURCES)
+            and (live or row.get("message_count") != 0))
+
+
+def _same_conversations(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One row per conversation: rows sharing an id, a resolved id or a lineage root are merged, newest activity
+    first. What only one of them carries is kept -- a stored row's title and preview, a live row's running state --
+    and a row either half calls not resumable stays that way, since that says who owns it."""
+    merged: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        names = [row[field] for field in CONVERSATION_IDS if isinstance(row.get(field), str) and row[field]]
+        found = next((by_id[name] for name in names if name in by_id), None)
+        if found is None:
+            found = dict(row)
+            merged.append(found)
+        else:
+            for field in ("title", "preview", "source", "workspace", "cwd", "model", "git_branch"):
+                if not found.get(field) and row.get(field):
+                    found[field] = row[field]
+            if isinstance(row.get("message_count"), int) and row["message_count"] > (found.get("message_count") or 0):
+                found["message_count"] = row["message_count"]
+            if row.get("running"):
+                found["running"] = True
+            if row.get("resumable") is False:
+                found["resumable"] = False
+            if row.get("owner_runtime") and not found.get("owner_runtime"):
+                found["owner_runtime"] = row["owner_runtime"]
+            if max(_activity_at(found), _activity_at(row)):
+                found["activity_at"] = max(_activity_at(found), _activity_at(row))
+        for name in names:
+            by_id[name] = found
+    merged.sort(key=_activity_at, reverse=True)
+    return merged
 
 
 def _truthy(value: str | None) -> bool:
@@ -333,6 +492,26 @@ def _reply(request_id: object, result: dict[str, Any]) -> Action:
     return TO_CLIENT, {"jsonrpc": "2.0", "id": request_id, "result": result}
 
 
+def _output(request_id: object, text: str) -> Action:
+    """A command's answer as `slash.exec` gives it: text the TUI shows under the command."""
+    return _reply(request_id, {"type": "exec", "output": text})
+
+
+def _checkpoints(result: dict[str, Any]) -> str:
+    """`rollback.list`'s answer as lines: one per checkpoint, numbered as `/rollback <n>` takes them."""
+    if result.get("enabled") is not True:
+        return "Checkpoints are off for this session: `checkpoints.enabled` in Hermes' config.yaml turns them on."
+    rows = [row for row in result.get("checkpoints") or [] if isinstance(row, dict)]
+    if not rows:
+        return "No checkpoints yet."
+    lines = [
+        f"{index}. {str(row.get('hash') or '')[:10]}  "
+        f"{' · '.join(str(row[key]) for key in ('timestamp', 'message') if row.get(key)) or '(no details)'}"
+        for index, row in enumerate(rows, 1)
+    ]
+    return "\n".join([*lines, "/rollback diff <n> shows one; /rollback <n> [file] restores it."])
+
+
 def _refuse(request_id: object, code: int, message: str, data: dict[str, Any] | None = None) -> Action:
     error: dict[str, Any] = {"code": code, "message": message, **({"data": data} if data else {})}
     return TO_CLIENT, {"jsonrpc": "2.0", "id": request_id, "error": error}
@@ -343,12 +522,78 @@ def _withdrawal(session_id: object, request_id: str) -> Action:
     return TO_CLIENT, _event("request.cancel", session_id, {"id": request_id, "request_ids": [request_id]})
 
 
+def _refusal(error: dict[str, Any]) -> str:
+    """An owner refusal's reason code (`error.data.reason`, else its message)."""
+    data = error.get("data") if isinstance(error.get("data"), dict) else {}
+    return str(data.get("reason") or error.get("message") or "")
+
+
 def _reason(error: dict[str, Any]) -> str:
     """An owner refusal in words: its reason, and the detail it gave."""
     data = error.get("data") if isinstance(error.get("data"), dict) else {}
     reason = str(error.get("message") or error.get("code") or "refused")
     detail = data.get("detail")
     return f"{reason}: {detail}" if isinstance(detail, str) and detail else reason
+
+
+def model_payload(value: str) -> dict[str, str] | None:
+    """The owner's `session.mutate model` payload for a `/model` value; None for a form the owner does not take."""
+    words = value.split()
+    if not words or words[0].startswith("-"):
+        return None
+    payload, rest = {"model": words[0]}, words[1:]
+    while rest:
+        flag = rest.pop(0)
+        if flag in MODEL_SESSION_FLAGS:
+            continue
+        if flag == "--provider" and rest and not rest[0].startswith("-"):
+            payload["provider"] = rest.pop(0)
+        elif flag == "--reasoning" and rest and rest[0].lower() in MODEL_REASONING_LEVELS:
+            payload["reasoning"] = rest.pop(0).lower()
+        else:
+            return None
+    return payload
+
+
+def _user_turn(row: object) -> bool:
+    """A turn the person typed that /undo or /retry can take back (Ink's `isUserTurn`): not a display-only row
+    other than a steer, not one a compression archived or left as its handoff."""
+    if not isinstance(row, dict) or row.get("role") != "user" or not _whole(row.get("row_id")) or row.get("archived"):
+        return False
+    content = row.get("content")
+    return (not row.get("display_kind") or row.get("display_kind") == "steer") and not (
+        isinstance(content, str) and any(marker in content for marker in COMPACTION_MARKERS))
+
+
+def retry_text(content: object) -> str | None:
+    """The text /retry sends again (Ink's `retryText`): "" when the turn has none, None when it carries an image or
+    a part with no text replay."""
+    parts = [content] if isinstance(content, str) else content if isinstance(content, list) else [None]
+    text = ""
+    for part in parts:
+        if isinstance(part, str):
+            text += part
+        elif (isinstance(part, dict) and part.get("type") in TEXT_PARTS and isinstance(part.get("text"), str)
+              and len(part) == 2):
+            text += part["text"]
+        else:
+            return None
+    return text if text.strip() else ""
+
+
+def _plural(count: int, word: str, words: str = "") -> str:
+    return f"{count} {word if count == 1 else words or word + 's'}"
+
+
+def config_lines(value: object, prefix: str = "") -> list[str]:
+    """`config.get full`'s settings as `key.sub: value` lines, nested keys joined."""
+    if not isinstance(value, dict):
+        return [f"{prefix}: {json.dumps(value)}"] if prefix else []
+    lines: list[str] = []
+    for key, item in value.items():
+        name = f"{prefix}.{key}" if prefix else str(key)
+        lines += config_lines(item, name) if isinstance(item, dict) and item else [f"{name}: {json.dumps(item)}"]
+    return lines
 
 
 def _event(kind: str, session_id: object, payload: dict[str, Any]) -> dict[str, Any]:
@@ -374,23 +619,30 @@ class Adapter:
         self.files = files or HermesFiles()
         self.new_id = new_id
         self.contract: dict[str, Any] | None = None  # `runtime.describe`'s session_create, once answered
-        self.held: list[dict[str, Any]] = []  # session.create calls that wait for it
+        self.capabilities: frozenset[str] = frozenset()  # what `runtime.describe` says the owner's listing knows
+        # Opaque continuations issued to this TUI. Bound retained state if the picker was closed without paging.
+        self.list_pages: dict[str, Callable[[object], list[Action]]] = {}
+        self.held: list[dict[str, Any]] = []  # calls that need runtime.describe before being sent
         self.sessions: dict[str, _Session] = {}
         self.current = ""  # the session the TUI last opened
         self.shown: dict[str, _Shown] = {}  # request id the TUI answers -> the owner prompt it stands for
         self.calls: dict[object, str] = {}  # TUI call id -> method, for the calls whose answer is translated
         self.own: dict[str, Callable[[dict[str, Any]], list[Action]]] = {}  # this adapter's calls -> continuation
+        self.model_confirms: dict[tuple[object, str], str] = {}  # (session, model value) -> the owner's confirm token
         self._serial = 0
 
     # ── what the owner is asked first ──
 
     def describe(self) -> list[Action]:
-        """Ask the owner for its session contract; session.create waits for the answer."""
+        """Ask the owner for its session contract and listing capabilities."""
         return [self._call("runtime.describe", {}, self._on_described)]
 
     def _on_described(self, frame: dict[str, Any]) -> list[Action]:
         result = frame.get("result")
         contract = result.get("session_create") if isinstance(result, dict) else None
+        capabilities = result.get("capabilities") if isinstance(result, dict) else None
+        self.capabilities = frozenset(name for name in capabilities if isinstance(name, str)) \
+            if isinstance(capabilities, list) else frozenset()
         if isinstance(contract, dict):
             self.contract = contract
         else:
@@ -416,12 +668,19 @@ class Adapter:
             "session.close": self._close,
             "prompt.submit": self._submit,
             "session.steer": self._steer,
+            "session.redirect": self._redirect,
+            "session.interrupt": self._interrupt,
+            "config.set": self._config_set,
             "shell.exec": self._shell,
             "session.list": self._list,
+            "session.title": self._rename,
+            "session.delete": self._delete,
             "image.attach": self._attach,
+            "image.attach_bytes": self._attach_bytes,
             "image.detach": self._detach_image,
             "input.detect_drop": self._drop,
             "clipboard.paste": self._paste,
+            "slash.exec": self._slash,
         }.get(method)
         if translate is None:
             return [(TO_OWNER, frame)]
@@ -458,6 +717,8 @@ class Adapter:
         return [self._forward(request_id, "session.create", params)]
 
     def _resume(self, request_id: object, params: dict[str, Any]) -> list[Action]:
+        if "lazy" in params:
+            return [_refuse(request_id, REFUSED, LAZY_WATCH_UNSUPPORTED, {"reason": "lazy_watch_unsupported"})]
         params.pop("cols", None)
         params["display_projection"] = True
         return [self._forward(request_id, "session.resume", params)]
@@ -539,12 +800,106 @@ class Adapter:
 
         return [self._call("session.mutate", mutate, on_rewound)]
 
-    def _steer(self, request_id: object, params: dict[str, Any]) -> list[Action]:
+    def _steer(self, request_id: object, params: dict[str, Any], method: str = "session.steer") -> list[Action]:
         state = self._state(params)
         if state is None or not _whole(state.generation):
             return [_reply(request_id, {"status": "rejected"})]  # no turn known to steer: the TUI queues the text
         params["execution_generation"] = state.generation
-        return [self._forward(request_id, "session.steer", params, translated=False)]
+        return [self._forward(request_id, method, params, translated=False)]
+
+    def _redirect(self, request_id: object, params: dict[str, Any]) -> list[Action]:
+        return self._steer(request_id, params, "session.redirect")
+
+    def _interrupt(self, request_id: object, params: dict[str, Any]) -> list[Action]:
+        state = self._state(params)
+        if state is None or not _whole(state.generation):
+            return [self._interrupt_read(request_id, params)]
+        return [self._interrupt_at(request_id, params, state.generation, retry=True)]
+
+    def _interrupt_at(self, request_id: object, params: dict[str, Any], generation: int, *, retry: bool) -> Action:
+        """Stop the turn of `generation`; a stale one, the first time, is read afresh and sent once more."""
+
+        def on_answer(reply: dict[str, Any]) -> list[Action]:
+            error = reply.get("error")
+            if retry and isinstance(error, dict) and _refusal(error) == STALE_GENERATION:
+                return [self._interrupt_read(request_id, params)]
+            return [(TO_CLIENT, {**reply, "id": request_id})]
+
+        return self._call("session.interrupt", {**params, "execution_generation": generation}, on_answer)
+
+    def _interrupt_read(self, request_id: object, params: dict[str, Any]) -> Action:
+        """Read the generation the session runs, then stop that turn.
+
+        Ink reports a stale stop instead of retrying it. The TUI only sends a
+        stop while it shows a turn running, so here the read names the turn
+        to stop. A read that finds no turn running answers the stop as done:
+        the turn ended on its own, and nothing else is stopped.
+        """
+        session_id = params.get("session_id")
+
+        def on_read(snapshot: dict[str, Any]) -> list[Action]:
+            result = snapshot.get("result")
+            if not isinstance(result, dict):
+                error = snapshot.get("error") if isinstance(snapshot.get("error"), dict) else {}
+                return [_refuse(request_id, REFUSED, f"Hermes did not read the session to interrupt it ({_reason(error)})")]
+            self._note_view(result, snapshot=True)
+            generation = result.get("execution_generation")
+            if result.get("running") is not True or not _whole(generation):
+                return [_reply(request_id, {"session_id": session_id, "execution_generation": generation,
+                                            "running": False})]
+            return [self._interrupt_at(request_id, params, generation, retry=False)]
+
+        return self._call("session.resume", {"session_id": session_id}, on_read)
+
+    def _config_set(self, request_id: object, params: dict[str, Any]) -> list[Action]:
+        """`config.set model` switches the session through the owner's `session.mutate model`; any other key passes.
+
+        The revision and generation come from a fresh `session.resume`, as
+        Ink reads them. The answer is the stdio entry's: `value` is the model
+        the session now runs, or will at its next turn (`deferred`), and a
+        guarded target (cost, data policy, a large context) is
+        `confirm_required` with Hermes' message and no value, the switch not
+        made; its token is kept, and the same switch sent again with
+        `confirm_expensive_model` carries it, once, as Ink sends `confirm`. A
+        refusal is the owner's own, its reason kept.
+        """
+        if params.get("key") != "model":
+            return [self._forward(request_id, "config.set", params, translated=False)]
+        session_id, value = params.get("session_id"), str(params.get("value") or "")
+        payload = model_payload(value)
+        if payload is None:
+            return [_refuse(request_id, REFUSED, UNSUPPORTED_MODEL_OPTIONS, {"reason": UNSUPPORTED_MODEL_OPTIONS})]
+        token = self.model_confirms.pop((session_id, value), None)
+        if params.get("confirm_expensive_model") is True and token:
+            payload["confirm"] = token
+
+        def on_read(snapshot: dict[str, Any]) -> list[Action]:
+            result = snapshot.get("result")
+            if not isinstance(result, dict):
+                return [(TO_CLIENT, {**snapshot, "id": request_id})]
+            self._note_view(result, snapshot=True)
+            mutate = {
+                "session_id": session_id, "request_id": self.new_id(),
+                "expected_revision": result.get("revision"), "expected_generation": result.get("execution_generation"),
+                "operation": "model", "payload": payload,
+            }
+            return [self._call("session.mutate", mutate, on_mutated)]
+
+        def on_mutated(reply: dict[str, Any]) -> list[Action]:
+            result = reply.get("result")
+            if not isinstance(result, dict):
+                return [(TO_CLIENT, {**reply, "id": request_id})]
+            if result.get("status") == "confirmation_required":
+                if isinstance(result.get("confirm"), str) and result["confirm"]:
+                    self.model_confirms[(session_id, value)] = result["confirm"]
+                return [_reply(request_id, {"key": "model", "value": "", "confirm_required": True,
+                                            "confirm_message": str(result.get("confirm_message") or "")})]
+            self._note_generation(session_id, result.get("execution_generation"))
+            provider = {"provider": result["provider"]} if isinstance(result.get("provider"), str) and result["provider"] else {}
+            return [_reply(request_id, {"key": "model", "value": result.get("model") or "", **provider, "scope": "session",
+                                        "deferred": result.get("status") == "deferred"})]
+
+        return [self._call("session.resume", {"session_id": session_id}, on_read)]
 
     def _shell(self, request_id: object, params: dict[str, Any]) -> list[Action]:
         if self.current:
@@ -552,26 +907,458 @@ class Adapter:
         return [self._forward(request_id, "shell.exec", params, translated=False)]
 
     def _list(self, request_id: object, params: dict[str, Any]) -> list[Action]:
-        """The owner's live sessions, then its stored ones, as one answer (Ink's resume picker reads both)."""
-        limit = params.get("limit")
+        """Fill a page with conversations, not background runs. Keep the gateway cursor and overflow in the child.
+
+        A continuation carries the same live/stored merge forward, so duplicate lineages don't take another slot
+        and an over-fetched owner page isn't discarded. Only a cursor-capable owner advertises that older history
+        can be loaded. Exact-title lookup still goes straight to Hermes.
+        """
+        if "page" in params:
+            page = params["page"]
+            more = self.list_pages.get(page) if isinstance(page, str) else None
+            return more(request_id) if more else [_refuse(request_id, REFUSED, "Reopen the session list to load more")]
+        if "title" in params:
+            return [self._forward(request_id, "session.list", params, translated=False)]
+        if self.contract is None:
+            self.held.append({"jsonrpc": "2.0", "id": request_id, "method": "session.list", "params": params})
+            return []
+        requested = params.get("limit")
+        limit = _PICKER_SOURCE_LIMIT
+        if isinstance(requested, int) and not isinstance(requested, bool) and requested > 0:
+            limit = requested
+        asked: dict[str, Any] = {"limit": _PICKER_SOURCE_LIMIT}
+        if "session-list-picker-v1" in self.capabilities:
+            asked["picker"] = True
+        paging = "session-list-cursor-v1" in self.capabilities
+        stored_params = {**asked, "scope": "stored"}
+
+        def collect(rid: object, previous: list[dict[str, Any]], emitted: set[str], visited: set[str],
+                    cursor: str | None, page: str = "", *, first: bool = False) -> list[Action]:
+            rows, cursors = previous.copy(), visited.copy()
+
+            def advance(next_cursor: str | None, *, first: bool = False) -> list[Action]:
+                kept = [row for row in _same_conversations(rows) if row.get("id") not in emitted]
+                if first or (len(kept) < limit and next_cursor):
+                    query = dict(stored_params)
+                    if next_cursor:
+                        query["cursor"] = next_cursor
+                        cursors.add(next_cursor)
+                    return [self._call("session.list", query, on_stored)]
+                batch = kept[:limit]
+                result: dict[str, Any] = {"sessions": batch}
+                if paging and (len(kept) > limit or next_cursor):
+                    token = self.new_id()
+                    sent = emitted | {row["id"] for row in batch}
+                    self.list_pages[token] = lambda rid: collect(rid, rows, sent, cursors, next_cursor, token)
+                    result["next_page"] = token
+                # A timed-out client may retry after the owner's answer arrived. Replay that page instead of
+                # restarting the scan or making the client reopen. Completed entries retain only their reply.
+                if page in self.list_pages:
+                    self.list_pages[page] = lambda retry: [_reply(retry, result)]
+                if len(self.list_pages) > 8:
+                    del self.list_pages[next(iter(self.list_pages))]
+                return [_reply(rid, result)]
+
+            def on_stored(stored: dict[str, Any]) -> list[Action]:
+                result = stored.get("result")
+                if not isinstance(result, dict):
+                    return [(TO_CLIENT, {**stored, "id": rid})]
+                rows.extend(row for row in result.get("sessions") or []
+                            if isinstance(row, dict) and _picker_conversation(row))
+                token = result.get("next_cursor") if paging else None
+                return advance(token if isinstance(token, str) and token not in cursors else None)
+
+            return advance(cursor, first=first)
 
         def on_live(live: dict[str, Any]) -> list[Action]:
             if not isinstance(live.get("result"), dict):
                 return [(TO_CLIENT, {**live, "id": request_id})]
-            rows = [row for row in live["result"].get("sessions") or [] if isinstance(row, dict)]
+            rows = [row for row in live["result"].get("sessions") or []
+                    if isinstance(row, dict) and _picker_conversation(row, live=True)]
+            return collect(request_id, rows, set(), set(), None, first=True)
 
-            def on_stored(stored: dict[str, Any]) -> list[Action]:
-                result = stored.get("result")
-                seen = {row.get("id") for row in rows}
-                for row in (result.get("sessions") or []) if isinstance(result, dict) else []:
-                    if isinstance(row, dict) and row.get("id") not in seen:
-                        rows.append(row)
-                kept = rows[:limit] if _whole(limit) and limit > 0 else rows
-                return [_reply(request_id, {"sessions": kept})]
+        return [self._call("session.list", asked, on_live)]
 
-            return [self._call("session.list", {**params, "scope": "stored"}, on_stored)]
+    def _rename(self, request_id: object, params: dict[str, Any]) -> list[Action]:
+        """`session.title` with a title is the owner's `session.mutate rename`, at the revision a `session.resume`
+        reads and no generation (Ink's `mutateCanonical` sends a rename so), answered `{pending, title}` as the stdio
+        entry answers it. One without a title (a read) passes."""
+        if "title" not in params:
+            return [self._forward(request_id, "session.title", params, translated=False)]
+        title = params.get("title")
 
-        return [self._call("session.list", params, on_live)]
+        def answer(result: dict[str, Any]) -> dict[str, Any]:
+            return {"pending": False, "title": str(result.get("title") or title).strip()}
+
+        return self._metadata_edit(request_id, params.get("session_id"), "rename", {"title": title}, answer)
+
+    def _delete(self, request_id: object, params: dict[str, Any]) -> list[Action]:
+        """`session.delete` is the owner's `session.mutate delete` (the shared gateway has no `session.delete`), at
+        the revision and generation a `session.resume` reads, answered `{deleted: <id>}` as the stdio entry answers."""
+        session_id = params.get("session_id")
+        return self._metadata_edit(request_id, session_id, "delete", {}, lambda _result: {"deleted": session_id})
+
+    def _metadata_edit(self, request_id: object, session_id: object, operation: str, payload: dict[str, Any],
+                       answer: Callable[[dict[str, Any]], dict[str, Any]]) -> list[Action]:
+        """A rename or delete of a session the picker lists, which this connection may not view.
+
+        The `session.resume` that reads the revision (and, for a delete, the
+        generation) attaches this connection as a viewer. That attachment is
+        handed back with a plain `session.detach` (no end reason: one would
+        run the owner's viewer close) once the edit is answered, unless this
+        connection viewed the session already, as Ink's `useSessionDelete.ts`
+        hands back a refused delete's, or a resume opened it while the edit
+        waited (the owner reuses one subscription per viewer, so handing it
+        back would cut the opened session's events). A deleted session leaves
+        nothing to hand back, and a view of it here is forgotten.
+        """
+
+        def on_read(snapshot: dict[str, Any]) -> list[Action]:
+            result = snapshot.get("result")
+            if not isinstance(result, dict):
+                return [(TO_CLIENT, {**snapshot, "id": request_id})]
+            resolved = result.get("session_id") or session_id
+            subscription = result.get("subscription_id")
+            release = ({"session_id": resolved, "subscription_id": subscription}
+                       if isinstance(subscription, str) and subscription and resolved not in self.sessions else None)
+            mutate = {"session_id": session_id, "request_id": self.new_id(), "expected_revision": result.get("revision"),
+                      "operation": operation, "payload": payload}
+            if operation != "rename":  # a metadata edit carries no generation fence (`mutateCanonical`)
+                mutate["expected_generation"] = result.get("execution_generation")
+
+            def on_mutated(reply: dict[str, Any]) -> list[Action]:
+                done = reply.get("result")
+                said: Action = (_reply(request_id, answer(done)) if isinstance(done, dict)
+                                else (TO_CLIENT, {**reply, "id": request_id}))
+                if isinstance(done, dict) and operation == "delete":
+                    if isinstance(resolved, str):
+                        self.sessions.pop(resolved, None)
+                    return [said]
+                adopted = self.sessions.get(resolved) if isinstance(resolved, str) else None
+                if release is None or (adopted is not None and adopted.subscription_id == release["subscription_id"]):
+                    return [said]  # decided now, not at the read: a resume since adopted this subscription
+                return [self._call("session.detach", release, lambda _gone: []), said]
+
+            return [self._call("session.mutate", mutate, on_mutated)]
+
+        return [self._call("session.resume", {"session_id": session_id}, on_read)]
+
+    # ── the commands the owner runs through a verb of its own ──
+
+    def _slash(self, request_id: object, params: dict[str, Any]) -> list[Action]:
+        """`slash.exec` as sent; the owner's `unsupported_command` for a command in SLASH_VERBS is answered by its verb.
+
+        The command goes as typed first, so an owner that runs it there
+        answers it itself. The answer is `slash.exec`'s: `exec` with the text
+        to show, `send` with /retry's prompt, `prefill` with /undo's, and a
+        refusal is the owner's own, its reason kept.
+        """
+        words = str(params.get("command") or "").strip().lstrip("/").split(None, 1)
+        verb = SLASH_VERBS.get(words[0].lower()) if words else None
+        if verb is None:
+            return [self._forward(request_id, "slash.exec", params, translated=False)]
+        arg = words[1].strip() if len(words) > 1 else ""
+        session_id = params.get("session_id")
+
+        def on_answer(reply: dict[str, Any]) -> list[Action]:
+            error = reply.get("error")
+            if not isinstance(error, dict) or _refusal(error) != UNSUPPORTED_COMMAND:
+                return [(TO_CLIENT, {**reply, "id": request_id})]
+            run = {
+                "compress": self._compress, "branch": self._branch, "retry": self._turn_back, "undo": self._turn_back,
+                "stop": self._stop, "bg": self._side, "btw": self._side, "rollback": self._rollback,
+                "reload": self._reload_env, "reload-mcp": self._reload_mcp, "tools": self._tools,
+                "plugins": self._plugins, "config": self._config,
+            }[verb]
+            return run(request_id, session_id, verb, arg, reply)
+
+        return [self._call("slash.exec", params, on_answer)]
+
+    def _owner(self, request_id: object, method: str, params: dict[str, Any],
+               show: Callable[[dict[str, Any]], Action]) -> Action:
+        """One owner call: its result answers the TUI through `show`, and its refusal is passed on as it came."""
+
+        def then(reply: dict[str, Any]) -> list[Action]:
+            result = reply.get("result")
+            return [show(result)] if isinstance(result, dict) else [(TO_CLIENT, {**reply, "id": request_id})]
+
+        return self._call(method, params, then)
+
+    def _mutation(self, request_id: object, session_id: object, operation: str,
+                  payload: Callable[[dict[str, Any]], dict[str, Any] | Action],
+                  show: Callable[[dict[str, Any]], Action]) -> list[Action]:
+        """`session.mutate <operation>` at the revision and generation a fresh `session.resume` reads, as Ink's
+        `mutateCanonical` sends it. `payload` builds the edit from that read, or answers the TUI with nothing sent."""
+
+        def on_read(snapshot: dict[str, Any]) -> list[Action]:
+            result = snapshot.get("result")
+            if not isinstance(result, dict):
+                return [(TO_CLIENT, {**snapshot, "id": request_id})]
+            self._note_view(result, snapshot=True)
+            body = payload(result)
+            if not isinstance(body, dict):
+                return [body]
+            mutate = {
+                "session_id": session_id, "request_id": self.new_id(), "expected_revision": result.get("revision"),
+                "expected_generation": result.get("execution_generation"), "operation": operation, "payload": body,
+            }
+
+            def shown(answer: dict[str, Any]) -> Action:
+                self._note_generation(session_id, answer.get("execution_generation"))
+                return show(answer)
+
+            return [self._owner(request_id, "session.mutate", mutate, shown)]
+
+        return [self._call("session.resume", {"session_id": session_id}, on_read)]
+
+    def _compress(self, request_id: object, session_id: object, verb: str, arg: str, refusal: dict) -> list[Action]:
+        """`/compress [here [N] | <focus> | --preview]`: the owner's `compress`, its raw argument as Ink sends it."""
+
+        def show(result: dict[str, Any]) -> Action:
+            if result.get("status") == "preview":
+                lines = result.get("lines") if isinstance(result.get("lines"), list) else []
+                return _output(request_id, "\n".join(str(line) for line in lines) or "Hermes sent no preview.")
+            summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+            noop = result.get("status") == "noop" or summary.get("noop") is True
+            headline = str(summary.get("headline") or ("Nothing to compress." if noop else "Context compressed."))
+            notes = [f"  {line}" for line in (summary.get("token_line"), summary.get("note"))
+                     if isinstance(line, str) and line]
+            return _output(request_id, "\n".join([headline if noop else f"✓ {headline}", *notes]))
+
+        return self._mutation(request_id, session_id, "compress", lambda _read: {"focus": arg} if arg else {}, show)
+
+    def _branch(self, request_id: object, session_id: object, verb: str, arg: str, refusal: dict) -> list[Action]:
+        """`/branch [title]`: the owner's `branch`; the answer names the new session, which the TUI then opens."""
+
+        def show(result: dict[str, Any]) -> Action:
+            child = result.get("branched_session_id")
+            if not isinstance(child, str) or not child:
+                return _output(request_id, "Hermes branched the session but named no new session.")
+            return _reply(request_id, {"type": "exec", "output": f"⑂ Branched into session {child}.",
+                                       "branched_session_id": child})
+
+        return self._mutation(request_id, session_id, "branch", lambda _read: {"title": arg} if arg else {}, show)
+
+    def _turn_back(self, request_id: object, session_id: object, verb: str, arg: str, refusal: dict) -> list[Action]:
+        """`/retry` and `/undo [N]`: the owner's `rewind` to before the newest user turn (the Nth newest for /undo N),
+        answered as the stdio entry answers them: /retry sends that turn's text again, /undo puts it in the composer."""
+        nothing = _output(request_id, f"Nothing to {verb}: this session has no turn of yours to take back.")
+        count = 1
+        if verb == "undo" and arg:
+            first = arg.split()[0]
+            if not first.isdigit() or int(first) < 1:
+                return [_output(request_id, f"/undo takes a number of turns: /undo or /undo N, not {first!r}.")]
+            count = int(first)
+        undone = [0]
+
+        def target(read: dict[str, Any]) -> dict[str, Any] | Action:
+            rows = read.get("stored_messages") or read.get("messages")
+            turns = [row for row in rows if _user_turn(row)] if isinstance(rows, list) else []
+            if not turns:
+                return nothing
+            undone[0] = min(count, len(turns))
+            row = turns[-undone[0]]
+            if verb == "retry":
+                text = retry_text(row.get("content"))
+                if text is None:
+                    return _output(request_id, "/retry cannot send that turn again: it carries an image or an "
+                                               "attachment. Send it again yourself, or /undo it to edit.")
+                if not text:
+                    return nothing
+            return {"target_message_id": row["row_id"]}
+
+        def show(result: dict[str, Any]) -> Action:
+            removed = result.get("rewound_count")
+            if not _whole(removed) or removed <= 0:
+                return nothing
+            message = result.get("target_message") if isinstance(result.get("target_message"), dict) else {}
+            if verb == "retry":
+                text = retry_text(message.get("content"))
+                return _reply(request_id, {"type": "send", "message": text}) if text else nothing
+            notice = (f"↶ Undid {_plural(undone[0], 'turn')} ({_plural(removed, 'message')}). "
+                      "Edit and resubmit, or send a new message.")
+            return _reply(request_id, {"type": "prefill", "message": _row_text(message.get("content")),
+                                       "notice": notice})
+
+        return self._mutation(request_id, session_id, "rewind", target, show)
+
+    def _stop(self, request_id: object, session_id: object, verb: str, arg: str, refusal: dict) -> list[Action]:
+        """`/stop`, as Ink's on a shared gateway: a running turn is interrupted first, then the background processes
+        and delegations this session started are stopped (`process.stop`), never another chat's."""
+        interrupted = [False]
+
+        def show(result: dict[str, Any]) -> Action:
+            killed, delegations = result.get("killed"), result.get("delegations")
+            lines = ["Interrupted the running turn."] if interrupted[0] else []
+            stopped = _plural(killed if _whole(killed) else 0, "background process", "background processes")
+            lines.append(f"Stopped {stopped}.")
+            if _whole(delegations) and delegations > 0:
+                lines.append(f"Interrupted {_plural(delegations, 'background delegation')}.")
+            return _output(request_id, "\n".join(lines))
+
+        def stop() -> Action:
+            return self._owner(request_id, "process.stop", {"session_id": session_id}, show)
+
+        def on_read(snapshot: dict[str, Any]) -> list[Action]:
+            result = snapshot.get("result")
+            if not isinstance(result, dict):
+                return [stop()]  # no turn known to interrupt; the processes are still the session's to stop
+            self._note_view(result, snapshot=True)
+            generation = result.get("execution_generation")
+            if result.get("running") is not True or not _whole(generation):
+                return [stop()]
+
+            def on_interrupted(reply: dict[str, Any]) -> list[Action]:
+                # Ink's `interruptTurn`: a handle already settled, or moved to another turn, stopped nothing.
+                answer = reply.get("result") if isinstance(reply.get("result"), dict) else {}
+                interrupted[0] = (answer.get("execution_state") == "running"
+                                  and answer.get("execution_generation") == generation)
+                return [stop()]
+
+            return [self._call("session.interrupt", {"session_id": session_id, "execution_generation": generation},
+                               on_interrupted)]
+
+        return [self._call("session.resume", {"session_id": session_id}, on_read)]
+
+    def _side(self, request_id: object, session_id: object, verb: str, arg: str, refusal: dict) -> list[Action]:
+        """`/bg <prompt>` and `/btw <question>`: a side agent the owner runs detached; its answer arrives later as
+        `background.complete` / `btw.complete`, which the TUI shows."""
+        if not arg:
+            usage = "/bg <prompt>: run a prompt on a fresh agent in the background" if verb == "bg" else (
+                "/btw <question>: ask a side question about this conversation")
+            return [_output(request_id, f"usage: {usage}.")]
+
+        def show(result: dict[str, Any]) -> Action:
+            task = str(result.get("task_id") or "")
+            said = (f"Running in the background as {task}; its answer appears here." if verb == "bg"
+                    else f"Asking on the side as {task}; the answer appears here.")
+            # `task_id`: the TUI tells the person when they leave the session before its answer arrives.
+            return _reply(request_id, {"type": "exec", "output": said, "task_id": task})
+
+        method = "prompt.background" if verb == "bg" else "prompt.btw"
+        return [self._owner(request_id, method, {"session_id": session_id, "text": arg}, show)]
+
+    def _rollback(self, request_id: object, session_id: object, verb: str, arg: str, refusal: dict) -> list[Action]:
+        """`/rollback [list] | diff <n|hash> | <n|hash> [file] [--all]`: the owner's `rollback.*` over this session's
+        checkpoints, parsed as Ink parses it."""
+        words = arg.split()
+        first = words[0].lower() if words else ""
+        base = {"session_id": session_id}
+        if first in ("", "list", "ls"):
+            return [self._owner(request_id, "rollback.list", base,
+                                lambda result: _output(request_id, _checkpoints(result)))]
+        if first == "diff":
+            if len(words) < 2:
+                return [_output(request_id, "usage: /rollback diff <n|hash>.")]
+
+            def diff(result: dict[str, Any]) -> Action:
+                text = "\n\n".join(part for part in (str(result.get("stat") or "").strip(),
+                                                     str(result.get("diff") or "").strip()) if part)
+                return _output(request_id, text or "No changes since that checkpoint.")
+
+            return [self._owner(request_id, "rollback.diff", {**base, "hash": words[1]}, diff)]
+        flags = {word for word in words[1:] if word.lower() in ("--all", "--force")}
+        file_path = " ".join(word for word in words[1:] if word not in flags)
+        restore = {**base, "hash": words[0], **({"file_path": file_path} if file_path else {}),
+                   **({"all": True} if flags and not file_path else {})}
+
+        def restored(result: dict[str, Any]) -> Action:
+            if result.get("success") is not True:
+                reason = result.get("error") or result.get("message") or "no reason given"
+                return _output(request_id, f"Rollback failed: {reason}.")
+            detail = result.get("reason") or result.get("message") or result.get("restored_to") or "restored"
+            lines = [f"↶ Restored {file_path or 'the workspace'}: {detail}"]
+            for key, said in (("skipped_user_edits", "Kept your own edits to"),
+                              ("skipped_oversize", "Kept, too large:"), ("failed_deletes", "Could not delete")):
+                paths = [str(path) for path in result.get(key) or []]
+                if paths:
+                    more = f" and {len(paths) - 5} more" if len(paths) > 5 else ""
+                    lines.append(f"{said} {', '.join(paths[:5])}{more}.")
+            removed = result.get("history_removed")
+            if _whole(removed) and removed > 0:
+                lines.append(f"The last turn went with it ({_plural(removed, 'message')}).")
+            return _output(request_id, "\n".join(lines))
+
+        return [self._owner(request_id, "rollback.restore", restore, restored)]
+
+    def _reload_env(self, request_id: object, session_id: object, verb: str, arg: str, refusal: dict) -> list[Action]:
+        """`/reload`: the owner re-reads the profile's `.env` (`reload.env`)."""
+
+        def show(result: dict[str, Any]) -> Action:
+            updated = result.get("updated")
+            changed = _plural(updated if _whole(updated) else 0, "variable")
+            return _output(request_id, f"Reloaded .env: {changed} changed.")
+
+        return [self._owner(request_id, "reload.env", {"session_id": session_id}, show)]
+
+    def _reload_mcp(self, request_id: object, session_id: object, verb: str, arg: str, refusal: dict) -> list[Action]:
+        """`/reload-mcp [now]`: the owner reconciles the profile's MCP servers (`reload.mcp`), which reaches every chat
+        of the profile, so bare it only says so, as the owner answers an unconfirmed reload."""
+        confirm = arg.lower() in RELOAD_MCP_CONFIRM_WORDS
+
+        def show(result: dict[str, Any]) -> Action:
+            message = str(result.get("message") or "")
+            if result.get("status") == "confirm_required":
+                return _output(request_id, f"{message or 'Reloading MCP refreshes every chat.'} "
+                                           "/reload-mcp now reloads them.")
+            return _output(request_id, message or "MCP servers reloaded.")
+
+        params = {"session_id": session_id, **({"confirm": True} if confirm else {})}
+        return [self._owner(request_id, "reload.mcp", params, show)]
+
+    def _tools(self, request_id: object, session_id: object, verb: str, arg: str, refusal: dict) -> list[Action]:
+        """`/tools`: this session's tools by toolset (`tools.show`). Its toolsets were fixed when it started on the
+        shared gateway, so `enable` and `disable` change nothing there, and are refused in words, as Ink does."""
+        sub = arg.split()[0].lower() if arg.split() else ""
+        if sub in ("enable", "disable"):
+            return [_output(request_id, f"/tools {sub} cannot change this session's tools: Hermes' shared gateway "
+                                        "fixed them when the session started. `hermes tools` sets them for new "
+                                        "sessions.")]
+
+        def show(result: dict[str, Any]) -> Action:
+            lines: list[str] = []
+            for section in result.get("sections") or []:
+                tools = section.get("tools") if isinstance(section, dict) else None
+                if not tools:
+                    continue
+                lines.append(f"[{section.get('name')}]")
+                lines += [f"  {tool.get('name')} - {tool.get('description') or ''}".rstrip(" -")
+                          for tool in tools if isinstance(tool, dict)]
+            total = result.get("total")
+            lines.append(f"Total: {_plural(total if _whole(total) else 0, 'tool')}")
+            return _output(request_id, "\n".join(lines) if len(lines) > 1 else "This session has no tools.")
+
+        return [self._owner(request_id, "tools.show", {"session_id": session_id}, show)]
+
+    def _plugins(self, request_id: object, session_id: object, verb: str, arg: str, refusal: dict) -> list[Action]:
+        """Bare `/plugins` (or `list`): the profile's plugins as the gateway loaded them (`plugins.list`). Changing
+        one is `hermes plugins` in a terminal: that form keeps the owner's refusal."""
+        if arg.lower() not in ("", "list", "ls"):
+            return [(TO_CLIENT, {**refusal, "id": request_id})]
+
+        def show(result: dict[str, Any]) -> Action:
+            lines = []
+            for plugin in result.get("plugins") or []:
+                if not isinstance(plugin, dict):
+                    continue
+                version = f" {plugin.get('version')}" if plugin.get("version") else ""
+                state = "enabled" if plugin.get("enabled") else "disabled"
+                counts = ", ".join(_plural(plugin.get(kind) if _whole(plugin.get(kind)) else 0, kind.rstrip("s"))
+                                   for kind in ("tools", "hooks", "commands"))
+                error = f" — error: {plugin.get('error')}" if plugin.get("error") else ""
+                lines.append(f"{plugin.get('name')}{version} ({state}; {counts}){error}")
+            return _output(request_id, "\n".join(lines) or "No plugins loaded.")
+
+        return [self._owner(request_id, "plugins.list", {}, show)]
+
+    def _config(self, request_id: object, session_id: object, verb: str, arg: str, refusal: dict) -> list[Action]:
+        """`/config`: the presentation settings the owner serves for this session (`config.get full`: display,
+        approvals, voice), never the provider or MCP settings, which can hold secrets; `hermes config` shows those."""
+
+        def show(result: dict[str, Any]) -> Action:
+            return _output(request_id, "\n".join(config_lines(result.get("config"))) or "{}")
+
+        return [self._owner(request_id, "config.get", {"key": "full", "session_id": session_id}, show)]
 
     # ── images ──
 
@@ -588,6 +1375,16 @@ class Adapter:
         return [self._stage(request_id, params.get("session_id"), image, lambda staged: {
             "attached": True, "remainder": image.remainder,
             "text": image.remainder or f"[User attached image: {image.path.name}]", **staged})]
+
+    def _attach_bytes(self, request_id: object, params: dict[str, Any]) -> list[Action]:
+        """The bytes the TUI keeps for an image, passed to the owner's `image.attach_bytes` as they came (the owner
+        decodes and checks them) and queued for the session's next prompt, as `image.attach` stages a file."""
+        content = str(params.get("content_base64") or "")
+        if not content:
+            return [_refuse(request_id, NOT_FOUND, "the image is empty")]
+        name = Path(str(params.get("filename") or "image")).name
+        stage = {"session_id": params.get("session_id"), "filename": name, "content_base64": content}
+        return [self._stage_bytes(request_id, stage, name, "", lambda staged: {"attached": True, **staged})]
 
     def _drop(self, request_id: object, params: dict[str, Any]) -> list[Action]:
         image = self.files.dropped_image(str(params.get("text") or ""), self._cwd(params))
@@ -616,6 +1413,13 @@ class Adapter:
         """Hand the image's bytes to the owner's staging (`image.attach_bytes`), then queue its staged path."""
         stage = {"session_id": session_id, "filename": image.path.name,
                  "content_base64": base64.b64encode(image.data).decode("ascii")}
+        return self._stage_bytes(request_id, stage, image.path.name, image.mime, answer)
+
+    def _stage_bytes(self, request_id: object, stage: dict[str, Any], name: str, mime: str,
+                     answer: Callable[[dict[str, Any]], dict[str, Any]]) -> Action:
+        """`image.attach_bytes` to the owner with `stage`; its staged path is queued, typed `mime`, or else the type its
+        file name says (the owner names the file by the type it found)."""
+        session_id = stage.get("session_id")
 
         def on_staged(reply: dict[str, Any]) -> list[Action]:
             result = reply.get("result")
@@ -623,8 +1427,10 @@ class Adapter:
             if not isinstance(result, dict) or not isinstance(result.get("path"), str) or state is None:
                 error = reply.get("error") if isinstance(reply.get("error"), dict) else {}
                 return [_refuse(request_id, REFUSED, f"Hermes did not stage the image ({_reason(error)})")]
-            state.images.append({"path": result["path"], "mime": str(result.get("mime") or image.mime)})
-            staged = {"path": result["path"], "name": image.path.name, "count": len(state.images)}
+            path = result["path"]
+            kind = str(result.get("mime") or mime or IMAGE_SUFFIX_MIMES.get(Path(path).suffix.lower(), "image/png"))
+            state.images.append({"path": path, "mime": kind})
+            staged = {"path": path, "name": name, "count": len(state.images)}
             return [_reply(request_id, answer(staged))]
 
         return self._call("image.attach_bytes", stage, on_staged)
@@ -860,18 +1666,35 @@ def attach_api() -> AttachApi | None:
     def grant() -> tuple[str, list[str]]:
         """`gateway_bootstrap.bootstrap(start=True)`: ensure the owner, mint a session ticket, name the socket."""
         home = get_hermes_home().resolve()
+        if WINDOWS:
+            try:
+                from hermes_cli.gateway_runtime_attach import TicketUnavailable, attach_gateway
+            except ImportError as error:  # Hermes 0.22.x: the attach API, but not Hermes' own attach (0.23.1)
+                raise RuntimeError(f"this Hermes cannot attach on Windows: {error}") from error
+            try:
+                attached = attach_gateway(home, start=True, timeout=ENSURE_TIMEOUT_SECONDS)
+            except TicketUnavailable as error:  # attachable, then no ticket: a pipe not answering yet is waited for
+                if error.reason in NOT_READY_TICKET_REASONS:
+                    raise GatewayNotReady(f"Hermes' gateway did not answer its control pipe yet ({error})") from error
+                raise
+            if attached.ticket is None:
+                raise not_attachable(attached.receipt)
+            url, protocols = gateway_ws_target(attached.receipt.endpoint, attached.ticket)
+            return url, list(protocols)
         receipt = ensure_gateway_runtime(home, timeout=ENSURE_TIMEOUT_SECONDS, idle_exit=True)
         if not attachable(receipt):
-            raise RuntimeError(failure_message(receipt))
+            raise not_attachable(receipt)
         endpoint = receipt.endpoint
         request = json.dumps({"protocol": 1, "id": 1, "verb": "session-ticket", "params": {
             "profile_id": endpoint.profile_id, "instance_id": endpoint.instance_id,
             "purpose": "interactive"}}).encode() + b"\n"
-        # POSIX only, as the OMH TUI is (termios).
+        # POSIX only: the gateway's control endpoint is a Unix-domain socket.
         with connect_private(control_home_for(home, endpoint), TICKET_TIMEOUT_SECONDS) as peer:
             peer.sendall(request)
             with peer.makefile("rb") as stream:
                 raw = stream.readline(65537)
+        if not raw:  # the control socket closed without an answer: a gateway going down or not up yet
+            raise GatewayNotReady("Hermes' gateway closed its control socket without answering")
         answer = json.loads(raw)
         granted = answer.get("result") if isinstance(answer, dict) else None
         if (not isinstance(granted, dict) or answer.get("ok") is not True or answer.get("id") != 1
@@ -883,6 +1706,18 @@ def attach_api() -> AttachApi | None:
         return url, list(protocols)
 
     return AttachApi(grant=grant, dial=connect, protocol=GATEWAY_WS_PROTOCOL, errors=(WebSocketException,))
+
+
+class GatewayNotReady(RuntimeError):
+    """Hermes says the gateway is starting or draining, or cannot be asked yet: worth waiting for."""
+
+
+def not_attachable(receipt: object) -> RuntimeError:
+    """The error for a receipt with no owner to attach: `GatewayNotReady` when it is worth waiting for."""
+    if (getattr(receipt, "state", None) in NOT_READY_STATES
+            or getattr(receipt, "reason_code", None) in NOT_READY_REASONS):
+        return GatewayNotReady(failure_message(receipt))
+    return RuntimeError(failure_message(receipt))
 
 
 def failure_message(receipt: object) -> str:
@@ -899,8 +1734,10 @@ def failure_message(receipt: object) -> str:
 
 def _frames(text: str) -> Iterable[dict[str, Any] | str]:
     """Each non-empty line of a WebSocket message, parsed; a line that is not a JSON object stays text."""
-    for line in text.splitlines():
-        line = line.strip()
+    # Split on LF only: str.splitlines() also breaks on U+2028, U+2029, U+0085 and other Unicode line
+    # separators that valid JSON strings may hold unescaped (#3221).
+    for line in text.split("\n"):
+        line = line.strip(" \t\r")
         if not line:
             continue
         try:
@@ -912,11 +1749,24 @@ def _frames(text: str) -> Iterable[dict[str, Any] | str]:
 
 
 def _start_stdin_reader(loop: asyncio.AbstractEventLoop, lines: asyncio.Queue[bytes | None]) -> None:
-    """Read the TUI's lines on a thread; end of input arrives as None."""
+    """Read the TUI's lines on a thread; end of input arrives as None.
+
+    It reads the descriptor, not `sys.stdin.buffer`: a thread blocked in the buffer's read holds the buffer's
+    lock, and when the relay ends first, interpreter finalization closes stdin on the main thread, waits a second
+    for that lock and aborts the process (`_enter_buffered_busy`, #2327). A read of the descriptor holds no lock.
+    """
+    descriptor = sys.stdin.fileno()
 
     def read() -> None:
-        for raw in sys.stdin.buffer:
-            loop.call_soon_threadsafe(lines.put_nowait, raw)
+        held: list[bytes] = []  # the line read so far, in pieces, so a long line (a pasted image) is joined once
+        while chunk := os.read(descriptor, STDIN_READ_BYTES):
+            *ended, rest = chunk.split(b"\n")
+            for piece in ended:
+                loop.call_soon_threadsafe(lines.put_nowait, b"".join((*held, piece)))
+                held = []
+            held.append(rest)
+        if any(held):  # a last line with no newline, as iterating the buffer yields it
+            loop.call_soon_threadsafe(lines.put_nowait, b"".join(held))
         loop.call_soon_threadsafe(lines.put_nowait, None)
 
     threading.Thread(target=read, name="omh-attach-stdin", daemon=True).start()
@@ -932,10 +1782,14 @@ async def relay(api: AttachApi, url: str, protocols: list[str], adapter: Adapter
     """Relay the TUI's stdio and the owner's WebSocket through `adapter` until either side ends.
 
     0 when the TUI closed its input (the person left); 1 when the owner's side
-    ended first, which the TUI reads as a gateway that exited on its own.
+    ended first, which the TUI reads as a dropped connection to a gateway that
+    may still run the turn: it resumes the session over a new one.
     """
+    # No keepalive ping, as Hermes' own loopback policy (`hermes_cli/web_server.py`): the gateway answers a ping on its
+    # event loop, which a busy worker can hold for minutes, and websockets' default (20 s + 20 s) then closes a healthy
+    # connection while the turn runs on. A gateway that dies closes the loopback socket itself.
     async with api.dial(url, subprotocols=protocols, open_timeout=OPEN_TIMEOUT_SECONDS,
-                           max_size=None, proxy=None) as socket:
+                           max_size=None, proxy=None, ping_interval=None) as socket:
         if socket.subprotocol != api.protocol:
             _say(f"Hermes' gateway answered with protocol {socket.subprotocol!r}, not {api.protocol!r}")
             return 1
@@ -993,7 +1847,8 @@ async def relay(api: AttachApi, url: str, protocols: list[str], adapter: Adapter
                 task.cancel()
         error = next((task.exception() for task in done if task.exception() is not None), None)
         _say(f"the connection to Hermes' gateway ended ({error or f'close code {socket.close_code}'})")
-        return 1
+        # A gateway going down closes with going-away: the TUI may wait for it to come back. Any other end stays 1.
+        return NOT_READY_EXIT if error is None and socket.close_code == GOING_AWAY else 1
 
 
 def _say(text: str) -> None:
@@ -1034,13 +1889,19 @@ def main() -> int:
         os.environ.pop(name, None)
     try:
         url, protocols = api.grant()
+    except (GatewayNotReady, *NOT_READY_OS_ERRORS) as error:  # a restart's verdict; a socket missing, refused, silent
+        _say(str(error))
+        return NOT_READY_EXIT
     except (OSError, RuntimeError, ValueError, LookupError, AttributeError, TypeError) as error:
-        # The failures Hermes' own bootstrap reports: discovery, socket I/O and timeouts, bad JSON, a refused grant.
+        # The failures Hermes' own bootstrap reports: discovery, socket I/O, bad JSON, a refused grant.
         _say(str(error))
         return 1
     try:
         return asyncio.run(relay(api, url, protocols, Adapter(options, tool_progress, cwd=cwd)))
-    except (OSError, TimeoutError, *api.errors) as error:  # a refused upgrade or ticket is the client's own error
+    except NOT_READY_OS_ERRORS as error:  # refused, reset or silent: a gateway that is not answering yet
+        _say(f"could not reach Hermes' gateway: {error}")
+        return NOT_READY_EXIT
+    except (OSError, *api.errors) as error:  # a refused upgrade or ticket is the client's own error
         _say(f"could not reach Hermes' gateway: {error}")
         return 1
 

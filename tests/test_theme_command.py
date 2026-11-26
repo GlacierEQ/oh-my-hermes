@@ -10,6 +10,8 @@ nothing is saved.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,7 +19,7 @@ import unittest
 
 from _cli_harness import run_cli
 
-from omh.skin_pack import THEME_STORE_SCHEMA, theme_store_path
+from omh.skin_pack import THEME_STORE_SCHEMA, theme_names, theme_store_path
 
 
 class ThemeCommandTests(unittest.TestCase):
@@ -39,7 +41,7 @@ class ThemeCommandTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             status, out, _ = run_cli([*self._homes(tmp), "theme"], output_json=False)
             self.assertEqual(status, 0)
-            for name in ("sky", "amber", "crimson", "mono"):
+            for name in theme_names():
                 self.assertIn(name, out)
             self.assertIn("(default)", out)
 
@@ -53,7 +55,7 @@ class ThemeCommandTests(unittest.TestCase):
             self.assertEqual(payload["active_theme"], "sky")
             self.assertEqual(payload["active_source"], "default")
             self.assertEqual(payload["store_path"], str(self._store(tmp)))
-            self.assertEqual([theme["name"] for theme in payload["themes"]], ["sky", "amber", "crimson", "mono"])
+            self.assertEqual([theme["name"] for theme in payload["themes"]], list(theme_names()))
             run_cli([*homes, "theme", "use", "amber"])
             payload = json.loads(run_cli([*homes, "theme", "list"])[1])
             active = [theme for theme in payload["themes"] if theme["active"]]
@@ -112,6 +114,104 @@ class ThemeCommandTests(unittest.TestCase):
             self.assertFalse(self._store(tmp).exists())
             self.assertEqual(self._hermes_home_entries(tmp), [])
 
+    def test_update_check_off_is_saved_beside_the_theme_and_the_tui_reads_it(self) -> None:
+        from omh.tui.update_notice_switch import update_check_off
+
+        with TemporaryDirectory() as tmp:
+            homes = self._homes(tmp)
+            payload = json.loads(run_cli([*homes, "theme", "update-check"])[1])
+            self.assertEqual((payload["update-check"], payload["source"]), ("on", "default"))
+            run_cli([*homes, "theme", "use", "amber"])
+            payload = json.loads(run_cli([*homes, "theme", "update-check", "off"])[1])
+            self.assertEqual(payload["schema_version"], "omh_theme_update_check/v1")
+            self.assertEqual((payload["update-check"], payload["previous"], payload["changed"]), ("off", "on", True))
+            self.assertEqual(
+                json.loads(self._store(tmp).read_text(encoding="utf-8")),
+                {"schema_version": THEME_STORE_SCHEMA, "theme": "amber", "update_check": "off"},
+            )
+            self.assertTrue(update_check_off({}, (Path(tmp) / "omh").resolve()))
+            self.assertEqual(json.loads(run_cli([*homes, "theme", "update-check", "on"])[1])["update-check"], "on")
+            self.assertFalse(update_check_off({}, (Path(tmp) / "omh").resolve()))
+            self.assertEqual(self._hermes_home_entries(tmp), [])
+
+    def test_update_check_reports_what_is_in_effect_and_what_holds_it_off(self) -> None:
+        from unittest import mock
+
+        from omh.maintenance.update_check import write_update_check_policy
+        from omh.system.paths import OmhPaths
+
+        with TemporaryDirectory() as tmp:
+            homes = self._homes(tmp)
+            omh_home = (Path(tmp) / "omh").resolve()
+            with mock.patch.dict("os.environ", {"OMH_TUI_UPDATE_CHECK": "1"}):
+                payload = json.loads(run_cli([*homes, "theme", "update-check"])[1])
+                self.assertEqual((payload["update-check"], payload["effective"], payload["held_off_by"]),
+                                 ("on", "on", None))
+                write_update_check_policy(OmhPaths(omh_home=omh_home, hermes_home=Path(tmp) / "hermes"), mode="off")
+                payload = json.loads(run_cli([*homes, "theme", "update-check", "on"])[1])
+                self.assertEqual((payload["update-check"], payload["effective"], payload["held_off_by"]),
+                                 ("on", "off", "omh update-check off"))
+                _status, out, _err = run_cli([*homes, "theme", "update-check"], output_json=False)
+                self.assertIn("In effect: off, held off by `omh update-check off` although on is saved.", out)
+                payload = json.loads(run_cli([*homes, "theme", "update-check", "off"])[1])
+                self.assertEqual((payload["effective"], payload["held_off_by"]), ("off", None))  # its own choice
+            with mock.patch.dict("os.environ", {"OMH_TUI_UPDATE_CHECK": "0"}):
+                payload = json.loads(run_cli([*homes, "theme", "update-check", "on"])[1])
+                self.assertEqual((payload["update-check"], payload["effective"], payload["held_off_by"]),
+                                 ("on", "off", "OMH_TUI_UPDATE_CHECK=0"))
+
+    def test_the_working_glow_is_no_choice_and_a_saved_one_is_dropped_by_the_next_write(self) -> None:
+        # The working glow was removed (owner, 2026-11-04): `omh theme glow` is refused, and a `glow` key an older
+        # release saved is left out the next time any choice is written.
+        with TemporaryDirectory() as tmp:
+            homes = self._homes(tmp)
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as refused:
+                run_cli([*homes, "theme", "glow", "off"])
+            self.assertEqual(refused.exception.code, 2)  # argparse: no such choice
+            self.assertFalse(self._store(tmp).exists())
+            self._store(tmp).parent.mkdir(parents=True)
+            self._store(tmp).write_text(json.dumps({"schema_version": THEME_STORE_SCHEMA, "glow": "off"}),
+                                        encoding="utf-8")
+            run_cli([*homes, "theme", "use", "amber"])
+            self.assertEqual(json.loads(self._store(tmp).read_text(encoding="utf-8")),
+                             {"schema_version": THEME_STORE_SCHEMA, "theme": "amber"})
+
+    def test_wallpaper_off_is_saved_beside_the_theme_and_bare_wallpaper_reports_it(self) -> None:
+        with TemporaryDirectory() as tmp:
+            homes = self._homes(tmp)
+            payload = json.loads(run_cli([*homes, "theme", "wallpaper"])[1])
+            self.assertEqual((payload["wallpaper"], payload["source"], payload["changed"]), ("on", "default", False))
+            run_cli([*homes, "theme", "use", "amber"])
+            status, out, _ = run_cli([*homes, "theme", "wallpaper", "off"])
+            self.assertEqual(status, 0)
+            payload = json.loads(out)
+            self.assertEqual(payload["schema_version"], "omh_theme_wallpaper/v1")
+            self.assertEqual((payload["wallpaper"], payload["previous"], payload["changed"]), ("off", "on", True))
+            self.assertEqual(
+                json.loads(self._store(tmp).read_text(encoding="utf-8")),
+                {"schema_version": THEME_STORE_SCHEMA, "theme": "amber", "wallpaper": "off"},
+            )
+            self.assertFalse(json.loads(run_cli([*homes, "theme", "wallpaper", "off"])[1])["changed"])
+            run_cli([*homes, "theme", "update-check", "on"])  # a write of another key keeps this one
+            payload = json.loads(run_cli([*homes, "theme", "wallpaper"])[1])
+            self.assertEqual((payload["wallpaper"], payload["source"]), ("off", "saved"))
+            self.assertEqual(json.loads(run_cli([*homes, "theme", "wallpaper", "on"])[1])["wallpaper"], "on")
+            self.assertEqual(self._hermes_home_entries(tmp), [])
+
+    def test_bare_wallpaper_in_plain_text_says_it_changes_the_terminals_background(self) -> None:
+        with TemporaryDirectory() as tmp:
+            status, out, _ = run_cli([*self._homes(tmp), "theme", "wallpaper"], output_json=False)
+            self.assertEqual(status, 0)
+            self.assertIn("OMH TUI living wallpaper: on", out)
+            self.assertIn("Nothing saved; on by default", out)
+            self.assertIn("puts the terminal's own back when it exits", out)
+
+    def test_wallpaper_takes_only_on_or_off(self) -> None:
+        with TemporaryDirectory() as tmp:
+            status, _out, _err = run_cli([*self._homes(tmp), "theme", "wallpaper", "maybe"])
+            self.assertNotEqual(status, 0)
+            self.assertFalse(self._store(tmp).exists())
+
     def test_repair_is_retired_and_still_exits_zero(self) -> None:
         with TemporaryDirectory() as tmp:
             homes = self._homes(tmp)
@@ -133,7 +233,7 @@ class ThemeCommandTests(unittest.TestCase):
             status, out, _ = run_cli([*self._homes(tmp), "theme", "use", "ultraviolet"], output_json=False)
             self.assertEqual(status, 2)
             self.assertIn("ultraviolet", out)
-            for name in ("sky", "amber", "crimson", "mono"):
+            for name in theme_names():
                 self.assertIn(name, out)
             self.assertFalse(self._store(tmp).exists())
 

@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 
 from ..core.errors import OmhError
 from ..converter import convert_from_dir, convert_references_from_dir, convert_support_from_dir
-from ..hashutil import sha256_file
+from ..hashutil import sha256_file, sha256_text
 from .curator_ledger import (
     LedgerWrite,
     hermes_edit_still_on_disk,
@@ -21,6 +21,7 @@ from .curator_ledger import (
 )
 from .plugin_pack import host_managed_plugin
 from .lifecycle_safety import command_runtime_owned, store_removal_plan
+from .uninstall_safety import configured_link_reason, linked_removal_reason, unsafe_removal_reason
 from ..local_store import atomic_write_text, discard_path, is_directory_link, read_json_object_result
 from ..manifest import (
     local_modifications,
@@ -40,16 +41,21 @@ from ..paths import (
     managed_command_self_update_state_path,
     managed_command_filenames,
     managed_command_venv_dir,
+    managed_command_venv_scripts_dir,
 )
 from ..profiles.team import TEAM_PROFILE_SCHEMA_VERSION
 from ..skills.catalog import omh_skill_display_name, omh_skill_install_path
 from ..skill_pack import (
     CORE_PROFILE_SKILLS,
+    SKILL_PACKS,
+    SKILL_PACK_NAMES,
     SkillReferenceTemplate,
     SkillTemplate,
     builtin_skill_reference_templates,
     builtin_skill_templates,
     builtin_skill_support_templates,
+    core_with_packs_skill_names,
+    resolve_skill_pack_names,
 )
 from .support_materialization import legacy_support_paths, preflight_support, write_support
 from ..system.approval_tier import TIER_AUTO_ALLOWED, resolve_approval_tier
@@ -486,25 +492,36 @@ def _ledger_copies(skill_dir: Path, writes: list[LedgerWrite]) -> list[str]:
     return copies
 
 
-def profile_skill_names(skills_dir: Path, profile: str, catalog_names: list[str]) -> set[str]:
+def profile_skill_names(
+    skills_dir: Path,
+    profile: str,
+    catalog_names: list[str],
+    *,
+    packs: Iterable[str] = (),
+) -> set[str]:
     """Canonical names an install of the packaged catalog renders into `skills_dir` under `profile`.
 
-    `full` renders the whole catalog. Otherwise the profile decides what gets
-    ADDED, never what gets REFRESHED. A skill already on disk is refreshed
-    whichever profile is recorded, because `omh update` promising "updated"
-    while leaving installed skills on an older render is the same as lying:
-    that is how an install ended up serving `name: ultrawork` long after the
-    catalog had moved to `ulw-ultrawork`. Shedding full-only skills stays an
-    explicit act - `omh skill-profile reconcile --to core`. `omh doctor` asks
-    the same question to say what the next install does with a missing skill.
+    `full` renders the whole catalog. Otherwise the profile (plus any requested
+    layered packs) decides what gets ADDED, never what gets REFRESHED. A skill
+    already on disk is refreshed whichever profile is recorded, because
+    `omh update` promising "updated" while leaving installed skills on an older
+    render is the same as lying: that is how an install ended up serving
+    `name: ultrawork` long after the catalog had moved to `ulw-ultrawork`.
+    Shedding full-only skills stays an explicit act -
+    `omh skill-profile reconcile --to core`. `omh doctor` asks the same question
+    to say what the next install does with a missing skill.
     """
     if profile == "full":
         return set(catalog_names)
+    try:
+        selected = set(core_with_packs_skill_names(tuple(packs)))
+    except ValueError as exc:
+        raise OmhError(str(exc)) from exc
     installed = _installed_skill_names(skills_dir) | _active_generation_skill_names(skills_dir)
     return {
         name
         for name in catalog_names
-        if name in CORE_PROFILE_SKILLS
+        if name in selected
         or skill_directory_name(name) in installed
         # A pre-relabel install has the CANONICAL directory on disk and the
         # labelled one absent, so matching only the label dropped the skill
@@ -589,9 +606,14 @@ def install_skill_pack(
     force: bool = False,
     dry_run: bool = False,
     profile: str = DEFAULT_SKILL_PROFILE,
+    packs: Iterable[str] = (),
 ) -> dict:
     if profile not in SKILL_PROFILES:
         raise OmhError(f"unknown skill profile {profile!r}; choose one of {', '.join(SKILL_PROFILES)}")
+    try:
+        normalized_packs = resolve_skill_pack_names(tuple(packs))
+    except ValueError as exc:
+        raise OmhError(str(exc)) from exc
     paths = legacy_support_paths(paths)
     all_templates = convert_from_dir(source_dir) if source_dir else builtin_skill_templates()
     reference_templates = convert_references_from_dir(source_dir) if source_dir else builtin_skill_reference_templates()
@@ -616,7 +638,12 @@ def install_skill_pack(
     if source_dir or profile == "full":
         templates = all_templates
     else:
-        refreshable = profile_skill_names(paths.skills_dir, profile, [template.name for template in all_templates])
+        refreshable = profile_skill_names(
+            paths.skills_dir,
+            profile,
+            [template.name for template in all_templates],
+            packs=normalized_packs,
+        )
         templates = [template for template in all_templates if template.name in refreshable]
         reference_templates = [
             template for template in reference_templates if template.skill_name in refreshable
@@ -686,9 +713,16 @@ def install_skill_pack(
     # kept skill's directory that `local_modifications` reports are its support
     # files; a kept skill is not rendered again, so they are not replaced.
     kept_directories = {PurePosixPath(rel).parent.as_posix() + "/" for rel in kept}
+    # A SKILL.md already holding the bytes `_write_skill` is about to write
+    # (`atomic_write_text` of the template, UTF-8, newline-stable) is not a
+    # local change even when an older release recorded another hash (#2300).
+    incoming = {
+        f"{skill_install_relative_dir(template.name).as_posix()}/SKILL.md": sha256_text(template.content)
+        for template in templates
+    }
     modified = [
         rel
-        for rel in local_modifications(manifest, paths.skills_dir)
+        for rel in local_modifications(manifest, paths.skills_dir, incoming=incoming)
         if rel not in kept and rel not in missing_paths and rel not in left_behind
         and not any(rel.startswith(directory) for directory in kept_directories)
     ]
@@ -720,6 +754,8 @@ def install_skill_pack(
             "source": source,
             "skill_profile": profile,
         }
+        if normalized_packs:
+            result["skill_packs"] = list(normalized_packs)
         if context_cost_warning is not None:
             result["context_cost_warning"] = context_cost_warning
         if hermes_edited:
@@ -839,6 +875,8 @@ def install_skill_pack(
     if removed_directories:
         manifest_data["removed_skill_directories"] = removed_directories
     manifest_data["skill_profile"] = profile
+    if normalized_packs:
+        manifest_data["skill_packs"] = list(normalized_packs)
     if context_cost_warning is not None:
         manifest_data["context_cost_warning"] = context_cost_warning
     manifest_data["pruned_skills"] = [item["name"] for item in orphans_removed]
@@ -1548,9 +1586,15 @@ def skill_profile_state(skills_dir: Path, manifest: dict | None) -> dict:
     """
     catalog_names = {template.name for template in builtin_skill_templates()}
     core_names = set(CORE_PROFILE_SKILLS)
+    raw_packs = (manifest or {}).get("skill_packs", [])
+    requested_packs = tuple(
+        str(pack) for pack in raw_packs if isinstance(pack, str) and pack in SKILL_PACKS
+    ) if isinstance(raw_packs, list) else ()
+    target_names = set(core_with_packs_skill_names(requested_packs)) if requested_packs else core_names
     installed = installed_skill_names(skills_dir)
     installed_catalog = [name for name in installed if name in catalog_names]
     full_only_installed = sorted(name for name in installed_catalog if name not in core_names)
+    outside_target = sorted(name for name in installed_catalog if name not in target_names)
     requested = str((manifest or {}).get("skill_profile") or "")
     if not installed_catalog:
         effective = "none"
@@ -1558,19 +1602,30 @@ def skill_profile_state(skills_dir: Path, manifest: dict | None) -> dict:
         effective = "full"
     elif not full_only_installed:
         effective = "core"
+    elif requested == "core" and requested_packs and not outside_target and target_names.issubset(installed_catalog):
+        effective = "core+packs"
     else:
         effective = "mixed"
-    retained_exception = bool(requested == "core" and full_only_installed)
+    retained_exception = bool(requested == "core" and outside_target)
     prompt_cost = _skill_prompt_cost(
         skills_dir,
         core_names,
         catalog_names - core_names,
     )
+    matches_requested = (
+        bool(requested)
+        and (
+            effective == requested
+            or (requested == "core" and bool(requested_packs) and effective == "core+packs")
+        )
+    )
     return {
         "schema_version": SKILL_PROFILE_STATE_SCHEMA_VERSION,
         "requested_profile": requested,
+        "requested_packs": list(requested_packs),
+        "available_packs": list(SKILL_PACK_NAMES),
         "effective_profile": effective,
-        "matches_requested_profile": bool(requested) and effective == requested,
+        "matches_requested_profile": matches_requested,
         "core_profile_skill_count": len(core_names),
         "full_profile_skill_count": len(catalog_names),
         "installed_skill_count": len(installed),
@@ -1633,7 +1688,7 @@ def _installed_skill_files(skill_dir: Path) -> dict[str, str] | None:
     return files
 
 
-def _reconcile_plan(skills_dir: Path, manifest: dict) -> dict:
+def _reconcile_plan(skills_dir: Path, manifest: dict, *, packs: Iterable[str] = ()) -> dict:
     """Split installed full-only skills into safely removable and retained-with-reason sets.
 
     A skill is removable only when it is OMH-managed (recorded in the install manifest) AND
@@ -1641,7 +1696,10 @@ def _reconcile_plan(skills_dir: Path, manifest: dict) -> dict:
     templates, with no extra or missing files). Anything else is retained and reported.
     """
     catalog_files = _catalog_skill_files()
-    core_names = set(CORE_PROFILE_SKILLS)
+    try:
+        keep_names = set(core_with_packs_skill_names(tuple(packs)))
+    except ValueError as exc:
+        raise OmhError(str(exc)) from exc
     managed_names = {
         str(record.get("name"))
         for record in manifest.get("skills", [])
@@ -1650,7 +1708,7 @@ def _reconcile_plan(skills_dir: Path, manifest: dict) -> dict:
     removable: list[str] = []
     retained: list[dict[str, str]] = []
     for name in installed_skill_names(skills_dir):
-        if name in core_names:
+        if name in keep_names:
             continue
         expected = catalog_files.get(name)
         if expected is None:
@@ -1675,7 +1733,7 @@ def skill_profile_report(paths: OmhPaths) -> dict:
     """Read-only requested/effective profile report plus the reconcile plan; mutates nothing."""
     manifest = read_manifest(paths.manifest_path)
     state = skill_profile_state(paths.skills_dir, manifest)
-    plan = _reconcile_plan(paths.skills_dir, manifest or {})
+    plan = _reconcile_plan(paths.skills_dir, manifest or {}, packs=state.get("requested_packs", ()))
     return {
         "schema_version": SKILL_PROFILE_STATE_SCHEMA_VERSION,
         "skills_dir": str(paths.skills_dir),
@@ -1691,9 +1749,10 @@ def reconcile_skill_profile(
     paths: OmhPaths,
     *,
     target_profile: str = CORE_SKILL_PROFILE,
+    packs: Iterable[str] = (),
     dry_run: bool = False,
 ) -> dict:
-    """Explicitly shrink an existing install down to the core profile.
+    """Explicitly shrink an existing install down to the core profile (plus any requested packs).
 
     This is the only OMH path that deletes managed skill directories, and it never runs as part of
     setup/install/update. It removes only unmodified managed full-only skills; locally modified and
@@ -1704,10 +1763,14 @@ def reconcile_skill_profile(
             f"skill profile reconcile only shrinks to {CORE_SKILL_PROFILE!r}; "
             "install the wider catalog with `omh install --full` instead"
         )
+    try:
+        normalized_packs = resolve_skill_pack_names(tuple(packs))
+    except ValueError as exc:
+        raise OmhError(str(exc)) from exc
     manifest = read_manifest(paths.manifest_path)
     if manifest is None:
         raise OmhError(f"no OMH skill manifest at {paths.manifest_path}; run `omh setup` first")
-    plan = _reconcile_plan(paths.skills_dir, manifest)
+    plan = _reconcile_plan(paths.skills_dir, manifest, packs=normalized_packs)
     result = {
         "schema_version": SKILL_PROFILE_RECONCILE_SCHEMA_VERSION,
         "target_profile": target_profile,
@@ -1718,6 +1781,8 @@ def reconcile_skill_profile(
         "context_cost_note": RECONCILE_CONTEXT_COST_NOTE,
         "non_destructive_default": NON_DESTRUCTIVE_DEFAULT_NOTE,
     }
+    if normalized_packs:
+        result["target_packs"] = list(normalized_packs)
     if dry_run:
         result["would_remove_skills"] = plan["removable_skills"]
         result["removed_skills"] = []
@@ -1742,6 +1807,8 @@ def reconcile_skill_profile(
     # writes is one the manifest it replaces already held.
     _carry_record_provenance(manifest_data, manifest)
     manifest_data["skill_profile"] = target_profile
+    if normalized_packs:
+        manifest_data["skill_packs"] = list(normalized_packs)
     manifest_data["reconciled_skills"] = removed
     manifest_data["skill_profile_state"] = skill_profile_state(paths.skills_dir, manifest_data)
     write_manifest(paths.manifest_path, manifest_data)
@@ -1759,8 +1826,13 @@ def uninstall_skill_pack(
     force: bool = False,
     remove_command_package: bool = False,
     store_plan: dict[str, object] | None = None,
+    home_refusal: str | None = None,
 ) -> dict:
-    """Remove OMH-managed local files without deleting unrelated Hermes state."""
+    """Remove OMH-managed local files without deleting unrelated Hermes state.
+
+    `home_refusal` is a caller's reason to keep `omh_home`: one only the caller
+    can know, such as a configured spelling that resolution already erased.
+    """
     removed: list[str] = []
     would_remove: list[str] = []
     kept: list[dict[str, str]] = []
@@ -1779,6 +1851,7 @@ def uninstall_skill_pack(
             dry_run=dry_run,
             force=force,
             managed_plugin=True,
+            boundary=paths.hermes_home,
         )
         for team_file in _managed_team_profile_files(paths):
             _collect_removal(
@@ -1788,10 +1861,16 @@ def uninstall_skill_pack(
                 kept=kept,
                 dry_run=dry_run,
                 force=force,
+                managed_team_file=True,
+                boundary=paths.hermes_agents_dir,
             )
 
     if (remove_files or remove_all) and plan.get("status") != "kept":
-        _collect_removal(paths.omh_home, removed=removed, would_remove=would_remove, kept=kept, dry_run=dry_run, force=True)
+        reason = home_refusal or _omh_home_removal_refusal(paths)
+        if reason:
+            kept.append({"path": str(paths.omh_home), "reason": reason})
+        else:
+            _collect_omh_home_contents(paths, removed=removed, would_remove=would_remove, kept=kept, dry_run=dry_run)
 
     command_removed_at = len(removed)
     command_would_remove_at = len(would_remove)
@@ -1851,12 +1930,111 @@ def uninstall_profile_plugin(paths: OmhPaths, *, dry_run: bool = False, force: b
         dry_run=dry_run,
         force=force,
         managed_plugin=True,
+        boundary=paths.hermes_home,
     )
     return {
         "removed_paths": removed,
         "would_remove": would_remove,
         "kept_paths": kept,
     }
+
+
+def _omh_home_removal_refusal(paths: OmhPaths) -> str | None:
+    reason = unsafe_removal_reason(paths.omh_home, hermes_home=paths.hermes_home) or configured_link_reason(paths.omh_home, "OMH_HOME")
+    if reason:
+        return reason
+    marker = paths.manifest_path
+    if is_directory_link(marker):
+        return "OMH home ownership is unproven: manifest.json is a symlink"
+    manifest, error = read_json_object_result(marker)
+    if error or not manifest or manifest.get("package") != "oh-my-hermes" or manifest.get("schema_version") != 1:
+        return "OMH home ownership is unproven: no readable OMH manifest.json"
+    return None
+
+
+# Top-level OMH-home entries written by producers that do not go through an
+# OmhPaths property. Every other top-level name comes from OmhPaths itself.
+_OMH_HOME_EXTRA_ENTRIES = frozenset({
+    "routing",  # route_question_mode, owner_preference_record, delegation_route_restore
+    "rules",  # toolcall_rules: rules/toolcall-rules.json
+    "tui",  # skin_pack theme.json, tui.launch_card launch-skills.json
+    "menubar",  # surfaces.menubar_app
+    "jev",  # jev_ask_store
+    "documents",  # document_chunk_plan.documents_root
+    "adapter-quality",  # omh.adapter_quality
+    "design-direction-iterations",  # workflows.design_direction_iterations_store
+    "skills-import-manifest.json",  # workflows.external_rule_import
+    "plans", "plan-variants", "plan-context",  # system.paths.project_artifact_dir
+    "codegraph",  # codegraph.schema, when the home is a repository's .omh
+})
+# system.paths.ensure_project_store_ignored writes exactly this into .gitignore.
+_OMH_STORE_GITIGNORE = "*\n"
+
+
+def _omh_created_names() -> frozenset[str]:
+    """Top-level names OMH writes under its home, derived from OmhPaths."""
+    probe = OmhPaths(omh_home=Path("/omh-home-probe"), hermes_home=Path("/hermes-home-probe"))
+    names = set(_OMH_HOME_EXTRA_ENTRIES)
+    for name, attribute in vars(OmhPaths).items():
+        if isinstance(attribute, property):
+            value = getattr(probe, name)
+            if isinstance(value, Path) and value.is_relative_to(probe.omh_home) and value != probe.omh_home:
+                names.add(value.relative_to(probe.omh_home).parts[0])
+    return frozenset(names)
+
+
+def _is_omh_created_entry(entry: Path, names: frozenset[str]) -> bool:
+    name = entry.name
+    if name in names:
+        return True
+    # local_store sidecars: `.<name>.lock` locks and `.<name>.<pid>-<hex>.tmp` writes.
+    if name.startswith(".") and (name.endswith(".lock") or name.endswith(".tmp")):
+        stem = name[1:].rsplit(".", 1)[0]
+        return any(stem == owned or stem.startswith(f"{owned}.") for owned in names)
+    if name == ".gitignore" and entry.is_file() and not entry.is_symlink():
+        try:
+            return entry.read_text(encoding="utf-8") == _OMH_STORE_GITIGNORE
+        except (OSError, UnicodeError):
+            return False
+    return False
+
+
+def _collect_omh_home_contents(
+    paths: OmhPaths,
+    *,
+    removed: list[str],
+    would_remove: list[str],
+    kept: list[dict[str, str]],
+    dry_run: bool,
+) -> None:
+    """Remove only top-level entries OMH creates; the home goes only once empty.
+
+    A manifest proves OMH installed into this directory, not that OMH wrote
+    everything in it: OMH_HOME may name a personal folder, and people drop
+    files into ~/.omh. Anything OMH does not create is kept and reported.
+    """
+    home = paths.omh_home
+    if not home.exists():
+        return
+    names = _omh_created_names()
+    foreign = False
+    for entry in sorted(home.iterdir(), key=lambda item: item.name):
+        if not _is_omh_created_entry(entry, names):
+            kept.append({"path": str(entry), "reason": "not created by OMH"})
+            foreign = True
+            continue
+        if dry_run:
+            would_remove.append(str(entry))
+        else:
+            discard_path(entry)
+            removed.append(str(entry))
+    if foreign:
+        kept.append({"path": str(home), "reason": "OMH home still holds entries not created by OMH"})
+    elif dry_run:
+        would_remove.append(str(home))
+    else:
+        home.rmdir()
+        removed.append(str(home))
 
 
 def _collect_removal(
@@ -1868,8 +2046,20 @@ def _collect_removal(
     dry_run: bool,
     force: bool,
     managed_plugin: bool = False,
+    managed_team_file: bool = False,
+    boundary: Path | None = None,
 ) -> None:
     if not path.exists() and not is_directory_link(path):
+        return
+    reason = None
+    if managed_plugin or managed_team_file:
+        reason = unsafe_removal_reason(path)
+        if boundary is not None:
+            reason = reason or linked_removal_reason(path, boundary)
+    if managed_team_file and not path.is_file():
+        reason = reason or "team-profile ownership authorizes only individual files, not directories"
+    if reason:
+        kept.append({"path": str(path), "reason": reason})
         return
     if managed_plugin and host_managed_plugin(path) is not None:
         # `hermes plugins install` wrote this tree and recorded it in its own
@@ -1895,6 +2085,33 @@ def _looks_like_managed_plugin(path: Path) -> bool:
     return (path / ".omh-plugin-manifest.json").exists()
 
 
+def _command_venv_scripts_dirs(venv: Path) -> tuple[Path, ...]:
+    """Executable directories a venv can use on this host.
+
+    Windows venvs normally use `Scripts`, but MSYS2/Cygwin-built Pythons there
+    lay out `bin`; POSIX venvs only ever use `bin`.
+    """
+    native = managed_command_venv_scripts_dir(venv)
+    return (native,) if native.name == "bin" else (native, venv / "bin")
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    """Compare as the filesystem does: case-insensitive and 8.3-expanded on Windows."""
+    return os.path.normcase(os.path.realpath(left)) == os.path.normcase(os.path.realpath(right))
+
+
+def _command_venv_owned(path: Path) -> bool:
+    """A runtime containment match alone cannot claim an arbitrary ancestor."""
+    marker = path / "pyvenv.cfg"
+    if not marker.is_file() or is_directory_link(marker):
+        return False
+    return any(
+        not linked_removal_reason(scripts, path)
+        and any((scripts / name).is_file() for name in ("omh", "omh.exe"))
+        for scripts in _command_venv_scripts_dirs(path)
+    )
+
+
 def _collect_command_package_removal(
     *,
     removed: list[str],
@@ -1906,27 +2123,69 @@ def _collect_command_package_removal(
     if venv_dir is None:
         kept.append({"path": "omh", "reason": "no home directory is available, so the installer-managed command venv cannot be located"})
         return
+    reason = unsafe_removal_reason(venv_dir) or configured_link_reason(venv_dir, "OMH_VENV_DIR")
+    if reason:
+        kept.append({"path": str(venv_dir), "reason": reason})
+        return
     executable = Path(sys.executable).expanduser()
-    if not command_runtime_owned(executable, venv_dir):
+    interpreter_dir = _normalize_without_final_symlink(executable).parent
+    runtime = interpreter_dir.parent
+    if (
+        not command_runtime_owned(executable, venv_dir)
+        or not any(_same_path(interpreter_dir, scripts) for scripts in _command_venv_scripts_dirs(runtime))
+        or not _command_venv_owned(runtime)
+    ):
         kept.append(
             {
                 "path": str(executable.resolve()),
-                "reason": "current omh command is not running from the installer-managed OMH venv",
+                "reason": "current omh command is not running from a verified installer-managed OMH venv",
             }
         )
         return
 
+    # A verified runtime owns neither arbitrary sibling directories nor a real
+    # directory named current. Attribute every recursive target separately.
+    generations = managed_command_generations_dir()
+    owned_generations: list[Path] = []
+    if generations is not None and generations.exists():
+        reason = unsafe_removal_reason(generations)
+        if reason:
+            kept.append({"path": str(generations), "reason": reason})
+        else:
+            for generation in sorted(generations.iterdir()):
+                reason = unsafe_removal_reason(generation)
+                if not reason and not _command_venv_owned(generation / "venv"):
+                    reason = "generation ownership is unproven: no OMH command venv"
+                if reason:
+                    kept.append({"path": str(generation), "reason": reason})
+                else:
+                    owned_generations.append(generation)
+    current = managed_command_current_dir()
+    if current is not None and (current.exists() or is_directory_link(current)):
+        if is_directory_link(current) and current.resolve() in owned_generations:
+            _collect_removal(current, removed=removed, would_remove=would_remove, kept=kept, dry_run=dry_run, force=True)
+        else:
+            kept.append({"path": str(current), "reason": "current pointer ownership is unproven"})
+
     for link in _managed_command_links(venv_dir):
         _collect_removal(link, removed=removed, would_remove=would_remove, kept=kept, dry_run=dry_run, force=True)
-    # Generation metadata is installer-owned only after attribution above has
-    # proved this command is ours; `_collect_removal` unlinks pointer links.
-    for path in (managed_command_current_dir(), managed_command_generations_dir(), managed_command_self_update_state_path()):
-        if path is not None:
-            _collect_removal(path, removed=removed, would_remove=would_remove, kept=kept, dry_run=dry_run, force=True)
+    for generation in owned_generations:
+        _collect_removal(generation, removed=removed, would_remove=would_remove, kept=kept, dry_run=dry_run, force=True)
     state_path = managed_command_self_update_state_path()
-    if state_path is not None:
-        _collect_removal(state_path.with_name(f".{state_path.name}.lock"), removed=removed, would_remove=would_remove, kept=kept, dry_run=dry_run, force=True)
-    _collect_removal(venv_dir, removed=removed, would_remove=would_remove, kept=kept, dry_run=dry_run, force=True)
+    if state_path is not None and state_path.exists():
+        state, error = read_json_object_result(state_path)
+        if not is_directory_link(state_path) and not error and state and state.get("schema_version") == "self_update_state/v1":
+            _collect_removal(state_path, removed=removed, would_remove=would_remove, kept=kept, dry_run=dry_run, force=True)
+            lock = state_path.with_name(f".{state_path.name}.lock")
+            if lock.is_file() and not is_directory_link(lock):
+                _collect_removal(lock, removed=removed, would_remove=would_remove, kept=kept, dry_run=dry_run, force=True)
+        else:
+            kept.append({"path": str(state_path), "reason": "self-update state ownership is unproven"})
+    if venv_dir.exists():
+        if _command_venv_owned(venv_dir):
+            _collect_removal(venv_dir, removed=removed, would_remove=would_remove, kept=kept, dry_run=dry_run, force=True)
+        else:
+            kept.append({"path": str(venv_dir), "reason": "legacy command venv ownership is unproven"})
 
 
 def _managed_command_links(venv_dir: Path) -> list[Path]:
@@ -1970,7 +2229,7 @@ def _manifest_team_profile_files(paths: OmhPaths) -> list[Path]:
         for raw_path in manifest.get("files", []):
             if not isinstance(raw_path, str):
                 continue
-            path = Path(raw_path).expanduser().resolve()
+            path = Path(os.path.abspath(Path(raw_path).expanduser()))
             if path in seen or not _is_relative_to(path, paths.hermes_agents_dir):
                 continue
             seen.add(path)

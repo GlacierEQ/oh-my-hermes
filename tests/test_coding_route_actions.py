@@ -17,10 +17,11 @@ from omh.routing.action_copy import NEXT_ACTION_LABELS
 from omh.routing.executor_cues import (
     CODING_DELIVERY_REQUEST_PHRASES,
     NAMED_CODING_AGENT_PHRASES,
-    OMO_RUNTIME_CODING_AGENT_PHRASES,
+    PI_FAMILY_CODING_AGENT_PHRASES,
     SUBSTRING_NAMED_CODING_AGENT_PHRASES,
 )
 from omh.routing.coding_route_actions import (
+    CODING_ROUTE_DECISION_SOURCES,
     CODING_ROUTE_LANE_NEXT_ACTION,
     CODING_ROUTE_NEXT_ACTIONS,
     COMPATIBLE_ROUTE_NEXT_ACTION,
@@ -28,6 +29,7 @@ from omh.routing.coding_route_actions import (
     RECORDED_OWNER_NEXT_ACTION,
     USER_CHOICE_NEXT_ACTION,
     named_coding_agent_phrase_parity,
+    named_executor_owners,
     resolve_coding_route_decision,
 )
 from omh.routing.localization import normalized_phrase
@@ -36,6 +38,7 @@ from omh.routing.owner_preference import (
     record_accepted_explicit_choice,
 )
 from omh.wrapper.contract import build_chat_interaction_payload
+from omh.coding.pi_family_interop import PI_DISTRIBUTION_HOST, RUNTIME_USER_PHRASE
 
 
 # One message per coding-delivery route-hint site. Direct `ultraprocess`, broad
@@ -117,7 +120,7 @@ class CodingRouteActionVocabularyTests(unittest.TestCase):
 
         for name in (
             "SUBSTRING_NAMED_CODING_AGENT_PHRASES",
-            "OMO_RUNTIME_CODING_AGENT_PHRASES",
+            "PI_FAMILY_CODING_AGENT_PHRASES",
             "NAMED_CODING_AGENT_PHRASES",
             "CODING_DELIVERY_REQUEST_PHRASES",
             "CODING_DELIVERY_REQUEST_TOKENS",
@@ -153,7 +156,7 @@ class CodingRouteActionVocabularyTests(unittest.TestCase):
                 self.assertNotIn("゚", decomposed)
         self.assertEqual(
             NAMED_CODING_AGENT_PHRASES,
-            (*SUBSTRING_NAMED_CODING_AGENT_PHRASES, *OMO_RUNTIME_CODING_AGENT_PHRASES),
+            (*SUBSTRING_NAMED_CODING_AGENT_PHRASES, *PI_FAMILY_CODING_AGENT_PHRASES),
         )
 
     def test_vendored_awareness_delivery_signal_applies_the_boundary_rule(self) -> None:
@@ -199,7 +202,7 @@ class CodingRouteActionVocabularyTests(unittest.TestCase):
         self.assertEqual(decision.selected_owner, "claude-code")
         self.assertFalse(decision.choice_required)
 
-    def test_pi_family_cues_resolve_the_omo_runtime_owner(self) -> None:
+    def test_pi_family_cues_resolve_the_pi_family_runtime_owner(self) -> None:
         for message in (
             "have pi implement the retry fix",
             "ask pi to fix the login bug",
@@ -207,16 +210,115 @@ class CodingRouteActionVocabularyTests(unittest.TestCase):
             "delegate to pi: fix the login bug",
             "pi한테 이 버그 고치라고 해줘",
             "pi에게 이 이슈 맡겨서 고쳐줘",
-            "have senpi fix the login bug",
+            f"have {PI_DISTRIBUTION_HOST} fix the login bug",
             "opencode로 이 버그 고쳐줘",
-            "omo runtime으로 이 버그 고쳐줘",
+            f"{RUNTIME_USER_PHRASE}으로 이 버그 고쳐줘",
         ):
             with self.subTest(message=message):
                 decision = _decision(message)
 
                 self.assertEqual(decision.next_action, NAMED_EXECUTOR_NEXT_ACTION)
-                self.assertEqual(decision.selected_owner, "omo-runtime")
+                self.assertEqual(decision.selected_owner, "pi-family-runtime")
                 self.assertFalse(decision.choice_required)
+
+
+class OwnerCueTests(unittest.TestCase):
+    """An owner named in a message counts only as the doer, on positive evidence (#2679 review).
+
+    Each negative names a CLI as what the work is about; each positive names it with an owner cue. A new cue
+    form joins `routing/executor_cues.py` with a case here on each side.
+    """
+
+    NOT_AN_OWNER = (
+        # The CLI is the subject of the work, not who does it.
+        "fix the codex adapter tests and open a pr",
+        "codex 어댑터 테스트 고쳐줘",
+        "update the claude code docs",
+        "rename the opencode config loader",
+        "fix the bug in codex adapter",
+        # Filenames and hyphenated words were never owner names.
+        "check the codex-utils.py script",
+        "read the claude-code.md file",
+        # A negated cue chooses nothing.
+        "don't use codex for this",
+        "codex로 하지 마",
+        # A status question names the CLI it asks about; the wrapper keeps it as the card's subject only.
+        "codex 세션 지금 실행 중이야?",
+        # Beside each addressed form (#2679 r3): a question, a noun after "get", a capability, a topic.
+        "codex가 왜 죽어",
+        "codex, is it free?",
+        "get the codex logs",
+        "can codex read pdfs?",
+        "codexに関する資料",
+        # Where the work is, not who does it: the safety net asks when a different CLI would run.
+        "fix the login bug in codex",
+        "codex에서 로그인 버그 고쳐줘",
+    )
+    OWNER = (
+        ("use codex to fix the login bug", ("codex",)),
+        ("fix the login bug with codex and open a pr", ("codex",)),
+        ("using claude code, fix the login bug", ("claude-code",)),
+        ("have claude code fix the login bug", ("claude-code",)),
+        ("let codex handle the parser fix", ("codex",)),
+        ("open this in codex and prepare the coding handoff", ("codex",)),
+        ("codex 세션 켜서 작업 시작하게 해줘", ("codex",)),
+        ("claude code 작업 세션 열어줘", ("claude-code",)),
+        ("open a codex session for the parser fix", ("codex",)),
+        ("codex로 이 버그 고쳐줘", ("codex",)),
+        ("codex한테 맡겨줘", ("codex",)),
+        ("codex 써서 고쳐줘", ("codex",)),
+        ("클로드 코드로 구현해줘", ("claude-code",)),
+        ("claude-code로 열어줘", ("claude-code",)),
+        ("opencode로 이 버그 고쳐줘", ("pi-family-runtime",)),
+        ("use codex or claude code to fix the login bug", ("codex", "claude-code")),
+        ("codex 말고 claude code로 구현해줘", ("claude-code",)),
+        # The CLI addressed as the one to act (#2679 r3).
+        ("codex가 로그인 버그 고쳐줘", ("codex",)),
+        ("codex가 해줘", ("codex",)),
+        ("claude code가 이거 구현해줘", ("claude-code",)),
+        ("codex, fix the login bug and open a pr", ("codex",)),
+        ("get codex to fix the login bug", ("codex",)),
+        ("codex please fix the login bug", ("codex",)),
+        ("can codex fix the login bug", ("codex",)),
+        ("codexにログインバグを直させて", ("codex",)),
+    )
+
+    def test_a_cli_named_as_the_subject_is_not_an_owner(self) -> None:
+        # Mutation: match a bare owner name again (`contains_boundary_phrase`); every case here then names one.
+        for message in self.NOT_AN_OWNER:
+            with self.subTest(message=message):
+                self.assertEqual(named_executor_owners(normalized_phrase(message)), ())
+
+    def test_an_owner_cue_names_the_owner(self) -> None:
+        for message, owners in self.OWNER:
+            with self.subTest(message=message):
+                self.assertEqual(named_executor_owners(normalized_phrase(message)), owners)
+
+    def test_a_mention_that_is_not_the_doer_never_runs_a_different_profile_cli(self) -> None:
+        # Mutation: drop the safety net; the profile default (claude-code) then runs with codex named in the request.
+        for message in ("fix the login bug in codex", "codex에서 로그인 버그 고쳐줘", "fix the codex adapter tests"):
+            with self.subTest(message=message):
+                decision = _decision(message, recorded_owner="claude-code")
+                self.assertEqual(decision.next_action, USER_CHOICE_NEXT_ACTION)
+                self.assertEqual(decision.offered_owner, "codex")
+        # No conflict: the profile names the mentioned CLI, or Hermes, which starts no CLI.
+        self.assertEqual(_decision("fix the login bug in codex", recorded_owner="codex").next_action,
+                         RECORDED_OWNER_NEXT_ACTION)
+        self.assertEqual(_decision("fix the login bug in codex", recorded_owner="hermes").next_action,
+                         RECORDED_OWNER_NEXT_ACTION)
+
+    def test_the_wrapper_reads_the_same_cue(self) -> None:
+        from omh.wrapper.contract import executor_target_named_in_message
+
+        for message in self.NOT_AN_OWNER:
+            with self.subTest(message=message):
+                self.assertEqual(executor_target_named_in_message(message), "")
+        for message, owners in self.OWNER:
+            # The wrapper's own name table spells the pi family by its runtime names, not by "opencode".
+            if owners != ("pi-family-runtime",):
+                with self.subTest(message=message):
+                    # Two owners named as the doer are the user's choice: the wrapper names neither.
+                    self.assertEqual(executor_target_named_in_message(message), owners[0] if len(owners) == 1 else "")
 
 
 class CodingRouteActionGuardTests(unittest.TestCase):
@@ -265,9 +367,9 @@ class CodingRouteActionGuardTests(unittest.TestCase):
         self.assertEqual(decision.next_action, USER_CHOICE_NEXT_ACTION)
         self.assertTrue(decision.choice_required)
 
-    def test_raspberry_pi_and_pip_context_never_name_the_omo_runtime_owner(self) -> None:
+    def test_raspberry_pi_and_pip_context_never_name_the_pi_family_runtime_owner(self) -> None:
         # Bare "pi" belongs to Raspberry-Pi physical-device routing, and "pi"
-        # is a substring of "pip"; neither may name the omo-runtime executor.
+        # is a substring of "pip"; neither may name the pi-family-runtime executor.
         for message in (
             "raspberry pi relay",
             "deploy to my pi 5",
@@ -322,7 +424,8 @@ class CodingRouteActionGuardTests(unittest.TestCase):
                 self.assertEqual(decision.next_action, NAMED_EXECUTOR_NEXT_ACTION)
                 self.assertEqual(decision.selected_owner, owner)
 
-    def test_owner_learning_asks_then_exposes_reversible_fourth_default(self) -> None:
+    def test_three_accepted_choices_then_a_fourth_request_still_asks(self) -> None:
+        # Mutation: restore `use_learned_default`; the fourth request then picks codex without asking.
         state = empty_owner_preference_state()
 
         for index in range(3):
@@ -345,13 +448,16 @@ class CodingRouteActionGuardTests(unittest.TestCase):
             owner_preference_state=state,
         )
 
-        self.assertEqual(fourth.next_action, RECORDED_OWNER_NEXT_ACTION)
-        self.assertEqual(fourth.source, "learned_owner_preference")
-        self.assertEqual(fourth.selected_owner, "codex")
-        self.assertEqual(fourth.owner_preference_route_family, "ulw-coding-delivery")
+        self.assertEqual(fourth.next_action, USER_CHOICE_NEXT_ACTION)
+        self.assertEqual(fourth.source, "user_choice_required")
+        self.assertTrue(fourth.choice_required)
+        self.assertEqual(fourth.selected_owner, "")
+        self.assertEqual(fourth.owner_preference_action, "ask_explicit_owner")
+        self.assertEqual(fourth.owner_preference_reason_code, "explicit_choice_required")
         self.assertEqual(fourth.owner_preference_evidence_count, 3)
-        self.assertTrue(fourth.owner_preference_override_available)
-        self.assertTrue(fourth.owner_preference_reset_available)
+        self.assertFalse(fourth.owner_preference_override_available)
+        self.assertFalse(fourth.owner_preference_reset_available)
+        self.assertNotIn("learned_owner_preference", CODING_ROUTE_DECISION_SOURCES)
 
     def test_explicit_owner_and_safety_gates_outrank_learned_default(self) -> None:
         state = _learned_owner_state()
@@ -405,9 +511,9 @@ class CodingRouteActionGuardTests(unittest.TestCase):
         self.assertEqual(bypass.owner_preference_reason_code, "non_coding_workflow")
         self.assertEqual(bypass.selected_owner, "")
 
-    def test_embedded_pi_family_substrings_never_name_the_omo_runtime_owner(self) -> None:
-        # Word-boundary guard: as raw substrings "promo runtime" contains
-        # "omo runtime" and "api한테" contains "pi한테", so containment alone
+    def test_embedded_pi_family_substrings_never_name_the_pi_family_runtime_owner(self) -> None:
+        # Word-boundary guard: as raw substrings a word ending in the runtime's
+        # short name contains its runtime phrase, and "api한테" contains "pi한테", so containment alone
         # named an executor these messages never mention.
         for message in (
             "promo runtime 로그 확인하는 코드 짜줘",

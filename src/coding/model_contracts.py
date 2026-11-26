@@ -517,6 +517,469 @@ _GPT_6_1_SOL: Final[dict[str, object]] = {
     "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
 }
 
+# GPT-6.2 Astra and GPT-6.2 Sol (the API changelog's "Nov 17 ... Model:
+# gpt-6.2-astra · Model: gpt-6.2-sol"). Each takes every shipped slot of the
+# line's previous generation (owner decision, 2026-11-18: 6.2 Astra GPT-6
+# Astra's, 6.2 Sol GPT-6.1 Sol's). Both model pages say "The API rejects
+# requests that set reasoning effort to `none`", and the migration guide
+# sends `none` and `minimal` callers to `low`, so the ladder is Astra's shape
+# and a lower request is raised to the `low` floor on record. Neither page
+# nor the reasoning guide states an API default effort (the guide's list of
+# `medium` defaults names GPT-6.1 Sol, GPT-6 Sol, and GPT-6 Luna, not 6.2),
+# so `effort_default` is empty, as for GPT-6 Astra: a route names one. New in
+# 6.2 (reasoning guide): the API drops reasoning items on a mid-conversation
+# prefix edit or a safety-identifier change, besides the model-downgrade and
+# organization checks every generation has; recorded as a documented,
+# unobserved runtime mechanism, because it is wire behaviour a prompt cannot
+# counter. Both share one base instruction set in the Codex client catalog
+# that differs from GPT-6 Astra's and GPT-6.1 Sol's (official-client).
+_GPT_6_2_SURFACE_HERMES: Final[str] = (
+    "Hermes v0.23.1 (3b42157858) and origin/main da9c2bd62f (2026-11-17) carry no `gpt-6.2` id: "
+    "`ASTRA_MODEL_IDS` names only `gpt-6-astra` and `NO_DISABLE_TIER_PREFIXES` only `gpt-6.1-sol`, "
+    "so the Codex route takes the legacy `none`..`xhigh` ladder, clamps `max` to `xhigh` without a "
+    "notice, sends `none` for a disable (which the API rejects), and has no price or context row; "
+    "observed in the Hermes source, not a vendor statement"
+)
+_GPT_6_2_RUNTIME_MECHANISMS: Final[dict[str, str]] = {
+    "reasoning_items_dropped_on_prefix_edit": "documented_not_observed",
+    "multi_agent_beta": "documented_not_observed",
+    "async_tool_calling": "documented_not_observed",
+}
+_GPT_6_2_DYNAMIC_EFFORT: Final[dict[str, object]] = {
+    "mechanism": "configuration_update",
+    "scope": "standard single-agent mode only",
+    "constraints": (
+        "not combinable with automatic compaction or automatic truncation",
+        "two adjacent configuration_update items are rejected",
+        "the original prompt prefix is preserved for prompt caching",
+    ),
+    "compatible_profiles": (),
+    "status": "documented_not_observed",
+}
+_GPT_6_2_DOCUMENTED_TRAITS: Final[tuple[str, ...]] = (
+    "stated for the GPT-6.2 family from behaviour seen with GPT-6.2 Astra and Sol: writing is more "
+    "concise and direct by default",
+    "stated for the GPT-6.2 family: when the user's intent is unclear, may propose a next step and "
+    "wait for confirmation",
+    "stated for the GPT-6.2 family: tends to write more efficient, high-quality code than its "
+    "predecessors",
+    "stated for the GPT-6.2 family: during longer tasks, can carry shorthand from its reasoning or "
+    "other agents into its final answer",
+    "the vendor's Codex client gives both GPT-6.2 ids one new base prompt, not GPT-6 Astra's",
+)
+_GPT_6_2_SOURCES_COMMON: Final[tuple[str, ...]] = (
+    "https://developers.openai.com/api/docs/guides/latest-model",
+    "https://developers.openai.com/api/docs/guides/reasoning",
+    "https://developers.openai.com/api/docs/pricing",
+    "https://developers.openai.com/api/docs/changelog",
+)
+
+_GPT_6_2_ASTRA: Final[dict[str, object]] = {
+    "schema_version": MODEL_CONTRACT_SCHEMA_VERSION,
+    "model_id": "gpt-6.2-astra",
+    "reasoning_mode": "standard",
+    "service_tier": "standard",
+    "family": "gpt",
+    "generation": "gpt-6.2",
+    # The API changelog entry date ("Nov 17 ... Model: gpt-6.2-astra").
+    "released": "2026-11-17",
+    "rollout": "a released id is not account-level readiness evidence",
+    "knowledge_cutoff": "2026-05-18",
+    "context_window_tokens": 1_050_000,
+    "max_input_tokens": 922_000,
+    "max_output_tokens": 128_000,
+    "limits_note": (
+        "the model page documents a 1,050,000-token context, 922,000 maximum input tokens, and "
+        "128,000 max output, and lists one model id, `gpt-6.2-astra`"
+    ),
+    "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+    "effort_floor": "low",
+    "effort_default": "",
+    "unsupported_efforts": {
+        "off": "the API rejects `none` (model page); the migration guide says use `low` instead",
+        "minimal": "not in the documented ladder; the migration guide says use `low` instead",
+    },
+    "tool_calling": {
+        "api": "responses",
+        "note": (
+            "tool calling requires the Responses API; Chat Completions serves requests without "
+            "tool calling at every effort, since there is no `none` rung"
+        ),
+    },
+    "unsupported_parameters": ("temperature", "top_p", "top_logprobs"),
+    "unsupported_parameters_note": (
+        "always rejected (migration guide); on Chat Completions `logprobs` is rejected too, and on "
+        "Responses `message.output_text.logprobs` is removed from `include`"
+    ),
+    "dynamic_effort": _GPT_6_2_DYNAMIC_EFFORT,
+    "runtime_mechanisms": _GPT_6_2_RUNTIME_MECHANISMS,
+    "surface_notes": {
+        "codex": (
+            "Codex CLI 0.169.0's served model catalog (read 2026-11-18) lists `low` through `max` plus "
+            "a Codex-only `ultra` rung that no OMH ladder or chain carries, a `low` default, `low` "
+            "default verbosity, `xhigh` multi-agent effort, reasoning-effort updates enabled, a 272K "
+            "context window with an 872K maximum, and the Fast speed tier only; it names no upgrade "
+            "from GPT-6 Astra"
+        ),
+        "hermes": _GPT_6_2_SURFACE_HERMES,
+    },
+    # The Codex client's model-catalog ladder from `surface_notes.codex`,
+    # without `ultra` (owner decision, 2026-09-23: no OMH ladder or chain
+    # carries it).
+    "surface_efforts": {
+        "codex": ("low", "medium", "high", "xhigh", "max"),
+    },
+    "documented_traits": _GPT_6_2_DOCUMENTED_TRAITS,
+    # OpenAI list price (developers.openai.com model and pricing pages, read
+    # 2026-11-18). The cached rate is 5% of input, so `APPROX_CACHE_READ_RATIO`
+    # carries a row for it. The Flex table does not list the id.
+    "pricing_usd_per_mtok": {
+        "input": 8.0,
+        "cached_input": 0.40,
+        "cache_write": 10.0,
+        "cache_write_12h": 20.0,
+        "output": 40.0,
+        "long_context_over_272k_input": "2x input and cache rates, 1.5x output, for the full request",
+        "batch": "0.5x every standard rate",
+        "fast_mode": "2x every applicable rate",
+        "ultrafast": "3x every standard rate through 2027-02-28, 6x from 2027-03-01 (Pacific time)",
+        "background_completion_window": "30% below standard for the 2-hour window, 40% for the 8-hour",
+        "regional_processing": "+10% where available",
+    },
+    "data_handling": _DATA_HANDLING_NOT_READ,
+    "sources": ("https://developers.openai.com/api/docs/models/gpt-6.2-astra", *_GPT_6_2_SOURCES_COMMON),
+    "sources_read": "2026-11-18",
+    "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
+}
+
+_GPT_6_2_SOL: Final[dict[str, object]] = {
+    "schema_version": MODEL_CONTRACT_SCHEMA_VERSION,
+    "model_id": "gpt-6.2-sol",
+    "reasoning_mode": "standard",
+    "service_tier": "standard",
+    "family": "gpt",
+    "generation": "gpt-6.2",
+    # The API changelog entry date ("Nov 17 ... Model: gpt-6.2-sol").
+    "released": "2026-11-17",
+    "rollout": "a released id is not account-level readiness evidence",
+    "knowledge_cutoff": "2026-06-01",
+    "context_window_tokens": 1_050_000,
+    "max_input_tokens": 922_000,
+    "max_output_tokens": 128_000,
+    "limits_note": (
+        "the model page documents a 1,050,000-token context, 922,000 maximum input tokens, and "
+        "128,000 max output, and lists one model id, `gpt-6.2-sol`"
+    ),
+    "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+    "effort_floor": "low",
+    "effort_default": "",
+    "unsupported_efforts": {
+        "off": "the API rejects `none` (model page); the migration guide says use `low` instead",
+        "minimal": "not in the documented ladder; the migration guide says use `low` instead",
+    },
+    "tool_calling": {
+        "api": "responses",
+        "note": (
+            "tool calling requires the Responses API; Chat Completions serves requests without "
+            "tool calling at every effort, since there is no `none` rung"
+        ),
+    },
+    "unsupported_parameters": ("temperature", "top_p", "top_logprobs"),
+    "unsupported_parameters_note": (
+        "always rejected (migration guide); on Chat Completions `logprobs` is rejected too, and on "
+        "Responses `message.output_text.logprobs` is removed from `include`"
+    ),
+    "dynamic_effort": _GPT_6_2_DYNAMIC_EFFORT,
+    # The reasoning guide's pro-mode example names this id
+    # (`"model": "gpt-6.2-sol", "reasoning": {"mode": "pro"}`).
+    "runtime_mechanisms": {**_GPT_6_2_RUNTIME_MECHANISMS, "pro_reasoning_mode": "documented_not_observed"},
+    "surface_notes": {
+        "codex": (
+            "Codex CLI 0.169.0's served model catalog (read 2026-11-18) lists `low` through `max` plus "
+            "a Codex-only `ultra` rung that no OMH ladder or chain carries, a `low` default, `low` "
+            "default verbosity, `xhigh` multi-agent effort, reasoning-effort updates enabled, a 500K "
+            "context window with an 872K maximum, the Fast and Ultrafast speed tiers, and audio among "
+            "its input modalities, which the API model page lists as unsupported; it names no "
+            "upgrade from GPT-6.1 Sol"
+        ),
+        "hermes": _GPT_6_2_SURFACE_HERMES,
+    },
+    # The Codex client's model-catalog ladder from `surface_notes.codex`,
+    # without `ultra` (owner decision, 2026-09-23: no OMH ladder or chain
+    # carries it).
+    "surface_efforts": {
+        "codex": ("low", "medium", "high", "xhigh", "max"),
+    },
+    "documented_traits": _GPT_6_2_DOCUMENTED_TRAITS,
+    # OpenAI list price (developers.openai.com model and pricing pages, read
+    # 2026-11-18): GPT-6.1 Sol's card. The cached rate is 5% of input, so
+    # `APPROX_CACHE_READ_RATIO` carries a row for it. The Flex table does not
+    # list the id.
+    "pricing_usd_per_mtok": {
+        "input": 2.0,
+        "cached_input": 0.10,
+        "cache_write": 2.5,
+        "cache_write_12h": 5.0,
+        "output": 10.0,
+        "long_context_over_272k_input": "2x input and cache rates, 1.5x output, for the full request",
+        "batch": "0.5x every standard rate",
+        "fast_mode": "2x every applicable rate",
+        "ultrafast": "3x every standard rate through 2027-02-28, 6x from 2027-03-01 (Pacific time)",
+        "background_completion_window": "30% below standard for the 2-hour window, 40% for the 8-hour",
+        "regional_processing": "+10% where available",
+    },
+    "data_handling": _DATA_HANDLING_NOT_READ,
+    "sources": ("https://developers.openai.com/api/docs/models/gpt-6.2-sol", *_GPT_6_2_SOURCES_COMMON),
+    "sources_read": "2026-11-18",
+    "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
+}
+
+# GPT-6.1 Terra, the Terra tier's first GPT-6-generation release (the API
+# changelog's "Oct 26 ... Released GPT-6.1 Terra"). GPT-6 Luna's ladder shape,
+# not GPT-6.1 Sol's: the model page and the latest-model guide both list
+# `none` ("GPT-6.1 Terra, GPT-6 Sol, and GPT-6 Luna support `none`"), so a
+# no-reasoning request is sent as `none` and only `minimal` is raised. OMH's
+# 2026-09-23 note that no GPT-6 Terra exists still holds: OpenAI skipped 6.0
+# for this tier. Recognized, priced, and provider-mapped, but in no shipped
+# chain: GPT-5.6 Terra's slots went to GPT-6 Sol on 2026-09-23, so there is
+# no Terra slot for it to inherit, and placement is an owner decision.
+_GPT_6_1_TERRA: Final[dict[str, object]] = {
+    "schema_version": MODEL_CONTRACT_SCHEMA_VERSION,
+    "model_id": "gpt-6.1-terra",
+    "reasoning_mode": "standard",
+    "service_tier": "standard",
+    "family": "gpt",
+    "generation": "gpt-6.1",
+    # The API changelog entry date ("Oct 26 ... Released GPT-6.1 Terra").
+    "released": "2026-10-26",
+    "rollout": (
+        "in Codex and ChatGPT Work for Plus, Pro, Enterprise, and Edu, and in the API; Codex CLI "
+        "needs 0.159.0 or later (vendor launch coverage); a released id is not account-level "
+        "readiness evidence"
+    ),
+    "knowledge_cutoff": "2026-06-01",
+    "context_window_tokens": 1_050_000,
+    "max_input_tokens": 922_000,
+    "max_output_tokens": 128_000,
+    "limits_note": (
+        "the model page documents a 1,050,000-token context, 922,000 maximum input tokens, and "
+        "128,000 max output"
+    ),
+    # The API page's ladder. `none` is a documented rung, so the floor is
+    # `none` and a no-reasoning request has nothing to be raised to; `minimal`
+    # asks for SOME reasoning and goes up to `low`, never down to `none`.
+    "reasoning_efforts": ("none", "low", "medium", "high", "xhigh", "max"),
+    "effort_floor": "none",
+    "effort_default": "medium",
+    "unsupported_efforts": {
+        "minimal": "not in the documented ladder; the migration guide says start with `low`",
+    },
+    "tool_calling": {
+        "api": "responses",
+        "note": (
+            "tool calling requires the Responses API (the model page and the migration guide); "
+            "Chat Completions is supported for requests without tools"
+        ),
+    },
+    "unsupported_parameters": ("temperature", "top_p", "top_logprobs"),
+    "unsupported_parameters_note": (
+        "rejected when reasoning effort is not `none`; on Chat Completions `logprobs` is rejected too, "
+        "and on Responses `message.output_text.logprobs` is removed from `include`"
+    ),
+    # The reasoning guide states the mechanism for the GPT-6 family, and the
+    # Codex catalog sets `supports_reasoning_effort_updates` for this id.
+    "dynamic_effort": {
+        "mechanism": "configuration_update",
+        "scope": "standard single-agent mode only",
+        "constraints": (
+            "not combinable with automatic compaction or automatic truncation",
+            "two adjacent configuration_update items are rejected",
+            "the original prompt prefix is preserved for prompt caching",
+        ),
+        "compatible_profiles": (),
+        "status": "documented_not_observed",
+    },
+    "runtime_mechanisms": {
+        "persisted_reasoning_all_turns": "documented_not_observed",
+        "async_tool_calling": "documented_not_observed",
+        "mid_turn_steering": "documented_not_observed",
+        "pro_reasoning_mode": "documented_not_observed",
+    },
+    "surface_notes": {
+        "codex": (
+            "the Codex client's model catalog (openai/codex models-manager, read 2026-10-27) lists "
+            "`low` through `max` (no `none`) plus a Codex-only `ultra` rung that no OMH ladder or "
+            "chain carries, a `low` default where the API defaults to `medium`, `low` default "
+            "verbosity, `xhigh` multi-agent effort, reasoning-effort updates enabled, and a 500K "
+            "context window with an 872K maximum; it gives the id the same base instructions as "
+            "GPT-6 Astra and GPT-6.1 Sol and names no upgrade from GPT-5.6 Terra"
+        ),
+        "hermes": (
+            "Hermes v0.22.5 and origin/main a382af23f4 (2026-10-26) match this id to no GPT-6 "
+            "effort prefix, so the Codex route clamps `max` to `xhigh` without a notice; neither "
+            "carries a price row, and the Codex route falls back to a 256K context while "
+            "OpenRouter resolves 1.05M; observed in the Hermes source, not a vendor statement"
+        ),
+    },
+    # The Codex client's model-catalog ladder from `surface_notes.codex`,
+    # without `ultra` (owner decision, 2026-09-23: no OMH ladder or chain
+    # carries it).
+    "surface_efforts": {
+        "codex": ("low", "medium", "high", "xhigh", "max"),
+    },
+    "documented_traits": (
+        "stated for the GPT-6 family from behaviour observed with GPT-6 Astra: asks the user a "
+        "question more readily",
+        "stated for the GPT-6 family: follows instructions more strictly and is more sensitive to "
+        "instructions contained in skills",
+        "stated for the GPT-6 family: tends toward detailed, formatted responses",
+        "stated for the GPT-6 family: may delegate less often than desired",
+        "stated for the GPT-6 family: tends to be thorough in testing before considering a task "
+        "complete",
+        "the model page positions it for visual reasoning, precise computer use, and clear, "
+        "natural writing; the vendor still points the most complex coding at GPT-6.1 Sol or "
+        "GPT-6 Astra (launch coverage)",
+    ),
+    # OpenAI list price (developers.openai.com model and pricing pages, read
+    # 2026-10-27). No promotion mark. The cached rate is 5% of input, as on
+    # GPT-6.1 Sol, so `APPROX_CACHE_READ_RATIO` carries a row for it.
+    "pricing_usd_per_mtok": {
+        "input": 1.0,
+        "cached_input": 0.05,
+        "cache_write": 1.25,
+        "cache_write_12h": 2.5,
+        "output": 5.0,
+        "long_context_over_272k_input": "2x input and cache rates, 1.5x output, for the full request",
+        "batch_and_flex": "0.5x every standard rate",
+        "fast_mode": "2x every applicable rate",
+        "ultrafast": "not offered (the Ultrafast guide names only GPT-6 Astra and GPT-6.1 Sol)",
+        "regional_processing": "+10% where available",
+    },
+    "data_handling": _DATA_HANDLING_NOT_READ,
+    "sources": (
+        "https://developers.openai.com/api/docs/models/gpt-6.1-terra",
+        "https://developers.openai.com/api/docs/guides/latest-model",
+        "https://developers.openai.com/api/docs/guides/reasoning",
+        "https://developers.openai.com/api/docs/pricing",
+        "https://developers.openai.com/api/docs/changelog",
+    ),
+    "sources_read": "2026-10-27",
+    "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
+}
+
+# GPT-6 Cyber (2026-11-05), an access-gated sibling kept out of every chain
+# on the Mythos 5.1 terms, with no executor option row, as for GPT-6.1 Terra:
+# the system card calls it "a cyber-specialized variant of GPT-6 Astra", and
+# the model page serves it only to organizations with "Daybreak Red access and
+# approval". Recognized, priced, and provider-mapped so a user who names it
+# gets a contract, a cost, and Astra's calibration, but in no shipped chain:
+# most accounts cannot call it and its scope is authorized security work.
+# The model page lists "Reasoning token support" and no effort values, so the
+# ladder below is GPT-6 Astra's, inherited on the system card's statement and
+# labeled as such; a rung Astra rejects is raised on record here too. Only
+# the ladder is inherited: limits, endpoints, and price are this model's own
+# page, and Astra's unsupported parameters are not copied, because the Cyber
+# page names none.
+_GPT_6_CYBER: Final[dict[str, object]] = {
+    "schema_version": MODEL_CONTRACT_SCHEMA_VERSION,
+    "model_id": "gpt-6-cyber",
+    "reasoning_mode": "standard",
+    "service_tier": "standard",
+    "family": "gpt",
+    "generation": "gpt-6",
+    # The API changelog entry date ("Nov 5 ... Model: gpt-6-cyber").
+    "released": "2026-11-05",
+    "rollout": (
+        "only for organizations with Daybreak Red access and approval (model page), through the "
+        "API and the Codex app (the system card recommends Codex's sandboxing \"when accessing "
+        "GPT-6 Cyber through the Codex app\"), though the Codex models page "
+        "(learn.chatgpt.com/docs/models, read 2026-11-06) does not list it; the OpenAI Codex "
+        "subscription route on this "
+        "maintainer host returned HTTP 400 on 2026-11-06 with the same wording an unknown id gets, "
+        "so the probe cannot tell gated from absent; a released id is not account-level readiness "
+        "evidence"
+    ),
+    "access": (
+        "gated: \"Your organization needs Daybreak Red access and approval to use GPT-6-Cyber\" "
+        "(model page); the system card rates it Critical in Cybersecurity under OpenAI's "
+        "Preparedness Framework, the same designations as GPT-6 Astra, and scopes it to "
+        "authorized security work"
+    ),
+    "served_ids": {
+        "first_party": "gpt-6-cyber",
+    },
+    "knowledge_cutoff": "",
+    "context_window_tokens": 1_050_000,
+    "max_input_tokens": 922_000,
+    "max_output_tokens": 128_000,
+    "limits_note": (
+        "the model page documents a 1,050,000-token context, 922,000 maximum input tokens, and "
+        "128,000 max output; it states no knowledge cutoff and lists one snapshot, `gpt-6-cyber`"
+    ),
+    # GPT-6 Astra's ladder, inherited: the model page lists no effort values.
+    "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+    "effort_floor": "low",
+    "effort_default": "",
+    "unsupported_efforts": {
+        "off": "the model page documents no effort values; GPT-6 Astra, its base, returns HTTP 400 for `none`",
+        "minimal": "the model page documents no effort values; not in GPT-6 Astra's ladder",
+    },
+    "effort_ladder_source": (
+        "inherited from GPT-6 Astra on the system card's statement that GPT-6 Cyber is a variant "
+        "of it; the model page says only \"Reasoning token support\""
+    ),
+    "tool_calling": {
+        "api": "responses",
+        "note": (
+            "the model page lists Chat Completions and Responses as supported endpoints and every "
+            "other endpoint, Batch included, as not supported; it states no tool-calling "
+            "restriction of its own (GPT-6 Astra's tool calling requires Responses), so `responses` "
+            "here is OMH's choice, not a vendor restriction"
+        ),
+    },
+    "unsupported_parameters": (),
+    "runtime_mechanisms": {},
+    "surface_notes": {
+        "hermes": (
+            "Hermes v0.22.5 (bf0203a794) and origin/main 44ec783afd (2026-11-06) carry no "
+            "`gpt-6-cyber` id, price, or context row; origin/main's Daybreak switch (60f5029394, "
+            "2026-11-02) sends `access_programs.cyber: daybreak_blue` for models the account's "
+            "Codex catalog lists, which is Daybreak Blue on existing models, not this Daybreak Red "
+            "model; observed in the Hermes source, not a vendor statement"
+        ),
+    },
+    "documented_traits": (
+        "the system card: a cyber-specialized variant of GPT-6 Astra for authorized security work, "
+        "including vulnerability discovery, exploit development, and web pentesting",
+        "the changelog: investigates vulnerabilities, reproduces them in an authorized test "
+        "environment, and verifies fixes",
+        "its model page, changelog entry, and system card give no prompting guidance; GPT-6 Astra's "
+        "documented traits are the nearest record",
+    ),
+    # OpenAI list price (developers.openai.com model page and pricing page,
+    # "Cyber models" table, read 2026-11-06). Only a short-context rate is
+    # published: the long-context columns are "-" and the page names no
+    # Batch, Flex, or priority row. Cached input is a tenth of input.
+    "pricing_usd_per_mtok": {
+        "input": 20.0,
+        "cached_input": 2.0,
+        "cache_write": 25.0,
+        "cache_write_12h": 50.0,
+        "output": 100.0,
+        "long_context_over_272k_input": "not published",
+    },
+    "data_handling": _DATA_HANDLING_NOT_READ,
+    "sources": (
+        "https://developers.openai.com/api/docs/models/gpt-6-cyber",
+        "https://developers.openai.com/api/docs/pricing",
+        "https://developers.openai.com/api/docs/changelog",
+        "https://deploymentsafety.openai.com/gpt-6-cyber",
+        "https://learn.chatgpt.com/docs/models",
+    ),
+    "sources_read": "2026-11-06",
+    "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
+}
+
 # Claude Opus 5.5, the first Claude contract. Thinking is always on: a
 # thinking-disabled request or a manual budget returns HTTP 400, so a
 # no-thinking rung is raised to `low` on record. One optional key joins
@@ -849,6 +1312,216 @@ _CLAUDE_HAIKU_5_5: Final[dict[str, object]] = {
     "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
 }
 
+# Claude Fable 5.1, on the Opus 5.5 terms: adaptive thinking is always on and
+# a thinking-disabled request or a manual budget returns HTTP 400, so a
+# no-thinking rung is raised to `low` on record. All five effort levels are
+# documented and `high` is the API default. Claude Mythos 5.1 shares the
+# specifications but is served only to verified organizations; it gets no
+# row here.
+_CLAUDE_FABLE_5_1: Final[dict[str, object]] = {
+    "schema_version": MODEL_CONTRACT_SCHEMA_VERSION,
+    "model_id": "claude-fable-5-1",
+    "reasoning_mode": "thinking",
+    "service_tier": "standard",
+    "family": "claude",
+    "generation": "claude-fable-5.1",
+    "released": "2026-09-01",
+    "rollout": (
+        "available on the Claude API, Amazon Bedrock, Google Cloud, Microsoft Foundry, and Claude "
+        "Platform on AWS; a released id is not account-level readiness evidence"
+    ),
+    # A fixed id with no date suffix: the dateless id is the pinned snapshot.
+    "served_ids": {
+        "first_party": "claude-fable-5-1",
+        "bedrock": "anthropic.claude-fable-5-1",
+    },
+    "retirement": "not sooner than 2027-09-01",
+    "knowledge_cutoff": "2026-06",
+    "context_window_tokens": 1_000_000,
+    "max_input_tokens": 1_000_000,
+    "max_output_tokens": 128_000,
+    "limits_note": (
+        "1M context and 128K max output per request are documented; the 300K Message Batches "
+        "output beta does not list this model; no separate max-input figure is published"
+    ),
+    "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+    "effort_floor": "low",
+    "effort_default": "high",
+    "unsupported_efforts": {
+        "off": (
+            "adaptive thinking is always on; `thinking.type=disabled` or `enabled` with "
+            "`budget_tokens` returns HTTP 400"
+        ),
+        "minimal": "not in the documented ladder",
+    },
+    "tool_calling": {
+        "api": "messages",
+        "note": (
+            "forced `tool_choice` of type `any` or `tool` returns HTTP 400, on count_tokens as "
+            "well; use `auto` and say in the prompt when a tool applies"
+        ),
+    },
+    "unsupported_parameters": ("thinking.budget_tokens", "temperature", "top_p", "top_k"),
+    "unsupported_parameters_note": (
+        "setting `temperature`, `top_p`, or `top_k` returns HTTP 400, and so does an assistant "
+        "prefill"
+    ),
+    "runtime_mechanisms": {
+        "preserved_thinking_blocks": "documented_not_observed",
+        "per_message_effort": "documented_not_observed",
+    },
+    "surface_notes": {
+        "hermes": (
+            "Hermes Agent at 2bd378ed1b sends `output_config.effort` from `low` through `max` "
+            "verbatim on the Anthropic route and lists the model as always thinking; over "
+            "OpenRouter the effort travels as top-level `verbosity`; observed in the Hermes source, "
+            "not a vendor statement"
+        ),
+    },
+    "documented_traits": (
+        "adaptive thinking is always on; a request that disables it returns HTTP 400",
+        "supports all five effort levels and `high` is the API default",
+        "at `low` it calls a search or retrieval tool less often and answers from memory more",
+        "writes less user-facing text between tool calls, especially at higher effort",
+        "is more likely to rewrite a whole file than make a targeted edit",
+        "only Claude Fable 5.1 and Claude Mythos 5.1 can read its thinking blocks, and editing "
+        "an earlier turn invalidates them",
+    ),
+    # Anthropic list price (the Fable 5.1 model overview, read 2026-11-07).
+    # Cache reads are 0.025x input, a quarter of the Fable 5 rate.
+    "pricing_usd_per_mtok": {
+        "input": 10.0,
+        "cached_input": 0.25,
+        "cache_write_5m": 12.5,
+        "cache_write_1h": 20.0,
+        "output": 50.0,
+        "batch": "50% off input and output on Message Batches",
+    },
+    "data_handling": _DATA_HANDLING_NOT_READ,
+    "sources": (
+        "https://platform.claude.com/docs/en/models/fable-5-1/overview",
+        "https://platform.claude.com/docs/en/models/fable-5-1/whats-new-fable-5-1",
+        "https://platform.claude.com/docs/en/models/fable-5-1/migration-guide",
+        "https://platform.claude.com/docs/en/build-with-claude/effort",
+    ),
+    "sources_read": "2026-11-07",
+    "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
+}
+
+# Claude Fable 5.2 (2026-11-09), on the Fable 5.1 terms: the same request
+# contract (always-on adaptive thinking, no prefill, no sampling parameters,
+# no forced tool choice) at a lower price. Read from its own pages, not
+# copied from 5.1: the ladder, default, and limits match, and the four
+# breaking changes are the prefix check on every account, thinking blocks
+# only Fable 5.2 and Mythos 5.2 read, `computer_20251124` refused outside
+# Bedrock, and a Fable 5.2 executor needing a Fable 5.2 or Mythos 5.2
+# advisor. Claude Mythos 5.2 shares the specifications and price but is
+# served only to organizations verified through Anthropic's verification
+# programs; it gets no row here, as Mythos 5.1 got none.
+_CLAUDE_FABLE_5_2: Final[dict[str, object]] = {
+    "schema_version": MODEL_CONTRACT_SCHEMA_VERSION,
+    "model_id": "claude-fable-5-2",
+    "reasoning_mode": "thinking",
+    "service_tier": "standard",
+    "family": "claude",
+    "generation": "claude-fable-5.2",
+    "released": "2026-11-09",
+    "rollout": (
+        "available on the Claude API, Amazon Bedrock, Google Cloud, Microsoft Foundry, and Claude "
+        "Platform on AWS; a released id is not account-level readiness evidence"
+    ),
+    # A fixed id with no date suffix: the dateless id is the pinned snapshot.
+    "served_ids": {
+        "first_party": "claude-fable-5-2",
+        "bedrock": "anthropic.claude-fable-5-2",
+    },
+    "retirement": "not sooner than 2027-11-09",
+    "knowledge_cutoff": "2026-06",
+    "context_window_tokens": 1_000_000,
+    "max_input_tokens": 1_000_000,
+    "max_output_tokens": 128_000,
+    "limits_note": (
+        "1M context (default and maximum) and 128K max output per request are documented; no "
+        "separate max-input figure is published; its rate limit is its own, separate from the one "
+        "Fable 5.1 and Fable 5 share"
+    ),
+    "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+    "effort_floor": "low",
+    "effort_default": "high",
+    "unsupported_efforts": {
+        "off": (
+            "adaptive thinking is always on; `thinking.type=disabled` or `enabled` with "
+            "`budget_tokens` returns HTTP 400"
+        ),
+        "minimal": "not in the documented ladder",
+    },
+    "tool_calling": {
+        "api": "messages",
+        "note": (
+            "forced `tool_choice` of type `any` or `tool` returns HTTP 400; `auto` and `none` are "
+            "supported, so say in the prompt when a tool applies; the earlier `computer_20251124` "
+            "tool returns HTTP 400 on every platform except Amazon Bedrock"
+        ),
+    },
+    "unsupported_parameters": ("thinking.budget_tokens", "temperature", "top_p", "top_k"),
+    "unsupported_parameters_note": (
+        "setting `temperature`, `top_p`, or `top_k` returns HTTP 400, and so does an assistant "
+        "prefill"
+    ),
+    "runtime_mechanisms": {
+        "preserved_thinking_blocks": "documented_not_observed",
+        "per_message_effort": "documented_not_observed",
+        "fast_mode": "documented_not_observed",
+    },
+    "surface_notes": {
+        "claude_code": (
+            "a Claude Code OAuth route rejected `claude-fable-5-2` with \"Claude Code 2.1.280 does "
+            "not support this model; version 2.1.290 or newer is required\", so the Maestro-lane "
+            "Claude Code chain needs Claude Code 2.1.290 or newer for this id; observed on one "
+            "machine on 2026-11-10, not a vendor statement"
+        ),
+        "hermes": (
+            "Hermes Agent at 2bd378ed1b lists no `claude-fable-5-2` in its static model catalog; "
+            "its `claude-fable` substring rows treat the id as always thinking with 128K output "
+            "and a 1M context; observed in the Hermes source, not a vendor statement"
+        ),
+    },
+    "documented_traits": (
+        "adaptive thinking is always on; a request that disables it returns HTTP 400",
+        "supports all five effort levels and `high` is the API default",
+        "at `high` and above it thinks before almost every reply, and a prompt line asking it to "
+        "answer directly does not stop it thinking at `medium` and above",
+        "on long multistep tasks it sometimes ends a turn before the work is done, more often at "
+        "`low` and `medium`",
+        "long runs of tool calls can pass with little user-facing text",
+        "at `xhigh` and `max` it can start subagents to review its own work",
+        "follows cautious instructions, approval rules, and style rules closely",
+        "what the prompt says about code ownership changes whether it restructures or only adds",
+        "only Claude Fable 5.2 and Claude Mythos 5.2 read its thinking blocks, which stay with the "
+        "producing account, and editing an earlier turn invalidates them on every account",
+    ),
+    # Anthropic list price (the Fable 5.2 what's-new page, read 2026-11-10).
+    # Cache reads are 0.025x input, the Fable 5.1 multiplier.
+    "pricing_usd_per_mtok": {
+        "input": 8.0,
+        "cached_input": 0.20,
+        "cache_write_5m": 10.0,
+        "cache_write_1h": 16.0,
+        "output": 40.0,
+        "batch": "input 4.00, output 20.00 on Message Batches",
+        "fast_mode": "input 16.00, output 80.00 with `speed: \"fast\"`",
+    },
+    "data_handling": _DATA_HANDLING_NOT_READ,
+    "sources": (
+        "https://platform.claude.com/docs/en/models/fable-5-2/overview",
+        "https://platform.claude.com/docs/en/models/fable-5-2/whats-new-fable-5-2",
+        "https://platform.claude.com/docs/en/models/fable-5-2/migration-guide",
+        "https://platform.claude.com/docs/en/build-with-claude/effort",
+    ),
+    "sources_read": "2026-11-10",
+    "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
+}
+
 # DeepSeek V4.1 Flash. OMH's alias is the versioned gateway spelling; the
 # first-party API names the current Flash generation `deepseek-flash` and
 # that pointer is a declared projection below, not a second contract.
@@ -862,13 +1535,17 @@ _DEEPSEEK_V41_FLASH: Final[dict[str, object]] = {
     "released": "2026-09-10",
     "rollout": (
         "generally available on the first-party API as `deepseek-flash`; `deepseek-v4-flash` and "
-        "`deepseek-v4-flash-vision-exp` are routed to it, and `deepseek-v4-pro` routes to it from "
-        "2026-09-14 12:00 Beijing time pending a V4.1 Pro release; a released id is not "
-        "account-level readiness evidence"
+        "`deepseek-v4-flash-vision-exp` are routed to it; `deepseek-v4-pro` stays a separately "
+        "priced model (pricing page re-read 2026-10-28); since 2026-10-17 the pointer serves "
+        "DeepSeek-V4.1-Flash-1017, an upgrade of this model with \"The API calling method and "
+        "pricing remain unchanged\" (change log and pricing page re-read 2026-11-06; the pricing "
+        "page names the snapshot only as the MODEL VERSION, never as a model name); a released "
+        "id is not account-level readiness evidence"
     ),
     "served_ids": {
         "first_party": "deepseek-flash",
         "openrouter": "deepseek/deepseek-v4.1-flash",
+        "openrouter_snapshot_1017": "deepseek/deepseek-v4.1-flash-1017",
         "huggingface": "deepseek-ai/DeepSeek-V4.1-Flash",
     },
     "knowledge_cutoff": "",
@@ -1107,6 +1784,202 @@ _KIMI_K3_1_PRO_HIGHSPEED: Final[dict[str, object]] = {
     },
 }
 
+# Gemini 4 Argon (Google, GA 2026-10-13), the first Gemini exact contract and
+# the successor of Gemini 3.1 Pro in every shipped chain. The ladder is
+# `low`/`medium`/`high` with `medium` the default, and thinking cannot be
+# turned off, so `off` and `minimal` are raised to the floor `low` on record.
+# Rungs above `high` (`xhigh`, `max`, `ultra`) are deliberately NOT listed as
+# unsupported: the raise rule picks the lowest documented rung above the
+# request and there is none, so listing them would lower `xhigh` to the
+# floor. Google documents no value for them; they pass through on record,
+# and the Hermes surface note says what that build sends instead.
+_GEMINI_4_ARGON: Final[dict[str, object]] = {
+    "schema_version": MODEL_CONTRACT_SCHEMA_VERSION,
+    "model_id": "gemini-4-argon",
+    "reasoning_mode": "thinking",
+    "service_tier": "standard",
+    "family": "gemini",
+    "generation": "gemini-4",
+    # The Gemini API changelog entry is dated October 13, 2026.
+    "released": "2026-10-13",
+    "rollout": (
+        "generally available on the Gemini API; not on the free tier; a released id is not "
+        "account-level readiness evidence"
+    ),
+    # The model page lists one stable id and no preview, latest, or dated
+    # variant.
+    "served_ids": {
+        "first_party": "gemini-4-argon",
+        "openrouter": "google/gemini-4-argon",
+    },
+    "knowledge_cutoff": "",
+    "context_window_tokens": 1_048_576,
+    "max_input_tokens": 1_048_576,
+    "max_output_tokens": 65_536,
+    "limits_note": (
+        "1,048,576 tokens is a unified input and output limit; a synchronous request returns up to "
+        "65,536 output tokens, and long decode (`background: true` with `max_output_tokens` above "
+        "65,536) raises that to 1,048,576; `max_output_tokens` is a hard stop on thinking and "
+        "output together, and the migration guide recommends at least 32,768 because the model "
+        "can spend more of the limit on thinking"
+    ),
+    "reasoning_efforts": ("low", "medium", "high"),
+    "effort_floor": "low",
+    "effort_default": "medium",
+    "unsupported_efforts": {
+        "off": "thinking cannot be turned off; the thinking table lists the default as `On (medium)`",
+        "minimal": "not a documented `thinking_level`",
+    },
+    "tool_calling": {
+        "api": "generate_content",
+        "note": (
+            "function calling is supported; send the full history back, thought signatures "
+            "included, on every multi-turn and function-calling request"
+        ),
+    },
+    "unsupported_parameters": ("temperature", "top_p", "top_k"),
+    "unsupported_parameters_note": (
+        "`temperature`, `top_p`, and `top_k` are ignored when sent; explicit caching "
+        "(`cachedContents`) is not supported, only implicit caching"
+    ),
+    "runtime_mechanisms": {
+        "thought_signature_passback": "documented_not_observed",
+        "long_decode": "documented_not_observed",
+        "implicit_caching": "documented_not_observed",
+    },
+    "surface_notes": {
+        "hermes": (
+            "the installed Hermes Agent (v0.22.5 bf0203a794) sends `thinkingLevel` only, maps "
+            "`none`/`minimal` to `low` and `xhigh`/`max`/`ultra` to `high`, and on direct Google "
+            "endpoints only adds a long-decode output budget (262,144 at `xhigh`, 1,048,576 at "
+            "`max` and `ultra`); observed in the Hermes source, not a vendor statement"
+        ),
+        "thinking_budget": (
+            "Google's guides disagree: AI Studio maps `thinking_budget` to the nearest level with "
+            "a warning, Vertex AI returns HTTP 400 for it and for `MINIMAL`; send `thinkingLevel` "
+            "only; official"
+        ),
+        "gemini_cli": (
+            "gemini-cli main (b8fa817, 2026-10-28) has no Argon id or alias and its README says "
+            "it is \"Not optimized for Gemini 4+\"; official-client"
+        ),
+        "openrouter": (
+            "no `-preview` spelling is listed anywhere; OpenRouter's floating "
+            "`~google/gemini-pro-latest` now points at `google/gemini-4-argon` (read 2026-10-28); "
+            "community"
+        ),
+    },
+    "documented_traits": (
+        "thinking is always on; `thinking_level` accepts `low`, `medium`, and `high`, and "
+        "`medium` is the default and the level recommended for complex code and agentic work",
+        "it can spend more of `max_output_tokens` on thinking than earlier models",
+        "hard prompts can take several minutes, so client timeouts need room",
+    ),
+    # Google list price (ai.google.dev/gemini-api/docs/pricing, read
+    # 2026-10-28), Standard paid tier, no prompt-size tier. The rates step up
+    # on 2026-12-01; the cache-read ratio is 0.05 in both periods.
+    "pricing_usd_per_mtok": {
+        "input": 2.0,
+        "cached_input": 0.10,
+        "output": 10.0,
+        "from_2026_12_01": "input 4.00, cached input 0.20, output 20.00",
+        "batch": "half of the standard rates",
+    },
+    "data_handling": _DATA_HANDLING_NOT_READ,
+    "sources": (
+        "https://ai.google.dev/gemini-api/docs/models/gemini-4-argon",
+        "https://ai.google.dev/gemini-api/docs/thinking",
+        "https://ai.google.dev/gemini-api/docs/pricing",
+        "https://ai.google.dev/gemini-api/docs/changelog",
+        "https://ai.google.dev/gemini-api/docs/latest-model",
+    ),
+    "sources_read": "2026-10-28",
+    "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
+}
+
+# Grok 4.7 (xAI). Reasoning cannot be disabled and `reasoning_effort` takes
+# `low`, `medium`, `high`, and `xhigh`, with `high` the default, so `off` and
+# `minimal` are raised to `low` on record. `max` is not listed as unsupported,
+# on the Gemini 4 Argon terms: no documented rung sits above it, so listing it
+# would lower `max` to the floor.
+_GROK_4_7: Final[dict[str, object]] = {
+    "schema_version": MODEL_CONTRACT_SCHEMA_VERSION,
+    "model_id": "grok-4.7",
+    "reasoning_mode": "thinking",
+    "service_tier": "standard",
+    "family": "grok",
+    "generation": "grok-4.7",
+    "released": "",
+    "rollout": "listed on the xAI API with no release date; a released id is not account-level readiness evidence",
+    "served_ids": {"first_party": "grok-4.7"},
+    "knowledge_cutoff": "2026-05",
+    "context_window_tokens": 500_000,
+    "max_input_tokens": 500_000,
+    # Not published; 0 renders as "not stated", never as a documented limit.
+    "max_output_tokens": 0,
+    "limits_note": (
+        "a 500,000-token context window is documented; xAI publishes no separate input or output "
+        "cap, so the input field carries the window and the output field is 0 for not stated"
+    ),
+    "reasoning_efforts": ("low", "medium", "high", "xhigh"),
+    "effort_floor": "low",
+    "effort_default": "high",
+    "unsupported_efforts": {
+        "off": "reasoning cannot be disabled",
+        "minimal": "not a documented `reasoning_effort` value",
+    },
+    "tool_calling": {
+        "api": "responses",
+        "note": (
+            "function calling and structured outputs are supported; on the Responses API every "
+            "response carries `reasoning.encrypted_content`, and reasoning items go back unchanged "
+            "in the next request's input"
+        ),
+    },
+    "unsupported_parameters": ("presence_penalty", "frequency_penalty", "stop"),
+    "unsupported_parameters_note": (
+        "reasoning models return an error for `presencePenalty`, `frequencyPenalty`, and `stop`; "
+        "`logprobs` and `top_logprobs` are silently ignored"
+    ),
+    "runtime_mechanisms": {
+        "encrypted_reasoning_passback": "documented_not_observed",
+        "reasoning_summaries": "documented_not_observed",
+    },
+    "surface_notes": {
+        "hermes": (
+            "Hermes Agent at 2bd378ed1b sends no `reasoning` field to `grok-4.7` on the xai route, "
+            "because its effort allow list stops at `grok-4.6`, so the model runs at its default "
+            "`high` whatever effort is asked; over OpenRouter the effort is clamped to the "
+            "catalog's `supported_efforts`; observed in the Hermes source, not a vendor statement"
+        ),
+    },
+    "documented_traits": (
+        "always reasons; `reasoning_effort` accepts `low`, `medium`, `high`, and `xhigh`, and "
+        "`high` is the default",
+        "exposes summaries of its internal reasoning",
+    ),
+    # xAI list price (docs.x.ai/developers/models/grok-4.7, read 2026-11-07).
+    # Cached input is a quarter of input.
+    "pricing_usd_per_mtok": {
+        "input": 2.0,
+        "cached_input": 0.50,
+        "output": 6.0,
+        "long_context_200k_prompt": (
+            "input 4.00, cached input 1.00, output 12.00 for every token of a request whose prompt "
+            "reaches 200,000 tokens"
+        ),
+        "batch": "20% off the standard rates",
+    },
+    "data_handling": _DATA_HANDLING_NOT_READ,
+    "sources": (
+        "https://docs.x.ai/developers/models/grok-4.7",
+        "https://docs.x.ai/developers/model-capabilities/text/reasoning",
+        "https://docs.x.ai/developers/models",
+    ),
+    "sources_read": "2026-11-07",
+    "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
+}
+
 # TypeSafe Jev 1.13, the first `non_generative` contract: a model whose
 # documented output is a typed answer over options the caller supplies, not
 # text. Four keys exist only on this class and carry their reason here rather
@@ -1241,17 +2114,163 @@ _JEV_1_13: Final[dict[str, object]] = {
     "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
 }
 
+# Qwen4-Max (Alibaba QwenCloud / Model Studio, GA 2026-11-16), the first model
+# of the Qwen4 family and the successor to Qwen3.8-Max, which has no contract.
+# Read from the QwenCloud developer guides on 2026-11-19: the latest-model page
+# (limits, defaults, the per-API effort table), the thinking guide's "Qwen4-Max
+# thinking configuration" section, the pricing page, the Qwen4 explicit-cache
+# page, and the model change log.
+#
+# The effort shape is DeepSeek V4.1 Flash's: three documented rungs, and the
+# vendor publishes a mapping for every other rung instead of returning an
+# error, so nothing is raised on record and `unsupported_efforts` is empty.
+# `qwen4-max-preview` (Token Plan only, its own `low`/`medium`/`xhigh` ladder
+# with an `xhigh` default) is a different ladder and gets no contract here.
+_QWEN4_MAX: Final[dict[str, object]] = {
+    "schema_version": MODEL_CONTRACT_SCHEMA_VERSION,
+    "model_id": "qwen4-max",
+    "reasoning_mode": "thinking",
+    "service_tier": "standard",
+    "family": "qwen",
+    "generation": "qwen4",
+    "released": "2026-11-16",
+    "rollout": (
+        "generally available on pay-as-you-go and Token Plan from 2026-11-16 in Singapore "
+        "(International), Beijing, and the Global regions; `qwen4-max-preview` opened on "
+        "2026-11-11 on Token Plan only, with its own ladder and no per-token price; a released "
+        "id is not account-level readiness evidence"
+    ),
+    "served_ids": {
+        "first_party": "qwen4-max",
+        "openrouter": "qwen/qwen4-max",
+    },
+    "knowledge_cutoff": "",
+    # The window is 1M; the page lists the input ceiling per mode, and the
+    # output side differs by mode too: 131,072 without thinking, and thinking
+    # plus the final answer share 262,144. The field carries the thinking-mode
+    # input ceiling (the default mode) and the non-thinking answer cap, and
+    # the note says the rest.
+    "context_window_tokens": 1_000_000,
+    "max_input_tokens": 983_616,
+    "max_output_tokens": 131_072,
+    "limits_note": (
+        "1,000,000-token context; max input 983,616 with thinking (the default) and 991,808 "
+        "without; max output 131,072 without thinking, while thinking and the final answer share "
+        "262,144; the default thinking budget is 131,072"
+    ),
+    "reasoning_efforts": ("low", "high", "xhigh"),
+    "effort_floor": "low",
+    "effort_default": "high",
+    "unsupported_efforts": {},
+    "effort_mapping": {
+        "minimal": "low",
+        "medium": "high",
+        "max": "xhigh",
+        "note": (
+            "documented for Chat Completions and DashScope `reasoning_effort` and Responses "
+            "`reasoning.effort`; Anthropic Messages `output_config.effort` takes `low`, `high` "
+            "(default), and `xhigh`, maps `medium` to `high` and `max` to `xhigh`; no value returns "
+            "an error. Thinking is disabled by `none`, or by `enable_thinking=false` on Chat "
+            "Completions, not by a rung of the ladder. A "
+            "`thinking_budget` sent alone maps 1-4096 to `low`, 4097-131072 to `high`, and "
+            "131073-262144 to `xhigh`"
+        ),
+    },
+    "tool_calling": {
+        "api": "chat_completions",
+        "note": (
+            "function calling, parallel tool calls, structured output, and prefix completion are "
+            "served on Chat Completions, Responses, Anthropic Messages, and DashScope; "
+            "`preserve_thinking` is on by default, so every earlier assistant turn's thinking goes "
+            "back in its `reasoning_content` field and is never concatenated into `content`"
+        ),
+    },
+    "unsupported_parameters": (),
+    "runtime_mechanisms": {
+        "reasoning_content_passback": "documented_not_observed",
+        "encrypted_reasoning_passback": "documented_not_observed",
+        "reasoning_summaries": "documented_not_observed",
+        "explicit_prompt_cache": "documented_not_observed",
+        "native_image_input": "documented_not_observed",
+        "json_output": "documented_not_observed",
+    },
+    "surface_notes": {
+        "hermes": (
+            "Hermes Agent at 3b42157858 (and origin/main fe8b920cae) sends no `reasoning_effort` "
+            "on its DashScope profiles, so the model runs at its default `high` whatever effort is "
+            "asked; its `preserve_thinking` list names qwen3.6 to qwen3.8 but not qwen4, and its "
+            "context table reads `qwen4-max` through the 131,072-token `qwen` catch-all; observed "
+            "in the Hermes source, not a vendor statement"
+        ),
+        "codex": (
+            "the vendor's Codex page lists `qwen4-max` with `low`, `high`, `xhigh`, a `high` "
+            "default, a 1,000,000-token window, and `supports_parallel_tool_calls: false`"
+        ),
+        "claude_code": (
+            "the vendor's Claude Code page sets `ANTHROPIC_DEFAULT_OPUS_MODEL=qwen4-max`, keeps "
+            "`CLAUDE_CODE_MAX_CONTEXT_TOKENS` at 983,616, and suggests "
+            "`CLAUDE_CODE_MAX_OUTPUT_TOKENS=131072` when long output is cut off"
+        ),
+    },
+    "documented_traits": (
+        "hybrid thinking, on by default at `high`; the ladder is `low`, `high`, `xhigh`, and the "
+        "guide maps every other rung (`minimal` to `low`, `medium` to `high`, `max` to `xhigh`) "
+        "without an error, while `none` turns thinking off",
+        "`preserve_thinking` is on by default: in multi-turn and tool-call conversations every "
+        "earlier assistant turn's thinking is returned in `reasoning_content`, never in `content`",
+        "can return a readable thinking summary with the encrypted full thinking in its place; "
+        "the encrypted content is replayed unchanged to restore reasoning history",
+        "explicit and implicit prompt cache with `5m` and `1h` TTLs, billed at the model's own "
+        "cache rates; batch inference is not supported",
+        "input text, image, and video; output text",
+    ),
+    # QwenCloud list price, Singapore (International) deployment, "Non-thinking
+    # and thinking modes", one tier up to 1M input tokens (pricing page and the
+    # Qwen4 explicit-cache billing table, read 2026-11-19). Unlike Qwen3.8-Max,
+    # Qwen4-Max publishes its own cache rates.
+    "pricing_usd_per_mtok": {
+        "input": 1.50,
+        "cached_input": 0.075,
+        "cache_write_5m": 1.875,
+        "cache_write_1h": 3.00,
+        "output": 4.50,
+        "regional": (
+            "Beijing and the Global deployments bill input 1.413, output 4.24, cache write 1.767 "
+            "(5m) and 2.827 (1h), and cache read 0.071"
+        ),
+    },
+    "data_handling": _DATA_HANDLING_NOT_READ,
+    "sources": (
+        "https://docs.qwencloud.com/developer-guides/getting-started/latest-model",
+        "https://docs.qwencloud.com/developer-guides/text-generation/thinking",
+        "https://docs.qwencloud.com/developer-guides/getting-started/model-prices",
+        "https://docs.qwencloud.com/developer-guides/run-and-scale/explicit-cache-qwen4",
+        "https://docs.qwencloud.com/changelog/models",
+    ),
+    "sources_read": "2026-11-19",
+    "claim_boundary": MODEL_CONTRACT_CLAIM_BOUNDARY,
+}
+
 MODEL_CONTRACTS: Final[dict[str, Mapping[str, object]]] = {
     "gpt-6-astra": _GPT_6_ASTRA,
     "gpt-6-sol": _GPT_6_SOL,
     "gpt-6.1-sol": _GPT_6_1_SOL,
+    "gpt-6.2-astra": _GPT_6_2_ASTRA,
+    "gpt-6.2-sol": _GPT_6_2_SOL,
+    "gpt-6.1-terra": _GPT_6_1_TERRA,
+    "gpt-6-cyber": _GPT_6_CYBER,
     "gpt-6-luna": _GPT_6_LUNA,
     "claude-opus-5-5": _CLAUDE_OPUS_5_5,
     "claude-sonnet-5-5": _CLAUDE_SONNET_5_5,
     "claude-haiku-5-5": _CLAUDE_HAIKU_5_5,
+    "claude-fable-5-1": _CLAUDE_FABLE_5_1,
+    "claude-fable-5-2": _CLAUDE_FABLE_5_2,
     "deepseek-v4.1-flash": _DEEPSEEK_V41_FLASH,
     "kimi-k3.1-pro": _KIMI_K3_1_PRO,
     "kimi-k3.1-pro-highspeed": _KIMI_K3_1_PRO_HIGHSPEED,
+    "gemini-4-argon": _GEMINI_4_ARGON,
+    "grok-4.7": _GROK_4_7,
+    "qwen4-max": _QWEN4_MAX,
     "jev-1.13.0": _JEV_1_13,
 }
 
@@ -1293,11 +2312,35 @@ DECLARED_MODEL_CONTRACT_PROJECTIONS: Final[dict[str, Mapping[str, str]]] = {
         "reasoning_mode": "pro",
         "service_tier": "standard",
     },
+    # GPT-6.1 Terra's pro reasoning mode, on the Sol terms above: the
+    # reasoning guide gives `pro` to GPT-6 models at the selected model's
+    # standard rates, and OpenRouter lists `openai/gpt-6.1-terra-pro` at the
+    # base 1/5 card (read 2026-10-27). No `-fast` / `-flex` row.
+    "gpt-6.1-terra-pro": {
+        "contract_model_id": "gpt-6.1-terra",
+        "reasoning_mode": "pro",
+        "service_tier": "standard",
+    },
     # The first-party API's moving pointer to the current Flash generation
     # (api-docs.deepseek.com, read 2026-09-11: DeepSeek-V4.1-Flash). The next
     # Flash release moves it, which is exactly why it is a declared row with
     # a read date and not a second exact contract.
     "deepseek-flash": {
+        "contract_model_id": "deepseek-v4.1-flash",
+        "reasoning_mode": "thinking",
+        "service_tier": "standard",
+    },
+    # DeepSeek-V4.1-Flash-1017, the 2026-10-17 upgrade the pointer above now
+    # serves ("The API calling method and pricing remain unchanged",
+    # api-docs.deepseek.com/updates, read 2026-11-06). DeepSeek accepts no
+    # such model name; the spelling is a relay's (Hermes' static OpenRouter
+    # catalog lists `deepseek/deepseek-v4.1-flash-1017`, "dated snapshot of
+    # v4.1-flash"), so a child observed under it keeps the V4.1 Flash
+    # contract, price, and calibration. Its row equals the pointer's, so the
+    # plugin also labels it with the pointer's category; it is not a pointer
+    # itself. The MMDD suffix is not the `-YYYY-MM-DD` shape and never
+    # projects on its own.
+    "deepseek-v4.1-flash-1017": {
         "contract_model_id": "deepseek-v4.1-flash",
         "reasoning_mode": "thinking",
         "service_tier": "standard",
@@ -1346,6 +2389,25 @@ DECLARED_MODEL_CONTRACT_PROJECTIONS: Final[dict[str, Mapping[str, str]]] = {
     },
     "claude-haiku-5.5": {
         "contract_model_id": "claude-haiku-5-5",
+        "reasoning_mode": "thinking",
+        "service_tier": "standard",
+    },
+    # Claude Fable 5.1's dotted spelling, on the same terms: Hermes' static
+    # model catalog lists `claude-fable-5.1` for the Anthropic provider and
+    # `anthropic/claude-fable-5.1` for OpenRouter (hermes-agent 2bd378ed1b,
+    # read 2026-11-08). The Bedrock id is not declared here; it stays in the
+    # contract's `served_ids`.
+    "claude-fable-5.1": {
+        "contract_model_id": "claude-fable-5-1",
+        "reasoning_mode": "thinking",
+        "service_tier": "standard",
+    },
+    # Claude Fable 5.2's dotted spelling, on the Fable 5.1 row's terms: the
+    # gateway form of the same model (Hermes' static catalog spells 5.1
+    # this way; it lists no 5.2 id yet at 2bd378ed1b, read 2026-11-10). The
+    # Bedrock id stays in the contract's `served_ids`.
+    "claude-fable-5.2": {
+        "contract_model_id": "claude-fable-5-2",
         "reasoning_mode": "thinking",
         "service_tier": "standard",
     },
@@ -1607,6 +2669,37 @@ def dynamic_effort_guidance(model_id: str, executor_profile: str) -> dict[str, o
     return policy
 
 
+# Contracts that document turning thinking off without listing `none` as a
+# rung: Haiku 5.5's documented_traits, and DeepSeek V4.1 Flash's and Qwen4-Max's
+# effort_mapping.note. Named here rather than parsed out of English prose.
+_THINKING_DISABLE_WITHOUT_A_RUNG = frozenset({"claude-haiku-5-5", "deepseek-v4.1-flash", "qwen4-max"})
+
+
+def contract_effort_option(model_id: str) -> dict[str, object] | None:
+    """The built-in selectable effort ladder for one model id, or None.
+
+    The list is the contract's documented `reasoning_efforts` in canonical
+    order, and `off` in the canonical ladder is spelled `none`, as the Hermes
+    boundary spells it. None means the contract table has no authority for the
+    id; the picker then keeps the shared steps and marks the ladder not known.
+    A rung outside the vocabulary is dropped: one bad rung must not take the
+    whole picker down, and a test holds the shipped table to the vocabulary.
+    """
+    # Imported here because `model_routing` imports this module at load time.
+    from .model_routing import REASONING_EFFORT_LADDER
+
+    projection = model_contract_projection(model_id)
+    if projection is None:
+        return None
+    contract_id = projection["contract_model_id"]
+    rungs = MODEL_CONTRACTS[contract_id].get("reasoning_efforts") or ()
+    offered = {*rungs, "none"} if contract_id in _THINKING_DISABLE_WITHOUT_A_RUNG else rungs
+    efforts = tuple(
+        rung for rung in ("none" if name == "off" else name for name in REASONING_EFFORT_LADDER) if rung in offered
+    )
+    return {"efforts": efforts, "source": "contract"} if efforts else None
+
+
 __all__ = [
     "DATA_HANDLING_ACCOUNT_SCOPE",
     "DATA_HANDLING_RETENTION_VALUES",
@@ -1628,6 +2721,7 @@ __all__ = [
     "MODEL_CONTRACT_SCHEMA_VERSION",
     "contract_documents_effort",
     "contract_effort_floor",
+    "contract_effort_option",
     "contract_model_id",
     "contract_surface_efforts",
     "dynamic_effort_guidance",

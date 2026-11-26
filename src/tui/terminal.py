@@ -16,21 +16,41 @@ kitty keyboard protocol and xterm modifyOtherKeys, so Ctrl+Enter and
 Shift+Enter can arrive as keys of their own; `OMH_TUI_KEYBOARD=legacy` keeps
 the plain bytes everywhere. `keyboard_protocol` says only that it asked: a
 terminal on the list can ignore the request (tmux with `extended-keys off`),
-and then Ctrl+Enter arrives as Enter. Whether the reports really come is
-`KeyDecoder.protocol_reported`, which turns on at the first key that arrives
-as one.
+and then Ctrl+Enter arrives as Enter. Every other terminal, unless it is
+Ghostty or `OMH_TUI_KEYBOARD=legacy` is set, gets the kitty flags pushed only
+when it answers the kitty keyboard query in the startup query
+(`query_background`): an answer says it speaks the protocol (Otty, with its
+`kitty-keyboard` setting on, is one). A terminal the environment does not
+name (over SSH, where TERM_PROGRAM rarely arrives) gets them only when its
+XTVERSION answer names one of `PUSH_BY_XTVERSION`, since an unnamed answer
+may come from Ghostty. Whether the reports really come is
+`KeyDecoder.protocol_reported`, which turns on at the terminal's answer to the
+kitty keyboard query when that answer says the flag is on, or else at the
+first key that arrives as a report.
 
 Mouse reporting is off unless `set_mouse(True)` turns it on, and then only
-clicks and the wheel are reported, in SGR form; motion tracking is never
-asked for. Every exit turns it off again (`mouse_reporting` says whether it
-is on).
+clicks and the wheel are reported, in SGR form. `set_mouse(True, drag=True)`
+adds the motion of a held button (the pager's drag to select); motion with no
+button held is never asked for. Entering and every exit turn every mouse mode
+off (`MOUSE_MODES_RESET`), so a mode another program left on, such as a killed
+Hermes TUI's motion reports, cannot take the person's drag selection for the
+whole session or outlive it (`mouse_reporting` and `mouse_drag` say whether
+they are on).
+
+Focus reports are asked for on every terminal, as Hermes' own TUI asks
+(hermes-ink `App.tsx`, DECSET 1004): one that speaks them sends `ESC [ I`
+when the window gains focus and `ESC [ O` when it loses it, which the key
+decoder reads as no key (`KeyDecoder.unfocused_at`); one that does not
+ignores the request and sends nothing, and the TUI then counts the window as
+focused throughout. Every exit turns them off again.
 
 `query_background` asks the terminal for its background colour once, before
 the first frame, so the theme can be measured against the background the
 person really has (`theme.build_theme`), and in the same write for the row
 its cursor is on, which the launch reads to know whether any row above the
 cursor needs pushing into scrollback before the first frame
-(`App.clear_launch_screen`): OSC 11, then the cursor position request (CSI 6n), with a device-attributes request behind them that
+(`App.clear_launch_screen`): OSC 11, then the cursor position request (CSI 6n), then the kitty keyboard query (CSI ? u),
+whose answer stays in the input for the decoder to read, with a device-attributes request behind them that
 every terminal answers, in order, so that answer ends the wait whether or not
 the others were answered, and `BACKGROUND_QUERY_SECONDS` bounds it when
 nothing comes. Keys typed while it waits are handed back to the caller. A terminal that does not answer OSC 11
@@ -51,8 +71,12 @@ nothing. A process group with no shell to continue it (orphaned, as a
 program started straight in a tmux pane) is not stopped by the kernel, so
 the terminal is entered again at once.
 
-Windows has no termios; `terminal_supported` reports that, and the caller
-takes the fallback path instead of entering a `Terminal`.
+Windows has no termios: there `Terminal` enters the console through
+`terminal_windows.WindowsConsole` instead (virtual terminal input and output,
+UTF-8 code pages, input read on a thread, the size polled for a resize), and
+`terminal_blocker` asks the console whether it takes virtual terminal input
+and output, so a console that cannot (an old conhost) takes the fallback. Any
+other platform without termios takes the fallback too.
 """
 
 from __future__ import annotations
@@ -66,10 +90,13 @@ import signal
 import sys
 import time
 from types import FrameType, TracebackType
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
-from .screen import AUTOWRAP_ON, SHOW_CURSOR
+from .screen import AUTOWRAP_ON, CURSOR_SHAPE_DEFAULT, SHOW_CURSOR
 from .style import CSI, SGR_RESET
+
+if TYPE_CHECKING:
+    from .terminal_windows import WindowsConsole
 
 try:  # pragma: no cover - exercised by platform, not by a branch test
     import termios
@@ -78,25 +105,41 @@ except ImportError:  # pragma: no cover - Windows ships no termios
 
 BRACKETED_PASTE_ON = f"{CSI}?2004h"
 BRACKETED_PASTE_OFF = f"{CSI}?2004l"
+# Focus reports (xterm mode 1004): `ESC [ I` when the window gains focus, `ESC [ O` when it loses it.
+FOCUS_REPORTING_ON = f"{CSI}?1004h"
+FOCUS_REPORTING_OFF = f"{CSI}?1004l"
 # Richer key reports, so Ctrl+Enter and Shift+Enter differ from Enter: the kitty
 # keyboard protocol (push flag 1, "disambiguate") and xterm modifyOtherKeys level 2.
 KITTY_KEYBOARD_PUSH = f"{CSI}>1u"
 KITTY_KEYBOARD_POP = f"{CSI}<u"
+# Asks which kitty keyboard flags are on; a terminal that speaks the protocol answers `CSI ? <flags> u`, before its
+# answer to a device-attributes request sent after it, and one that does not answers nothing.
+KITTY_KEYBOARD_QUERY = f"{CSI}?u"
 MODIFY_OTHER_KEYS_ON = f"{CSI}>4;2m"
 MODIFY_OTHER_KEYS_OFF = f"{CSI}>4m"
 # Mouse reports: button presses and releases, the wheel included (xterm mode
 # 1000), sent in SGR form (1006) so any column and row can be reported. Never
-# 1002 or 1003: those report motion too.
+# 1003, which reports motion with no button held too.
 MOUSE_REPORTING_ON = f"{CSI}?1000h{CSI}?1006h"
-MOUSE_REPORTING_OFF = f"{CSI}?1006l{CSI}?1000l"
+# The motion of a held button as well (1002), only on top of the above and only for a drag to select.
+MOUSE_DRAG_ON = f"{CSI}?1002h"
+MOUSE_DRAG_OFF = f"{CSI}?1002l"
+MOUSE_REPORTING_OFF = f"{CSI}?1006l{MOUSE_DRAG_OFF}{CSI}?1000l"
+# Every mouse mode off, the encodings first and then the tracking: SGR pixels (1016), urxvt (1015), SGR (1006),
+# UTF-8 (1005), any motion (1003), a held button's motion (1002), highlight (1001), clicks (1000), X10 (9). The
+# same list Hermes' own TUI writes on start and on exit (`ui-tui/src/lib/terminalModes.ts`): a program killed with
+# a mode on leaves the terminal reporting, and a terminal that reports keeps the person's drag from selecting.
+MOUSE_MODES_RESET = "".join(f"{CSI}?{mode}l" for mode in (1016, 1015, 1006, 1005, 1003, 1002, 1001, 1000, 9))
 # Written on exit even after a crash mid-frame: the screen hides the cursor and
 # turns autowrap off while it paints, and a shell must not inherit either. The
-# key and mouse reports are switched off whether or not they were asked for, as
+# key, mouse and focus reports are switched off whether or not they were asked for, as
 # Hermes' own TUI does on every exit (hermes-ink `ink.tsx`, its signal-exit path
-# too), so no exit path depends on remembering whether they were asked for.
+# too), so no exit path depends on remembering whether they were asked for; the mouse modes all go, not only the
+# ones `set_mouse` asks for (`MOUSE_MODES_RESET`). The cursor shape is the exception: it
+# is the shell's own unless `set_cursor_shape` changed it, so it is put back only then (`Terminal._restore`).
 RESTORE_SEQUENCE = (
     f"{SGR_RESET}{AUTOWRAP_ON}{SHOW_CURSOR}{MODIFY_OTHER_KEYS_OFF}{KITTY_KEYBOARD_POP}"
-    f"{MOUSE_REPORTING_OFF}{BRACKETED_PASTE_OFF}"
+    f"{MOUSE_MODES_RESET}{FOCUS_REPORTING_OFF}{BRACKETED_PASTE_OFF}"
 )
 
 # Terminals asked for the richer key reports, by the name Hermes' own TUI gives
@@ -116,12 +159,37 @@ FALLBACK_SIZE = (80, 24)
 # cursor's row, and the device-attributes request (DA1) behind them is answered by every terminal, after the other
 # answers if there are any, so its answer ends the wait.
 BACKGROUND_QUERY = "\x1b]11;?\x07"
+# The living wallpaper's background (`App._sync_ground`): OSC 11 sets the terminal's default background, and on the
+# way out the colour the startup query read is set back. Not OSC 111 (reset to the profile's default) after it: a
+# background set at runtime before the TUI started (base16-shell and the like) is the one the person had, and 111
+# would drop it for the profile's.
+OSC_TERMINATOR = "\x1b\\"
+
+
+def background_set(colour: str) -> str:
+    """OSC 11: the terminal's default background becomes `colour` (`#rrggbb`)."""
+    return f"\x1b]11;{colour}{OSC_TERMINATOR}"
+
+
+def background_restore(original: str) -> str:
+    """The terminal's background put back: `original`, the colour it reported at start."""
+    return background_set(original)
+
+
 CURSOR_POSITION_QUERY = f"{CSI}6n"
 DEVICE_ATTRIBUTES_QUERY = f"{CSI}c"
 BACKGROUND_QUERY_SECONDS = 0.1
 # `ESC ] 11 ; rgb:R/G/B` ended by BEL or ST, each channel one to four hex digits (xterm's `XParseColor` forms).
 _BACKGROUND_REPLY = re.compile(rb"\x1b\]11;rgb:([0-9A-Fa-f]{1,4})/([0-9A-Fa-f]{1,4})/([0-9A-Fa-f]{1,4})(?:\x07|\x1b\\)")
 _DEVICE_ATTRIBUTES_REPLY = re.compile(rb"\x1b\[\?[0-9;]*c")
+# The kitty keyboard query's answer, `ESC [ ? flags u`: the terminal speaks the protocol.
+_KITTY_FLAGS_REPLY = re.compile(rb"\x1b\[\?[0-9]*u")
+# XTVERSION: asks the terminal its name and version; the answer is `ESC P > | name ST` (ST is `ESC \`, or BEL).
+XTVERSION_QUERY = f"{CSI}>0q"
+_XTVERSION_REPLY = re.compile(rb"\x1bP>\|([^\x1b\x07]*)(?:\x1b\\|\x07)")
+# The terminals an XTVERSION name may get the kitty flags pushed on an answer, by its first word, any case: the
+# ones known to read flag 1 as the TUI does. Ghostty is not one (its kitty mode drops Alt from Backspace).
+PUSH_BY_XTVERSION = frozenset({"kitty", "wezterm", "foot", "alacritty", "rio", "otty"})
 # `ESC [ row ; col R`, both 1-based: the cursor position report.
 _CURSOR_POSITION_REPLY = re.compile(rb"\x1b\[([0-9]{1,5});([0-9]{1,5})R")
 # `COLORFGBG`'s background field names a colour of the basic sixteen: 7 and 15 are the light ones (xterm's values),
@@ -147,8 +215,12 @@ def terminal_supported(stdin: _TtyProbe | None, stdout: _TtyProbe | None, enviro
 
 
 def terminal_blocker(stdin: _TtyProbe | None, stdout: _TtyProbe | None, environ: Mapping[str, str]) -> str:
-    """Why the OMH TUI cannot own this terminal, in one line, or "" when it can."""
-    if termios is None:
+    """Why the OMH TUI cannot own this terminal, in one line, or "" when it can.
+
+    On Windows, after the rules every platform shares, the console is asked
+    whether it takes virtual terminal input and output (`console_blocker`).
+    """
+    if termios is None and os.name != "nt":
         return "the OMH TUI needs termios, which this platform does not have"
     if environ.get("TERM", "") == "dumb":
         return "TERM=dumb cannot draw the OMH TUI"
@@ -163,6 +235,10 @@ def terminal_blocker(stdin: _TtyProbe | None, stdout: _TtyProbe | None, environ:
         except (OSError, ValueError):
             # A closed or detached stream is not a terminal.
             return "stdin or stdout is not a terminal"
+    if termios is None:
+        from .terminal_windows import console_blocker
+
+        return console_blocker(stdin, stdout)  # type: ignore[arg-type]
     return ""
 
 
@@ -188,6 +264,52 @@ def terminal_name(environ: Mapping[str, str]) -> str:
     return term
 
 
+INLINE_KITTY = "kitty"
+INLINE_UNICODE = "unicode"
+# The first omher release that paints kitty Unicode placeholders and says its version in `TERM_PROGRAM_VERSION`.
+OMHER_PLACEHOLDER_VERSION = (1, 1, 4)
+
+
+def inline_graphics(environ: Mapping[str, str]) -> str:
+    """Which form an inline image takes on this terminal: kitty Unicode placeholders where they paint, else half-blocks.
+
+    The order is Hermes' own TUI's (ui-tui `lib/terminalGraphics.ts`), plus Otty (`TERM_PROGRAM=otty`), which paints
+    kitty virtual placements (docs.otty.sh, Images: "Unicode placeholders (U+10EEEE virtual placement)") but sets
+    `TERM=xterm-256color` and no kitty variable, so it would otherwise get half-blocks, and omher's terminals
+    (`TERM_PROGRAM=omher`, which the omher desktop app sets in its terminal sessions), which paint kitty Unicode placeholders
+    too and carry the same xterm TERM, from omher 1.1.4 on (`TERM_PROGRAM_VERSION`; an older omher paints none). The tmux/screen, VS Code and WezTerm guards stay ahead of both."""
+    term = environ.get("TERM", "").lower()
+    program = environ.get("TERM_PROGRAM", "").lower()
+    if program == "vscode" or environ.get("HERMES_PTY_HOST", "") == "dashboard":
+        return INLINE_UNICODE
+    if environ.get("TMUX") or environ.get("STY"):
+        return INLINE_UNICODE
+    if program == "wezterm" or environ.get("WEZTERM_PANE"):
+        return INLINE_UNICODE
+    if (
+        environ.get("KITTY_WINDOW_ID")
+        or environ.get("GHOSTTY_RESOURCES_DIR")
+        or "kitty" in term
+        or "ghostty" in term
+        or program in ("ghostty", "otty")
+        or (program == "omher" and _omher_paints_placeholders(environ.get("TERM_PROGRAM_VERSION", "")))
+    ):
+        return INLINE_KITTY
+    return INLINE_UNICODE
+
+
+def _omher_paints_placeholders(version: str) -> bool:
+    """Whether the omher that set `TERM_PROGRAM_VERSION` to `version` paints kitty Unicode placeholders.
+
+    omher 1.1.3 and earlier set `TERM_PROGRAM=omher` and no version, and paint none: the placeholder cells show as
+    tofu boxes and the transmitted picture lands where the cursor was. Only a version at or past
+    `OMHER_PLACEHOLDER_VERSION` gets kitty; no version, or one that does not read as numbers, gets half-blocks."""
+    parts = version.strip().split("-", 1)[0].split(".")
+    if not parts or not all(part.isdigit() for part in parts):
+        return False
+    return tuple(int(part) for part in parts) >= OMHER_PLACEHOLDER_VERSION
+
+
 def keyboard_protocol_request(environ: Mapping[str, str]) -> str:
     """What `Terminal` writes on entry to ask for the richer key reports; "" when it does not ask."""
     if environ.get("OMH_TUI_KEYBOARD", "") == KEYBOARD_OPT_OUT:
@@ -198,6 +320,12 @@ def keyboard_protocol_request(environ: Mapping[str, str]) -> str:
     if name in MODIFY_OTHER_KEYS_ONLY_TERMINALS:
         return MODIFY_OTHER_KEYS_ON
     return KITTY_KEYBOARD_PUSH + MODIFY_OTHER_KEYS_ON
+
+
+def xtversion_pushable(name: bytes) -> bool:
+    """Whether an XTVERSION answer's name (`kitty(0.35.2)`, `WezTerm 20240203`) is one of `PUSH_BY_XTVERSION`."""
+    first = re.split(rb"[\s(]", name.strip(), maxsplit=1)[0]
+    return first.decode("ascii", "replace").lower() in PUSH_BY_XTVERSION
 
 
 def _channel_byte(digits: bytes) -> int:
@@ -281,28 +409,53 @@ class Terminal:
     ) -> None:
         self._input = input_fd if input_fd is not None else sys.stdin.fileno()
         self._output = output_fd if output_fd is not None else sys.stdout.fileno()
-        self._saved: list | None = None
+        self._saved: list | None = None  # the attributes to put back; [] while a Windows console is entered
+        self._console: WindowsConsole | None = None  # where there is no termios: the console's modes, input and size
         self._previous_winch: object = None
         self._winch_installed = False
         self._winch_pipe: tuple[int, int] | None = None  # the resize signal writes here to end a `read`'s wait
         self._resized = False
-        self._keyboard_request = keyboard_protocol_request(environ or {})
+        environ = environ or {}
+        self._keyboard_request = keyboard_protocol_request(environ)
+        legacy = environ.get("OMH_TUI_KEYBOARD", "") == KEYBOARD_OPT_OUT
+        # Asked with the startup query on every terminal but a legacy one: the answer says whether the flags took.
+        self._keyboard_query = "" if legacy else KITTY_KEYBOARD_QUERY
+        # Where entering did not push the kitty flags, a terminal that answers the query gets them then (never
+        # Ghostty, whose kitty mode drops Alt from Backspace). One the environment does not name (over SSH,
+        # TERM_PROGRAM rarely arrives) is asked its name too (XTVERSION), and gets them only when that names a
+        # terminal in `PUSH_BY_XTVERSION`: an unnamed answer may be Ghostty.
+        name = terminal_name(environ)
+        self._push_on_answer = not legacy and KITTY_KEYBOARD_PUSH not in self._keyboard_request and (
+            name not in MODIFY_OTHER_KEYS_ONLY_TERMINALS
+        )
+        self._name_query = XTVERSION_QUERY if self._push_on_answer and name == environ.get("TERM", "") else ""
         # True while the richer key reports are asked for. Asked, not reported: see the module docstring.
         self.keyboard_protocol = False
-        # True while mouse reports are on (`set_mouse`).
+        # True while mouse reports are on (`set_mouse`), and while they include a held button's motion.
         self.mouse_reporting = False
+        self.mouse_drag = False
+        self.cursor_shape: str | None = None  # the DECSCUSR shape `set_cursor_shape` set; None while the shell's own
 
     def __enter__(self) -> Terminal:
         if termios is None:
-            raise RuntimeError("the OMH TUI needs termios; check terminal_supported() first")
-        saved = termios.tcgetattr(self._input)
-        # TCSANOW, not TCSAFLUSH: flushing would throw away keys typed before start.
-        termios.tcsetattr(self._input, termios.TCSANOW, raw_attributes(saved))
-        self._saved = saved
+            if os.name != "nt":
+                raise RuntimeError("the OMH TUI needs termios; check terminal_supported() first")
+            from .terminal_windows import WindowsConsole
+
+            console = WindowsConsole(self._input, self._output)
+            console.enter()  # puts back whatever it set before it raises
+            self._console, self._saved = console, []
+        else:
+            saved = termios.tcgetattr(self._input)
+            # TCSANOW, not TCSAFLUSH: flushing would throw away keys typed before start.
+            termios.tcsetattr(self._input, termios.TCSANOW, raw_attributes(saved))
+            self._saved = saved
         entered = False
         try:
             self._install_winch()
-            self.write(BRACKETED_PASTE_ON + self._keyboard_request)
+            # Mouse modes another program left on (a killed Hermes TUI leaves 1003) go off first: `mouse_reporting`
+            # starts False, so the terminal must not be reporting either.
+            self.write(MOUSE_MODES_RESET + BRACKETED_PASTE_ON + FOCUS_REPORTING_ON + self._keyboard_request)
             self.keyboard_protocol = bool(self._keyboard_request)
             entered = True
         finally:
@@ -326,17 +479,23 @@ class Terminal:
         if saved is None:
             return
         self.keyboard_protocol = False
-        self.mouse_reporting = False
+        self.mouse_reporting = self.mouse_drag = False
+        # The shell's own cursor shape comes back only where this run changed it: a shell that chose one keeps it.
+        reset, self.cursor_shape = (CURSOR_SHAPE_DEFAULT if self.cursor_shape is not None else ""), None
         hung_up = False
+        console, self._console = self._console, None
         try:
-            self.write(RESTORE_SEQUENCE)
+            self.write(reset + RESTORE_SEQUENCE)
         except OSError as error:
-            if error.errno != errno.EIO:
+            # A console that is gone refuses the write with whatever errno Windows maps its error to.
+            if error.errno != errno.EIO and console is None:
                 raise
             hung_up = True
         finally:
             try:
-                if not hung_up:
+                if console is not None:
+                    console.restore()  # stops its reader too, so it runs for a console that is gone as well
+                elif not hung_up:
                     termios.tcsetattr(self._input, termios.TCSANOW, saved)
             finally:
                 self._uninstall_winch()
@@ -354,30 +513,77 @@ class Terminal:
             self.__enter__()
         return True
 
-    def set_mouse(self, enabled: bool) -> None:
-        """Turn mouse reports on or off; writes nothing when they already are.
+    def set_mouse(self, enabled: bool, drag: bool = False) -> None:
+        """Turn mouse reports on or off, with a held button's motion (`drag`) or without; writes nothing when they
+        already are so.
 
         Only inside the `with` block: turned on outside it, nothing would turn
         them off again, and every click would type escape codes into the shell.
         """
-        if enabled == self.mouse_reporting or (enabled and self._saved is None):
+        drag = enabled and drag
+        if (enabled, drag) == (self.mouse_reporting, self.mouse_drag) or (enabled and self._saved is None):
             return
-        self.write(MOUSE_REPORTING_ON if enabled else MOUSE_REPORTING_OFF)
-        self.mouse_reporting = enabled
+        if not enabled:
+            self.write(MOUSE_REPORTING_OFF)
+        else:
+            switch = "" if drag == self.mouse_drag else MOUSE_DRAG_ON if drag else MOUSE_DRAG_OFF
+            self.write(("" if self.mouse_reporting else MOUSE_REPORTING_ON) + switch)
+        if self._console is not None and enabled != self.mouse_reporting:
+            self._console.set_mouse(enabled)  # QuickEdit off while clicks are reports
+        self.mouse_reporting, self.mouse_drag = enabled, drag
+
+    def set_cursor_shape(self, shape: str | None) -> None:
+        """Set the cursor's DECSCUSR shape, or with None give the terminal's own back; writes nothing when it already
+        is so. Only inside the `with` block, which puts the terminal's own shape back on every way out if this changed it."""
+        if shape == self.cursor_shape or (shape is not None and self._saved is None):
+            return
+        self.write(shape or CURSOR_SHAPE_DEFAULT)
+        self.cursor_shape = shape
 
     def query_background(self, timeout: float = BACKGROUND_QUERY_SECONDS) -> tuple[str | None, bytes, int | None]:
         """The background colour (`#RRGGBB`, or None), the input that arrived meanwhile, and the cursor's 1-based row.
 
-        Writes the background query, the cursor position request and the
+        Writes the background query, the cursor position request, the kitty
+        keyboard query (not with `OMH_TUI_KEYBOARD=legacy`), and the
         attributes request behind them, then reads until the attributes answer
-        arrives or `timeout` passes. Only inside the `with` block, where input
+        arrives or `timeout` passes. A terminal entering did not push the kitty
+        flags to that answers the kitty query before the attributes gets them
+        pushed now, and is asked again, with the attributes behind, so its
+        second answer says whether the push took; the wait for it is bounded
+        by `timeout` too, and the push is popped on exit and pushed again after
+        a stop, as the entry's own. Where the environment names no terminal,
+        XTVERSION goes before the kitty query, its answer is taken out of the
+        input, and only a name in `PUSH_BY_XTVERSION` gets the push; no
+        answer before the attributes, no push. Only inside the `with` block, where input
         is raw. The row is None unless its report came before the attributes
-        answer (`split_cursor_reply`). An answer that comes after the wait is
-        no key either: the decoder drops an OSC string whole, and reads a late
-        position report as an unknown key, which types nothing.
+        answer (`split_cursor_reply`). The kitty answer stays in the input
+        handed back: the decoder reads it, types nothing, and learns from it
+        whether Ctrl+Enter comes as a key of its own. An answer that comes
+        after the wait is no key either: the decoder drops an OSC string whole,
+        reads a late kitty answer as it reads an early one, and a late position
+        report as an unknown key, which types nothing.
         """
-        self.write(BACKGROUND_QUERY + CURSOR_POSITION_QUERY + DEVICE_ATTRIBUTES_QUERY)
-        row, data = split_cursor_reply(self._read_answers(timeout))
+        self.write(
+            BACKGROUND_QUERY + CURSOR_POSITION_QUERY + self._name_query + self._keyboard_query + DEVICE_ATTRIBUTES_QUERY
+        )
+        data = self._read_answers(timeout)
+        answered = _DEVICE_ATTRIBUTES_REPLY.search(data)
+        flags = _KITTY_FLAGS_REPLY.search(data, 0, answered.start()) if answered is not None else None
+        named = _XTVERSION_REPLY.search(data, 0, answered.start()) if answered is not None else None
+        if named is not None:  # an answer to a query, never a key: it leaves the input here
+            data = data[: named.start()] + data[named.end() :]
+            answered = _DEVICE_ATTRIBUTES_REPLY.search(data)
+        if self._name_query and not (named is not None and xtversion_pushable(named.group(1))):
+            self._push_on_answer = False  # unnamed, or named as a terminal not known to read the flags as asked
+        if self._push_on_answer and flags is not None and answered is not None:
+            self._push_on_answer = False
+            self._keyboard_request += KITTY_KEYBOARD_PUSH  # pushed again after a stop, popped on every exit
+            self.keyboard_protocol = True
+            self.write(KITTY_KEYBOARD_PUSH + KITTY_KEYBOARD_QUERY + DEVICE_ATTRIBUTES_QUERY)
+            # Bytes after the first attributes answer belong to the second read; its own attributes answer goes.
+            _colour, again, _answered = split_background_replies(self._read_answers(timeout, data[answered.end() :]))
+            data = data[: answered.end()] + again
+        row, data = split_cursor_reply(data)
         colour, typed, _answered = split_background_replies(data)
         return colour, typed, row
 
@@ -394,11 +600,16 @@ class Terminal:
         _colour, typed, _answered = split_background_replies(data)
         return typed, row
 
-    def _read_answers(self, timeout: float) -> bytes:
-        """Input until the attributes answer arrives (the last a query asks for) or `timeout` passes."""
+    def _read_answers(self, timeout: float, data: bytes = b"") -> bytes:
+        """Input after `data` until the attributes answer arrives (the last a query asks for) or `timeout` passes."""
         deadline = time.monotonic() + timeout
-        data = b""
-        while (left := deadline - time.monotonic()) > 0:
+        while not split_background_replies(data)[2] and (left := deadline - time.monotonic()) > 0:
+            if self._console is not None:
+                try:
+                    data += self._console.read(left)
+                except EOFError:
+                    break  # a console that is gone: the loop's first read says so
+                continue
             ready, _, _ = select.select([self._input], [], [], left)
             if not ready:
                 break
@@ -409,8 +620,6 @@ class Terminal:
             if not chunk:
                 break
             data += chunk
-            if split_background_replies(data)[2]:
-                break
         return data
 
     def _on_winch(self, signum: int, frame: FrameType | None) -> None:
@@ -452,7 +661,9 @@ class Terminal:
             os.close(descriptor)
 
     def resized(self) -> bool:
-        """True once per SIGWINCH since the last call."""
+        """True once per SIGWINCH, or on Windows per size change the console's poll saw, since the last call."""
+        if self._console is not None:
+            return self._console.resized()
         resized, self._resized = self._resized, False
         return resized
 
@@ -470,8 +681,11 @@ class Terminal:
         The wait also ends, with b"", when `wake` becomes readable (the caller
         empties it) or a resize signal arrives. Raises EOFError when the
         terminal hung up, so a closed window ends the session instead of
-        spinning on empty reads.
+        spinning on empty reads. On Windows the console's reader thread
+        supplies the input and a size change ends the wait (`WindowsConsole.read`).
         """
+        if self._console is not None:
+            return self._console.read(timeout, wake)
         waits = [self._input, *(() if wake is None else (wake,))]
         if self._winch_pipe is not None:
             waits.append(self._winch_pipe[0])

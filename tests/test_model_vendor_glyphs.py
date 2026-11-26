@@ -64,6 +64,8 @@ class VendorResolutionTests(unittest.TestCase):
         """`qwen3-coder` is why the token table is written out rather than
         matched by prefix."""
         self.assertEqual(vendor_for_model("qwen3-coder"), "qwen")
+        self.assertEqual(vendor_for_model("qwen4-max"), "qwen")
+        self.assertEqual(vendor_for_model("qwen/qwen4-max-preview high"), "qwen")
 
     def test_siblings_share_one_glyph(self) -> None:
         self.assertEqual(vendor_glyph("claude-opus-5"), vendor_glyph("claude-fable-5-1"))
@@ -107,7 +109,7 @@ class BoardRenderingTests(unittest.TestCase):
                  "status": "running", "elapsed_text": "12m", "tokens_text": "18420", "session_ref": "s1"},
                 {"label": "tests", "runtime": "codex", "model_label": "gpt-6-astra high",
                  "status": "running", "elapsed_text": "8m", "tokens_text": "9100", "session_ref": "s2"},
-                {"label": "docs", "runtime": "omo", "model_label": "deepseek-flash",
+                {"label": "docs", "runtime": "pi", "model_label": "deepseek-flash",
                  "status": "completed", "elapsed_text": "3m", "tokens_text": "unknown", "session_ref": "s3"},
             ],
         }

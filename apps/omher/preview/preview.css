@@ -1,0 +1,91 @@
+/* The preview's own bits on top of the app's styles: the small note for inert actions, and, in the Plans panel, the
+   open part's Node details before the Dependencies list (the order the promo film uses), so the part that is working
+   shows its latest lines right under the graph. */
+.bv-secs {
+  display: flex;
+  flex-direction: column;
+}
+.bv-secs > [data-testid="run-details"] {
+  order: -1;
+}
+/* The sidebar in the hero-sized window: BOTS keeps every bot row whole and SESSIONS takes what is left (the app shares
+   the room in proportion, which cut the last bot, Pip, in half at 975x568). */
+.side-sec:has(> .bot-list:not(.ss-list)) {
+  flex: none;
+}
+/* The Plans panel starts at 352px, not the 472px the app gives it in the preview's 1200px layout: the bot chat is the
+   widest column (600px, half the window) and the graph keeps the film's shape, two parts to a row with nothing cut.
+   This is only the starting width: the app's own handle on the panel's left edge (PanelResizer) drags it, or ←/→,
+   between 260px and a 360px chat. It sets --panel-w inline on .window, which wins over this rule; the width is kept in
+   sessionStorage (boot.ts), so a reload starts at 352px again. */
+html .window.panel-open:has(.pn-wide[data-tab="runs"]) {
+  --panel-w: 352px;
+}
+/* A session's Plans (0.2.6) is a list of its subagents, not the graph, and shares the class: it takes the tool tabs'
+   400px, so the session chat gets 552px (at a 552px panel a session draft's composer left its text box 0-30px). */
+html .window.panel-open:has(.ss-view):has(.pn-wide[data-tab="runs"]) {
+  --panel-w: 400px;
+}
+/* A chat dragged under 470px: the places chip gives way to the model name by the app's own rule (elsewhere.css). */
+/* In the narrowest chat (360px) the subagent card's head keeps a running card's line ("Running · 1 of 2 done
+   · 2m 48s") and its run name side by side with a slightly tighter gap. */
+.sa-head {
+  gap: 5px;
+}
+.pv-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 84px;
+  z-index: 9999;
+  max-width: min(520px, calc(100vw - 48px));
+  padding: 9px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  background: var(--pop, #1c1a22);
+  color: var(--ink, #f2eef8);
+  font: 500 13px/1.4 var(--font);
+  box-shadow: 0 12px 32px -8px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  transform: translate(-50%, 6px);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  pointer-events: none;
+}
+.pv-toast.on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pv-toast {
+    transition: none;
+  }
+}
+/* Kami's chat in the hero: the person's ask and one big answer sit just above the composer, as in a real chat (the
+   thread fills from the bottom, so a short chat leaves no hole between the working line and the composer). Under the
+   answer: the spinner with Hermes' status and the time, and at most one more plain grey line for the other part at
+   work (the turn's plan rows, without their head and boxes). The live line drops the bot's ringed face: the
+   spinner already says Kami is working, and the face sits beside the bubble right above it. */
+.pane[data-pane="kami"] > .thread > :first-child {
+  margin-top: auto;
+}
+/* What Kami said in Slack and Discord stays in the header's places chip and the panel, not as more bubbles here. */
+.pane[data-pane="kami"] > .thread > .row-away {
+  display: none;
+}
+.pane[data-pane="kami"] > .thread > .row-activity.live-line > .ui-ring-w {
+  display: none;
+}
+.pane[data-pane="kami"] .act .pl {
+  margin: 0;
+  padding-left: 18px;
+}
+.pane[data-pane="kami"] .act .pl-head,
+.pane[data-pane="kami"] .act .pl-box {
+  display: none;
+}
+.pane[data-pane="kami"] .act .pl-row {
+  min-height: 18px;
+  color: var(--muted);
+}
+.pane[data-pane="kami"] .act:not([data-state="live"]) .pl {
+  display: none;
+}

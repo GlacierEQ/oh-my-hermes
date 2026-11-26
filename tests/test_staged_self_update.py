@@ -1,4 +1,5 @@
 import contextlib
+from datetime import UTC, datetime
 import io
 import json
 import os
@@ -7,6 +8,7 @@ from pathlib import Path, PureWindowsPath
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+import time
 from typing import Callable, Literal, Protocol, TypeAlias, TypedDict
 import unittest
 from unittest.mock import patch
@@ -17,7 +19,7 @@ from omh.commands import setup as setup_commands
 from omh.config_adapter import external_dirs
 from omh.core.errors import OmhError
 from omh.install import installer as installer_commands
-from omh.install import self_update, self_update_state
+from omh.install import generation_hold, self_update, self_update_state
 from omh.install.self_update import Runner, SelfUpdateResult, run_installer_self_update
 from omh.install.self_update_platform import SelfUpdatePlatform, remove_directory_link
 from omh.install.self_update_state import GarbageCollectionResult, STATE_SCHEMA_VERSION, collect_garbage, pointer_target, record_pointer, switch_current
@@ -25,6 +27,9 @@ from omh.system.local_store import atomic_write_json, file_lock
 from omh.system.paths import OmhPaths
 
 
+MAIN_ARCHIVE_URL = "https://github.com/rlaope/oh-my-hermes/archive/refs/heads/main.zip"
+COMMIT_A = "a" * 40
+COMMIT_B = "b" * 40
 StrPath: TypeAlias = str | os.PathLike[str]
 JsonValue: TypeAlias = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 
@@ -278,6 +283,7 @@ class StagedSelfUpdateTests(unittest.TestCase):
         *,
         failure: str = "",
         version: str = "",
+        restore_ok: bool = False,
     ) -> Runner:
         def run(
             command: list[str],
@@ -308,6 +314,8 @@ class StagedSelfUpdateTests(unittest.TestCase):
                 generation = Path(_runner_environment(env)["OMH_SELF_UPDATE_GENERATION"])
                 (generation / "skills" / "core").mkdir(parents=True, exist_ok=True)
                 _ = (generation / "skills" / "core" / "SKILL.md").write_text("candidate")
+                return subprocess.CompletedProcess(command, 0, "", "")
+            if restore_ok and _runner_environment(env).get(self_update.ROLLBACK_RESTORE_ENV) == "1":
                 return subprocess.CompletedProcess(command, 0, "", "")
             if failure == "timeout":
                 raise subprocess.TimeoutExpired(command, 1)
@@ -465,13 +473,13 @@ class StagedSelfUpdateTests(unittest.TestCase):
             self._assert_pair(root, previous)
 
     def test_nonzero_and_timeout_post_activation_roll_back_and_reenter_previous(self):
-        for failure in ("post", "timeout"):
-            with self.subTest(failure), TemporaryDirectory() as temporary:
+        for failure, restore_ok in (("post", False), ("timeout", False), ("post", True), ("timeout", True)):
+            with self.subTest(failure=failure, restore_ok=restore_ok), TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 _legacy, args, plan = self._fixture(root, pointer=True)
                 previous = (root / "current").resolve()
                 calls: list[list[str]] = []
-                runner = self._runner(failure=failure)
+                runner = self._runner(failure=failure, restore_ok=restore_ok)
 
                 def recording_runner(
                     command: list[str],
@@ -497,10 +505,24 @@ class StagedSelfUpdateTests(unittest.TestCase):
                 self.assertEqual(result["post_activation"].get("reason", ""), expected_reason)
                 self.assertEqual(sum("--command-package-updated" in call and "update" not in call for call in calls), 2)
                 self._assert_pair(root, previous)
-                # The refused candidate is deleted like a failed staging
-                # candidate; the owner machine kept one on disk until the next
-                # successful update's garbage collection.
-                self.assertFalse(Path(result["candidate"]["path"]).exists())
+                marker = _read_json_object(root / "self-update.json")["activation_in_progress"]
+                if restore_ok:
+                    # Only a successful restoring reentry may dispose the candidate.
+                    self.assertFalse(Path(result["candidate"]["path"]).exists())
+                    self.assertIsNone(marker)
+                    self.assertEqual(result["rollback"]["restored"], previous.name)
+                    self.assertNotEqual(result["recovery"]["status"], "required")
+                else:
+                    self.assertTrue(Path(result["candidate"]["path"]).is_dir())
+                    pending = _object(marker, "pending rollback")
+                    self.assertIs(pending["restore_required"], True)
+                    self.assertEqual(pending["candidate"], result["candidate"]["path"])
+                    self.assertEqual(Path(_text(pending["previous"], "previous generation")).resolve(), previous.resolve())
+                    self.assertEqual(result["rollback"]["restored"], "")
+                    self.assertEqual(result["rollback"]["status"], "failed")
+                    self.assertEqual(result["rollback"]["reason"], expected_reason)
+                    self.assertEqual(result["recovery"]["status"], "required")
+                    self.assertEqual(result["recovery"]["action"], "restore_failed")
 
     def test_rollback_reentry_is_marked_so_its_summary_says_rollback(self):
         # The rollback re-entry re-renders the known-good pack and, unmarked,
@@ -568,6 +590,79 @@ class StagedSelfUpdateTests(unittest.TestCase):
                     self.assertIn("Installed release: 2.0.2", printed)
                     self.assertNotIn("Rollback", printed)
 
+    def _recording_refresh(self, root: Path) -> tuple[list[Path], Callable[..., list[dict[str, str]]]]:
+        """Where `current` pointed at each outer refresh, calling the real refresh through."""
+        seen: list[Path] = []
+        real = self_update.refresh_skill_dir_caches
+
+        def refresh(hermes_home: Path, skills_pointer: Path | None) -> list[dict[str, str]]:
+            seen.append((root / "current").resolve())
+            return real(hermes_home, skills_pointer)
+
+        return seen, refresh
+
+    @staticmethod
+    def _age_config(root: Path) -> int:
+        config = root / "hermes" / "config.yaml"
+        os.utime(config, ns=(1_600_000_000_000_000_000, 1_700_000_000_000_000_000))
+        return config.stat().st_mtime_ns
+
+    def test_rollback_refreshes_hermes_skills_after_the_pointer_is_back(self):
+        # The candidate's re-entry may have refreshed a running Hermes onto the
+        # candidate, which the rollback deletes; the restored generation may
+        # predate that refresh, so the outer transaction refreshes after its switch.
+        for restore_ok in (True, False):
+            with self.subTest(restore_ok=restore_ok), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _legacy, args, plan = self._fixture(root, pointer=True)
+                previous = (root / "current").resolve()
+                aged = self._age_config(root)
+                seen, refresh = self._recording_refresh(root)
+
+                with patch.object(self_update, "refresh_skill_dir_caches", side_effect=refresh):
+                    result = self._run(root, args, plan, self._runner(failure="post", restore_ok=restore_ok))
+
+                self.assertTrue(result["rollback"]["performed"])
+                self.assertEqual(len(seen), 1)
+                self._assert_same_path(seen[0], previous)
+                self.assertEqual([row["status"] for row in result.get("hermes_skill_refresh", [])], ["refreshed"])
+                self.assertGreater((root / "hermes" / "config.yaml").stat().st_mtime_ns, aged)
+
+    def test_a_successful_update_leaves_the_refresh_to_the_reentered_update(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _legacy, args, plan = self._fixture(root, pointer=True)
+            with patch.object(self_update, "refresh_skill_dir_caches") as refresh:
+                result = self._run(root, args, plan, self._runner())
+            self.assertTrue(result["ok"])
+            refresh.assert_not_called()
+            self.assertNotIn("hermes_skill_refresh", result)
+
+    def test_known_good_recovery_refreshes_hermes_skills_after_its_last_switch(self):
+        for reentry_ok in (True, False):
+            with self.subTest(reentry_ok=reentry_ok), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _legacy, args, plan = self._fixture(root, pointer=True)
+                self.assertTrue(self._run(root, args, plan, self._runner())["ok"])
+                active = (root / "current").resolve()
+                known_good = _object(
+                    _read_json_object(root / "self-update.json")["previous_known_good"], "previous known good"
+                )
+                known_good_path = Path(_text(known_good["path"], "previous known-good path"))
+                args.recover_known_good = True
+                aged = self._age_config(root)
+                seen, refresh = self._recording_refresh(root)
+
+                with patch.object(self_update, "refresh_skill_dir_caches", side_effect=refresh):
+                    result = self._run(root, args, plan, self._runner(failure="" if reentry_ok else "post"))
+
+                self.assertIs(result["ok"], reentry_ok)
+                self.assertEqual(len(seen), 1)
+                # Success lands on the known-good target; a failed re-entry switches back.
+                self._assert_same_path(seen[0], known_good_path if reentry_ok else active)
+                self.assertEqual([row["status"] for row in result.get("hermes_skill_refresh", [])], ["refreshed"])
+                self.assertGreater((root / "hermes" / "config.yaml").stat().st_mtime_ns, aged)
+
     def test_lock_is_nonblocking_and_does_not_mutate_the_pair(self):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -602,26 +697,45 @@ class StagedSelfUpdateTests(unittest.TestCase):
                 self._assert_pair(root)
 
     def test_interrupted_rollback_reports_the_recovery_phase(self):
-        with TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            _legacy, args, plan = self._fixture(root, pointer=True)
-            previous = root / "generations" / "bootstrap-legacy"
-            candidate = root / "generations" / "interrupted"
-            (candidate / "venv" / "bin").mkdir(parents=True)
-            (candidate / "skills").mkdir()
-            switch_current(root, candidate, platform=self._platform())
-            state = _read_json_object(root / "self-update.json")
-            state["activation_in_progress"] = {
-                "candidate": str(candidate),
-                "previous": str(previous),
-                "phase": "post_switch",
-            }
-            atomic_write_json(root / "self-update.json", state, private=True)
-            result = self._run(root, args, plan, self._runner(failure="post"))
-            self.assertEqual(result["phase"], "recovery")
-            self.assertEqual(result["recovery"].get("action"), "rolled_back_interrupted_activation")
-            self.assertTrue(result["rollback"]["performed"])
-            self.assertEqual((root / "current").resolve(), previous.resolve())
+        for restore_ok in (False, True):
+            with self.subTest(restore_ok=restore_ok), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _legacy, args, plan = self._fixture(root, pointer=True)
+                previous = root / "generations" / "bootstrap-legacy"
+                candidate = root / "generations" / "interrupted"
+                (candidate / "venv" / "bin").mkdir(parents=True)
+                (candidate / "skills").mkdir()
+                switch_current(root, candidate, platform=self._platform())
+                state = _read_json_object(root / "self-update.json")
+                state["activation_in_progress"] = {
+                    "candidate": str(candidate),
+                    "previous": str(previous),
+                    "phase": "post_switch",
+                }
+                atomic_write_json(root / "self-update.json", state, private=True)
+                result = self._run(root, args, plan, self._runner(failure="post", restore_ok=restore_ok))
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["phase"], "recovery")
+                self.assertTrue(result["rollback"]["performed"])
+                self.assertEqual((root / "current").resolve(), previous.resolve())
+                self._assert_pair(root, previous)
+                marker = _read_json_object(root / "self-update.json")["activation_in_progress"]
+                if restore_ok:
+                    self.assertEqual(result["recovery"].get("action"), "rolled_back_interrupted_activation")
+                    self.assertEqual(result["rollback"]["restored"], previous.name)
+                    self.assertIsNone(marker)
+                    self.assertFalse(candidate.exists())
+                else:
+                    self.assertEqual(result["recovery"]["status"], "required")
+                    self.assertEqual(result["recovery"].get("action"), "restore_failed")
+                    self.assertEqual(result["rollback"]["status"], "failed")
+                    self.assertEqual(result["rollback"]["restored"], "")
+                    self.assertEqual(result["rollback"]["reason"], "post failed")
+                    self.assertTrue(candidate.is_dir())
+                    pending = _object(marker, "pending interrupted rollback")
+                    self.assertIs(pending["restore_required"], True)
+                    self.assertEqual(pending["candidate"], str(candidate))
+                    self.assertEqual(pending["previous"], str(previous))
 
     def test_corrupt_and_newer_state_refuse_without_overwriting(self):
         for contents in ("not json", json.dumps({"schema_version": "self_update_state/v99"})):
@@ -830,6 +944,245 @@ class StagedSelfUpdateTests(unittest.TestCase):
             self.assertTrue(previous.exists())
             self.assertTrue(running.exists())
             self.assertFalse(stale.exists())
+
+    def _gateway_gc(self, root: Path, gateway_starts: list[float]) -> dict[str, Path]:
+        _legacy, _args, _plan = self._fixture(root, pointer=True)
+        generations = {name: root / "generations" / name for name in ("g0", "g1", "g2", "g3")}
+        for generation in generations.values():
+            generation.mkdir(parents=True, exist_ok=True)
+        activated = {"g0": "2026-10-29T12:00:00Z", "g1": "2026-10-30T13:06:00Z", "g2": "2026-10-30T13:13:00Z", "g3": "2026-10-30T14:00:00Z"}
+        state: dict[str, JsonValue] = {
+            "active": self._entry(generations["g3"]),
+            "previous_known_good": self._entry(generations["g2"]),
+            "activations": [{"id": name, "activated_at": stamp} for name, stamp in activated.items()],
+        }
+        result: GarbageCollectionResult = {"cleanup": {"collected": []}}
+        collect_garbage(root, state, result, running_generation=None, gateway_starts=gateway_starts)
+        return generations
+
+    def test_gc_keeps_the_generation_current_at_a_recorded_gateway_start(self):
+        # The gateway started between g0 and g1, so it still serves g0; g1 was
+        # superseded after that start and nothing holds it.
+        start = datetime.fromisoformat("2026-10-29T17:00:52+00:00").timestamp()
+        with TemporaryDirectory() as temporary:
+            generations = self._gateway_gc(Path(temporary), [start])
+            self.assertTrue(generations["g0"].exists(), "GC deleted the generation a running gateway serves")
+            self.assertFalse(generations["g1"].exists())
+            self.assertTrue(generations["g2"].exists())
+            self.assertTrue(generations["g3"].exists())
+
+    def test_gc_without_a_recorded_gateway_start_keeps_only_active_and_previous(self):
+        with TemporaryDirectory() as temporary:
+            generations = self._gateway_gc(Path(temporary), [])
+            self.assertFalse(generations["g0"].exists())
+            self.assertFalse(generations["g1"].exists())
+            self.assertTrue(generations["g2"].exists())
+            self.assertTrue(generations["g3"].exists())
+
+    def test_update_keeps_the_generation_a_gateway_started_on_until_it_restarts(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _legacy, args, plan = self._fixture(root, pointer=True)
+            self.assertTrue(self._run(root, args, plan, self._runner())["ok"])
+            state = _read_json_object(root / "self-update.json")
+            held = root / "generations" / _text(_object(state["active"], "active")["id"], "active id")
+            hermes_home = root / "hermes"
+            _ = (hermes_home / "gateway.pid").write_text(json.dumps({"pid": 1, "hermes_home": str(hermes_home)}))
+            _ = (hermes_home / "gateway-starts.log").write_text(f"{time.time()!r}\n")
+            with patch.object(self_update_state, "now", return_value="2099-01-01T00:00:00Z"):
+                for _ in range(2):
+                    self.assertTrue(self._run(root, args, plan, self._runner())["ok"])
+            self.assertTrue(held.exists(), "update deleted the generation the gateway started on")
+            self.assertNotEqual((root / "current").resolve(), held.resolve())
+            # A start recorded after the later activations releases it.
+            _ = (hermes_home / "gateway-starts.log").write_text(f"{datetime(2099, 1, 2, tzinfo=UTC).timestamp()!r}\n")
+            self.assertTrue(self._run(root, args, plan, self._runner())["ok"])
+            self.assertFalse(held.exists())
+
+    def test_gc_never_reads_an_unstamped_first_activation_as_covering_an_older_gateway(self):
+        # The owner machine on 2026-11-02: the first update that kept a history
+        # recorded the then-active generation with no time. A gateway started
+        # on 10-30 still served the 10-27 generation; reading the unstamped row
+        # as "before every start" held the 10-31 one and deleted 10-27.
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _legacy, _args, _plan = self._fixture(root, pointer=True)
+            names = {
+                "served": "20261027024653159707-aaaaaaaaaa",
+                "after_start": "20261030120000000000-cccccccccc",
+                "unstamped": "20261031021314000000-bbbbbbbbbb",
+                "active": "20261102020057175032-edfca25300",
+            }
+            generations = {key: root / "generations" / name for key, name in names.items()}
+            for generation in generations.values():
+                generation.mkdir(parents=True, exist_ok=True)
+            state: dict[str, JsonValue] = {
+                "active": self._entry(generations["active"]),
+                "previous_known_good": self._entry(generations["unstamped"]),
+                "activations": [
+                    {"id": names["unstamped"], "activated_at": None},
+                    {"id": names["active"], "activated_at": "2026-11-02T02:01:00Z"},
+                ],
+            }
+            start = datetime.fromisoformat("2026-10-29T17:00:50+00:00").timestamp()
+            result: GarbageCollectionResult = {"cleanup": {"collected": []}}
+            collect_garbage(root, state, result, running_generation=None, gateway_starts=[start])
+            self.assertTrue(generations["served"].exists(), "GC deleted the generation an older gateway serves")
+            self.assertTrue(generations["unstamped"].exists())
+            self.assertTrue(generations["active"].exists())
+            # Created after that start, so provably not the one it serves.
+            self.assertFalse(generations["after_start"].exists())
+            self.assertIn("2026-10-29T17:00:50Z", result["cleanup"].get("reason", ""))
+            self.assertIn("no recorded activation says which one that gateway serves", result["cleanup"].get("reason", ""))
+
+    def test_gc_keeps_by_creation_time_only_for_a_start_the_history_cannot_name(self):
+        # Before every stamped activation (g0 at 10-29 12:00): only generations
+        # created after the start are provably not the one it serves. The
+        # fixture's ids carry no creation stamp, so all of them stay.
+        with TemporaryDirectory() as temporary:
+            early = datetime.fromisoformat("2026-10-29T11:00:00+00:00").timestamp()
+            generations = self._gateway_gc(Path(temporary), [early])
+            self.assertTrue(all(generation.exists() for generation in generations.values()))
+
+    def test_human_update_says_why_generations_were_kept(self):
+        kept = {"ok": True, "phase": "cleanup", "cleanup": {"collected": [], "reason": "kept generations created before the Hermes gateway start recorded at 2026-10-29T17:00:50Z"}}
+        output = io.StringIO()
+        with (
+            patch("omh.commands.setup._command_package_self_update_plan", return_value={"should_update": True, "method": "installer"}),
+            patch("omh.install.self_update.run_installer_self_update", return_value=kept),
+            contextlib.redirect_stdout(output),
+        ):
+            status = setup_commands.cmd_update(Namespace(json=False))
+        self.assertEqual(status, 0)
+        self.assertIn("  note: kept generations created before the Hermes gateway start recorded at 2026-10-29T17:00:50Z", output.getvalue())
+
+    def test_gc_keeps_a_generation_an_open_omh_process_holds(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _legacy, _args, _plan = self._fixture(root, pointer=True)
+            active = root / "generations" / "active"
+            tui = root / "generations" / "tui"
+            for generation in (active, tui):
+                (generation / "venv").mkdir(parents=True, exist_ok=True)
+            state: dict[str, JsonValue] = {"active": self._entry(active), "previous_known_good": None}
+            with generation_hold.hold_running_generation(str(tui / "venv")) as held:
+                self.assertEqual(held, "tui")
+                result: GarbageCollectionResult = {"cleanup": {"collected": []}}
+                collect_garbage(root, dict(state), result, running_generation=None)
+                self.assertTrue(tui.exists(), "GC deleted the generation an open OMH TUI imports from")
+            self.assertEqual(list((root / generation_hold.HOLDS_DIRNAME).iterdir()), [])
+            result = {"cleanup": {"collected": []}}
+            collect_garbage(root, dict(state), result, running_generation=None)
+            self.assertFalse(tui.exists())
+
+    def test_gc_keeps_by_the_latest_of_several_unmatched_starts(self):
+        # Two gateways (two profiles) whose starts no stamped activation
+        # precedes: a generation created between them may be the one the later
+        # gateway serves, so the later start decides.
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _legacy, _args, _plan = self._fixture(root, pointer=True)
+            names = {
+                "between": "20261029120000000000-aaaaaaaaaa",
+                "after_both": "20261030120000000000-bbbbbbbbbb",
+                "active": "20261102020057175032-edfca25300",
+            }
+            generations = {key: root / "generations" / name for key, name in names.items()}
+            for generation in generations.values():
+                generation.mkdir(parents=True, exist_ok=True)
+            state: dict[str, JsonValue] = {
+                "active": self._entry(generations["active"]),
+                "previous_known_good": None,
+                "activations": [{"id": names["active"], "activated_at": "2026-11-02T02:01:00Z"}],
+            }
+            starts = [
+                datetime.fromisoformat("2026-10-29T00:00:00+00:00").timestamp(),
+                datetime.fromisoformat("2026-10-29T18:00:00+00:00").timestamp(),
+            ]
+            result: GarbageCollectionResult = {"cleanup": {"collected": []}}
+            collect_garbage(root, state, result, running_generation=None, gateway_starts=starts)
+            self.assertTrue(generations["between"].exists(), "GC judged by the earlier start")
+            self.assertFalse(generations["after_both"].exists())
+            self.assertIn("2026-10-29T18:00:00Z", result["cleanup"].get("reason", ""))
+
+    def _hold_fixture(self, root: Path) -> tuple[Path, Path]:
+        generation = root / "generations" / "20261102020057175032-edfca25300"
+        (generation / "venv").mkdir(parents=True)
+        return generation, root / generation_hold.HOLDS_DIRNAME / f".{generation.name}.{os.getpid()}.lock"
+
+    def test_a_hold_retries_past_a_gc_probe_that_has_its_file_locked(self):
+        import threading
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generation, sidecar = self._hold_fixture(root)
+            locked = threading.Event()
+
+            def gc_probe() -> None:
+                # What `held_generations` does to every file it lists, briefly.
+                with file_lock(sidecar.with_name(sidecar.name[1:-len(".lock")]), timeout_seconds=0.0):
+                    locked.set()
+                    time.sleep(0.2)
+
+            probe = threading.Thread(target=gc_probe)
+            probe.start()
+            self.assertTrue(locked.wait(2))
+            try:
+                with generation_hold.hold_running_generation(str(generation / "venv")) as held:
+                    self.assertEqual(held, generation.name)
+                    self.assertEqual(generation_hold.held_generations(root), {generation.name})
+            finally:
+                probe.join()
+
+    @unittest.skipIf(os.name == "nt", "Windows will not unlink a file a holder has open")
+    def test_a_hold_on_a_file_a_gc_probe_unlinked_is_retaken(self):
+        from omh.system import local_store
+
+        real_acquire = local_store._acquire_os_file_lock
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generation, sidecar = self._hold_fixture(root)
+            calls = 0
+
+            def unlink_first(handle, path, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    # A GC probe took and removed the file before this lock.
+                    sidecar.unlink()
+                return real_acquire(handle, path, **kwargs)
+
+            with patch.object(local_store, "_acquire_os_file_lock", unlink_first), \
+                    generation_hold.hold_running_generation(str(generation / "venv")) as held:
+                self.assertEqual(held, generation.name)
+                self.assertTrue(sidecar.exists(), "the hold locked a file nobody can see")
+            self.assertEqual(calls, 2)
+
+    def test_a_hold_that_cannot_be_taken_says_so(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            generation, _sidecar = self._hold_fixture(root)
+            (root / generation_hold.HOLDS_DIRNAME).write_text("not a directory")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr), \
+                    generation_hold.hold_running_generation(str(generation / "venv")) as held:
+                self.assertEqual(held, "")
+            self.assertIn(f"could not hold generation {generation.name}", stderr.getvalue())
+
+    def test_a_hold_left_by_a_process_that_died_holds_nothing(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            holds = root / generation_hold.HOLDS_DIRNAME
+            holds.mkdir()
+            stale = holds / ".20261027024653159707-aaaaaaaaaa.4242.lock"
+            stale.touch()
+            self.assertEqual(generation_hold.held_generations(root), set())
+            self.assertFalse(stale.exists())
+
+    def test_a_process_outside_a_generation_takes_no_hold(self):
+        with TemporaryDirectory() as temporary, generation_hold.hold_running_generation(temporary) as held:
+            self.assertEqual(held, "")
+            self.assertFalse((Path(temporary) / generation_hold.HOLDS_DIRNAME).exists())
 
     def test_no_launcher_and_platform_link_failure_are_fail_closed(self):
         with TemporaryDirectory() as temporary:
@@ -1103,7 +1456,9 @@ class StagedSelfUpdateTests(unittest.TestCase):
 
     def test_windows_junction_absolutizes_relative_target_without_resolving_aliases(self):
         with TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            # The process cwd is already canonical (macOS reports /var/... as /private/var/...),
+            # so anchor the fixture there; the alias under test is generation-alias below.
+            root = Path(temporary).resolve()
             generations = root / "generations"
             generations.mkdir()
             (generations / "candidate").mkdir()
@@ -1279,6 +1634,220 @@ class StagedSelfUpdateTests(unittest.TestCase):
         self.assertIn("stopped during staging", bare.getvalue())
         self.assertNotIn("reason:", bare.getvalue())
 
+    @staticmethod
+    def _install_package(venv: Path, *, version: str, commit: str, url: str = MAIN_ARCHIVE_URL) -> None:
+        """Lay down what pip leaves in a venv: the package, its dist-info and PEP 610 record."""
+        site = venv / "lib" / "python3.11" / "site-packages"
+        (site / "omh").mkdir(parents=True, exist_ok=True)
+        _ = (site / "omh" / "_archive_commit.txt").write_text(f"{commit}\n")
+        dist_info = site / f"oh_my_hermes-{version}.dist-info"
+        dist_info.mkdir(exist_ok=True)
+        _ = (dist_info / "direct_url.json").write_text(json.dumps({"url": url, "archive_info": {}}))
+
+    def _archive_runner(self, *, version: str, commit: str) -> Runner:
+        """The ordinary fake runner, whose pip step installs a GitHub `main` archive build."""
+        base = self._runner()
+
+        def run(
+            command: list[str],
+            *,
+            text: bool,
+            stdout: int | None,
+            stderr: int | None,
+            env: dict[str, str] | None,
+            timeout: float | None,
+        ) -> subprocess.CompletedProcess[str]:
+            if command[1:4] == ["-m", "pip", "install"]:
+                self._install_package(Path(command[0]).parents[1], version=version, commit=commit)
+            return base(command, text=True, stdout=stdout, stderr=stderr, env=env, timeout=timeout)
+
+        return run
+
+    def test_an_update_between_two_main_commits_names_both_commits(self):
+        cases = (
+            ("same version, new commit", "4.0.6", COMMIT_A, "4.0.6", COMMIT_B, "changed", False),
+            ("new version, new commit", "4.0.5", COMMIT_A, "4.0.6", COMMIT_B, "changed", True),
+            ("same commit", "4.0.6", COMMIT_B, "4.0.6", COMMIT_B, "unchanged", False),
+            ("previous built from a checkout", "4.0.5", "$Format:%H$", "4.0.6", COMMIT_B, "previous_unrecorded", True),
+            ("release wheels on both sides", "4.0.5", "$Format:%H$", "4.0.6", "$Format:%H$", "version_changed", True),
+            ("same release wheel", "4.0.6", "$Format:%H$", "4.0.6", "$Format:%H$", "unrecorded", False),
+        )
+        for label, old_version, old_commit, new_version, new_commit, status, version_changed in cases:
+            with self.subTest(label), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                legacy, args, plan = self._fixture(root, pointer=True)
+                self._install_package(legacy, version=old_version, commit=old_commit)
+
+                result = self._run(root, args, plan, self._archive_runner(version=new_version, commit=new_commit))
+
+                self.assertTrue(result["ok"])
+                change = result["identity_change"]
+                self.assertEqual(change["schema_version"], "update_identity_change/v1")
+                self.assertEqual(change["status"], status)
+                self.assertEqual(change["version_changed"], version_changed)
+                recorded = new_commit if new_commit != "$Format:%H$" else ""
+                self.assertEqual(change["current"], {"version": new_version, "ref": "main" if recorded else "", "commit_sha": recorded})
+                self.assertEqual(change["previous"]["version"], old_version)
+                self.assertEqual(change["previous"]["commit_sha"], old_commit if old_commit != "$Format:%H$" else "")
+                # The JSON result carries it, so `omh update --json` reports it too.
+                self.assertEqual(json.loads(json.dumps(result))["identity_change"], change)
+
+    def test_a_failed_update_claims_no_identity_change(self):
+        for failure in ("pip", "pack", "post"):
+            with self.subTest(failure), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                legacy, args, plan = self._fixture(root, pointer=True)
+                self._install_package(legacy, version="4.0.6", commit=COMMIT_A)
+                result = self._run(root, args, plan, self._runner(failure=failure))
+                self.assertFalse(result["ok"])
+                self.assertNotIn("identity_change", result)
+
+    def test_reentry_spells_the_main_alias_as_preview_for_an_older_generation(self):
+        for argv, expected in (
+            (["omh", "update", "--channel", "main"], ["update", "--channel", "preview", "--command-package-updated"]),
+            (["omh", "update", "--channel=main", "--json"], ["update", "--channel=preview", "--json", "--command-package-updated"]),
+            # Only the channel value is rewritten, never another argument that says main.
+            (["omh", "update", "--source-ref", "main"], ["update", "--source-ref", "main", "--command-package-updated"]),
+            (["omh", "update", "--recover-known-good"], ["update", "--command-package-updated"]),
+        ):
+            with self.subTest(argv=argv), patch.object(sys, "argv", argv):
+                self.assertEqual(self_update._reentry_argv(), expected)
+
+    def _reentry_codes(self, *, candidate: int = 0, restore: int = 0) -> Runner:
+        """The ordinary fake runner, with chosen exit codes for the two re-entries."""
+        base = self._runner()
+
+        def run(
+            command: list[str],
+            *,
+            text: bool,
+            stdout: int | None,
+            stderr: int | None,
+            env: dict[str, str] | None,
+            timeout: float | None,
+        ) -> subprocess.CompletedProcess[str]:
+            environment = env or {}
+            if environment.get("OMH_UPDATE_COMMAND_PACKAGE_REENTERED") == "1":
+                code = restore if environment.get(self_update.ROLLBACK_RESTORE_ENV) == "1" else candidate
+                return subprocess.CompletedProcess(command, code, "", "")
+            return base(command, text=True, stdout=stdout, stderr=stderr, env=env, timeout=timeout)
+
+        return run
+
+    def _pending_restore(self, root: Path) -> tuple[Path, Path]:
+        """The owner machine on 2026-11-05: pointer back on previous, restore still required."""
+        previous = root / "generations" / "bootstrap-legacy"
+        failed = root / "generations" / "failed-candidate"
+        (failed / "venv" / "bin").mkdir(parents=True)
+        (failed / "skills").mkdir()
+        state = _read_json_object(root / "self-update.json")
+        state["activation_in_progress"] = {
+            "candidate": str(failed),
+            "previous": str(previous),
+            "phase": "post_switch",
+            "restore_required": True,
+        }
+        atomic_write_json(root / "self-update.json", state, private=True)
+        return previous, failed
+
+    def test_a_bot_profile_failure_keeps_the_activated_generation(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _legacy, args, plan = self._fixture(root, pointer=True)
+            result = self._run(root, args, plan, self._reentry_codes(candidate=self_update.PROFILE_REPAIR_EXIT_CODE))
+            self.assertTrue(result["ok"])
+            self.assertFalse(result["rollback"]["performed"])
+            self.assertIs(result["post_activation"]["profiles_need_repair"], True)
+            self._assert_pair(root, Path(result["candidate"]["path"]))
+            self.assertIsNone(_read_json_object(root / "self-update.json")["activation_in_progress"])
+
+    def test_any_other_reentry_failure_still_rolls_back_and_names_the_exit(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _legacy, args, plan = self._fixture(root, pointer=True)
+            result = self._run(root, args, plan, self._reentry_codes(candidate=1))
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["post_activation"]["status"], "failed")
+            self.assertEqual(result["post_activation"]["reason"], "the re-entered `omh update` exited 1; its warnings are printed above")
+            self.assertEqual(result["rollback"]["restored"], "bootstrap-legacy")
+
+    def test_a_pending_restore_that_passes_goes_on_to_the_requested_update(self):
+        # Before the fix every run took the recovery branch, retried the restore
+        # and returned, so an open marker meant no update ever staged again.
+        for restore in (0, self_update.PROFILE_REPAIR_EXIT_CODE):
+            with self.subTest(restore=restore), TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                _legacy, args, plan = self._fixture(root, pointer=True)
+                previous, failed = self._pending_restore(root)
+                result = self._run(root, args, plan, self._reentry_codes(restore=restore))
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["recovery"], {"status": "ok", "action": "completed_pending_restore", "selected": previous.name})
+                self.assertFalse(failed.exists())
+                fresh = Path(result["candidate"]["path"])
+                self.assertNotEqual(fresh.name, failed.name)
+                self._assert_pair(root, fresh)
+                self.assertIsNone(_read_json_object(root / "self-update.json")["activation_in_progress"])
+
+    def test_a_pending_restore_that_still_fails_stays_required_and_stages_nothing(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _legacy, args, plan = self._fixture(root, pointer=True)
+            previous, failed = self._pending_restore(root)
+            result = self._run(root, args, plan, self._reentry_codes(restore=1))
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["recovery"]["status"], "required")
+            self.assertEqual(sorted(path.name for path in (root / "generations").iterdir()), sorted([previous.name, failed.name]))
+            self.assertIs(_read_json_object(root / "self-update.json")["activation_in_progress"]["restore_required"], True)
+            output = io.StringIO()
+            with (
+                patch("omh.commands.setup._command_package_self_update_plan", return_value={"should_update": True, "method": "installer"}),
+                patch("omh.install.self_update.run_installer_self_update", return_value=result),
+                contextlib.redirect_stdout(output),
+            ):
+                status = setup_commands.cmd_update(Namespace(json=False))
+            self.assertEqual(status, 1)
+            printed = output.getvalue()
+            self.assertIn("could not restore the previous generation: recovery is required", printed)
+            self.assertIn("every `omh update` only retries it and installs nothing new", printed)
+            self.assertIn("reason: the re-entered `omh update` exited 1; its warnings are printed above", printed)
+
+    def test_human_and_exit_code_for_a_profile_only_failure_and_a_rollback(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            legacy, args, plan = self._fixture(root, pointer=True)
+            self._install_package(legacy, version="4.0.5", commit=COMMIT_A)
+            rolled_back = self._run(root, args, plan, self._reentry_codes(candidate=1))
+        cases = (
+            (
+                {"ok": True, "post_activation": {"status": "ok", "profiles_need_repair": True}, "cleanup": {}},
+                self_update.PROFILE_REPAIR_EXIT_CODE,
+                "warning: some bot profiles were not refreshed",
+            ),
+            (rolled_back, 1, "rolled back to generation bootstrap-legacy"),
+        )
+        for result, expected_status, expected_line in cases:
+            output = io.StringIO()
+            with (
+                self.subTest(expected_status=expected_status),
+                patch("omh.commands.setup._command_package_self_update_plan", return_value={"should_update": True, "method": "installer"}),
+                patch("omh.install.self_update.run_installer_self_update", return_value=result),
+                contextlib.redirect_stdout(output),
+            ):
+                status = setup_commands.cmd_update(Namespace(json=False))
+            self.assertEqual(status, expected_status)
+            self.assertIn(expected_line, output.getvalue())
+
+    def test_a_rollback_names_the_generation_it_restored_and_its_commit(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            legacy, _args, _plan = self._fixture(root, pointer=True)
+            self._install_package(legacy, version="4.0.5", commit=COMMIT_A)
+            lines = setup_commands._self_update_stop_lines(
+                {"ok": False, "phase": "post_activation", "post_activation": {"status": "failed", "reason": "boom"}, "rollback": {"performed": True, "restored": "bootstrap-legacy"}},
+                root=root,
+            )
+        self.assertEqual(lines[0], f"OMH update stopped during post_activation and rolled back to generation bootstrap-legacy (4.0.5 main@{COMMIT_A[:8]}).")
+
     def test_reentry_judges_the_candidate_pack_by_its_own_manifest(self):
         # The home manifest describes the active generation's pack. Rendering
         # the candidate into a new generation and then judging it by that
@@ -1430,21 +1999,55 @@ class StagedSelfUpdateTests(unittest.TestCase):
     def test_staged_transaction_regression_guard_names_the_refusal_it_prevents(self):
         # Proves the guard above is load-bearing: judging the candidate by the
         # home manifest is exactly the refusal that rolled 2.0.1 updates back.
+        # A candidate SKILL.md that already holds the incoming render is no
+        # longer a local modification (#2300), so the candidate's copy here
+        # differs from BOTH the home manifest's old record and the render.
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             _legacy, args, plan = self._fixture(root, pointer=True)
-            _ = self._older_pack_home(root)
+            manifest_path = self._older_pack_home(root)
+            first_skill = _object(
+                _array(_read_json_object(manifest_path)["skills"], "manifest skills")[0], "first manifest skill"
+            )
+            first_rel = _text(first_skill["path"], "first skill path")
             previous = (root / "current").resolve()
             argv = ["omh", "--omh-home", str(root / "omh"), "--hermes-home", str(root / "hermes"), "update", "--no-interactive"]
+            live = self._live_update_runner(root)
+            diverged: list[Path] = []
+
+            def run(
+                command: list[str],
+                *,
+                text: Literal[True],
+                stdout: int | None,
+                stderr: int | None,
+                env: dict[str, str] | None,
+                timeout: float | None,
+            ) -> subprocess.CompletedProcess[str]:
+                completed = live(command, text=text, stdout=stdout, stderr=stderr, env=env, timeout=timeout)
+                # The pack smoke runs against a throwaway home; only the
+                # re-entry carries this transaction's `--omh-home`.
+                smoke = "update" in command and "--omh-home" not in command
+                if smoke and not diverged:
+                    # After the pack smoke rendered the candidate: neither the
+                    # old record ("0" * 64) nor the incoming render.
+                    generation = _runner_environment(env)["OMH_SELF_UPDATE_GENERATION"]
+                    skill_file = Path(generation) / "skills" / first_rel
+                    _ = skill_file.write_text("diverged from both the old record and the render\n", encoding="utf-8")
+                    diverged.append(skill_file)
+                return completed
+
             with (
                 patch.object(sys, "argv", argv),
                 patch("omh.install.installer._manifest_describes", return_value=True),
                 contextlib.redirect_stderr(io.StringIO()),
             ):
-                result = self._run(root, args, plan, self._live_update_runner(root))
+                result = self._run(root, args, plan, run)
+            self.assertEqual(len(diverged), 1)
             self.assertFalse(result["ok"])
             self.assertEqual(result["phase"], "post_activation")
             self.assertIn("local modifications detected", result["post_activation"].get("reason", ""))
+            self.assertIn(first_rel, result["post_activation"].get("reason", ""))
             self.assertTrue(result["rollback"]["performed"])
             self._assert_pair(root, previous)
 
@@ -1525,6 +2128,7 @@ class ManagedWorkflowRegistrationTests(unittest.TestCase):
                 patch.object(setup_commands, "cmd_install", return_value=0),
                 patch("omh.commands.setup._bootstrap_tui_surface", return_value={}),
                 patch("omh.commands.setup._refresh_installed_menubar_app", return_value=None),
+                patch("omh.commands.setup._refresh_tui_home", return_value=None),
                 patch("omh.commands.setup._registered_workflow_dir", return_value=current_skills),
                 patch.object(setup_commands, "install_plugin_bundle"),
                 patch("omh.commands.setup._apply_result", side_effect=apply_result),

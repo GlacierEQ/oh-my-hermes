@@ -15,49 +15,18 @@ metadata:
 
 # Support Operations
 
-This is a Hermes-native `support-operations` workflow skill.
+Required: support case, known facts, customer impact, support tier or SLA, and arrival time, available ownership or escalation path. Output: customer-safe reply draft with stated facts, unknowns, and tone, issue/severity/impact/escalation matrix, internal next-step and owner handoff brief, missing repro, account, entitlement, or approval evidence list.
 
 ## Why This Exists
 
 `support-operations` turns a bounded customer case into response and escalation guidance without treating drafts or recommendations as helpdesk actions.
 
-## Do Not Use When
-
-- The request clusters a backlog of customer signals to find product patterns or roadmap candidates; use `omh-feedback-triage`.
-- The user only needs a generic, non-support marketing or email rewrite with no case, severity, or escalation context; use `omh-content-operator`.
-- The request asks to send a reply, change ticket priority or status, issue a refund, modify an account, or update a helpdesk; use `omh-apps` with an explicit target and observed result.
-- The request is an incident that is still open, needing severity declared, a commander assigned, and a running timeline rather than a support-case response; use `omh-live-incident-response`.
-- The request is a closed incident's postmortem or reliability evidence rather than a support-case response; use `omh-reliability-review`.
-
-## Examples
-
-Good example:
-
-- Prompt: Draft a calm reply for this login-outage customer and tell me whether it needs an engineering escalation.
-- Expected behavior: Prepare a customer-safe reply, severity matrix, engineering escalation recommendation, and owner handoff.
-- Why: The request is one support case with reply and escalation decisions, not a feedback backlog or ticket mutation.
-
-Bad example:
-
-- Prompt: Cluster last quarter's support feedback into roadmap opportunities.
-- Expected behavior: Route to `feedback-triage`, not `support-operations`.
-- Why: A historical signal backlog needs product-pattern triage rather than case-level support guidance.
-
-## Completion Checklist
-
-- The source boundary, signal clusters, severity, and follow-up lane are named.
-- Bug, feature, research, strategy, and coding handoff outcomes stay separate.
-- The next workflow is recommended before any implementation claim.
-
-## Recovery Notes
-
-- If feedback lacks source or severity, ask for the missing signal before coding handoff.
-- If the item is actually a plan or research request, route to that workflow instead of triage.
+Contract: `references/full-contract.md` (examples, sibling boundaries, full artifact details).
 
 ## Workflow Lane
 
-- Current lane: **Research and company ops** (`product-docs`, `source-finder`, `web-research`, `research`, `model-optimization`, `inference-serving`, `model-finetuning`, `research-brief`, `+26 more`) - research, signals, ops, and briefings.
-- If intent belongs to another lane, hand back to `oh-my-hermes` or name the adjacent workflow.
+- Current lane: **Research and company ops** - research, signals, ops, and briefings.
+- If intent belongs to another lane, hand back to `omh-routing` or name the adjacent workflow.
 - Shared product, routing, compatibility, and evidence rules: `skill_view(name='omh-routing', file_path='references/skill-common-rail.md')`.
 
 ## When to Use
@@ -83,28 +52,10 @@ Handoff policy:
 
 Keep domain framing, clarification, source/evidence synthesis, draft outputs, and next-work routing in Hermes. A prepared brief, review, reply, or plan is not an external action, approval, filing, send, publish, data mutation, implementation, review, CI, or merge claim. Prepare a connector, file, coding, or human-review handoff only when the user explicitly accepts that next step; report it only from observed evidence. Reply text is a draft, escalation is a recommendation, and no ticket state, message send, refund, account action, or customer outcome is claimed.
 
-Required inputs:
-
-- support case
-- known facts
-- customer impact
-- available ownership or escalation path
-
 Expert clarification questions:
 - `support case`
   - English: Which support case should we examine first?
   - Korean: 어떤 지원 사례를 먼저 살펴봐야 하나요?
-
-Expected outputs:
-
-- customer-safe reply draft with stated facts, unknowns, and tone
-- issue/severity/impact/escalation matrix
-- internal next-step and owner handoff brief
-- missing repro, account, entitlement, or approval evidence list
-
-Artifact expectations:
-
-- prepared support case brief when a wrapper captures it
 
 Artifact contracts:
 
@@ -116,6 +67,16 @@ Safety rules:
 
 - Keep customer-safe facts, unknowns, and escalation recommendations distinct.
 - Do not claim ticket mutation, message send, refund, account action, or case outcome.
+
+## Completion Checklist
+
+- The reply states only case facts and unknowns and promises no timing, refund or fix the user did not authorize.
+- Severity and priority are separate, with SLA time left when supplied; account takeover, exposed personal data, legal or regulator contact, payment disputes and safety go to their owner, not a product escalation.
+
+## Recovery Notes
+
+- If customer impact or reproduction evidence is missing, retain the stated case facts, mark severity tentative, and hand back the reply draft and missing repro, account, or entitlement evidence list.
+- If no escalation owner or path is available, retain the issue/severity/impact/escalation matrix, mark ownership unresolved, and hand back the internal next-step and owner handoff brief with the owner question.
 
 ## Runtime Evidence
 
@@ -129,7 +90,7 @@ Record observed delegation results; otherwise return `not_available` or `not_obs
 Prepared OMH routing is not execution, review, CI, merge-readiness, or merge evidence.
 - Treat wrapper memory/context summaries as advisory local context, not proof of opaque Hermes memory reads or changes.
 Preserve workflow intent and stop conditions; verify before claiming completion.
-Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only; OMH's record terms (surface, lane, wrapper, handoff, evidence boundary, not_observed) stay in records and tool calls, never in the sentence the user reads unless they ask about one; and when a real unresolved user decision or a useful briefing discussion remains, offer one specific, content-linked question. Completed work needs no question; omit unrelated non-action footers and generic offers to continue.
+Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only. When the requested output is delivered, put any open points inside the result and end with no question or offer; only when the person asked to choose or decide and that choice is still theirs, end with one specific question about it, not a list, a generic offer, or a footer; the shared rail's Reply Language And Host Voice and Turn Ending sections hold the full rule.
 
 Use Hermes-native subagent/delegation features when available: native subagents -> Hermes delegation when available, otherwise sequential lanes.
 

@@ -104,7 +104,7 @@ Agent/operator maintenance path:
    successors and restores original eligibility for explicit legacy inspection.
    It does not re-enable basename-based automatic recall.
 
-Prefetch receipts are now `omh_memory_prefetch_receipt/v3`. Configuration
+Prefetch receipts are `omh_memory_prefetch_receipt/v3`. Configuration
 identity includes both resolver version and project identity. Older v2 receipts
 remain structurally readable, but cannot establish current repository-bound
 recall evidence; identity/version mismatches are rejected.
@@ -222,11 +222,20 @@ ends the prefix; a smaller later record can't jump ahead. Record IDs and types
 aren't shortened to fit. A budget too small for the omission report returns
 no section.
 
+When the selection carries `query_fallback` (the message matched no stored
+record; see [Recall Ranking and Delivery Usage](MEMORY.md#recall-ranking-and-delivery-usage)),
+the provider withholds the readmitted records: no summary, no name, no line,
+and no section at all when nothing else is shown. Records captured in this
+conversation (by `source_ref`, for this session or its compaction ancestors)
+still render in full. The model reads a withheld record with `omh_remember`
+recall. CLI recall, `omh_memory` recall and coding handoffs don't withhold.
+
 Selection cuts are `over_budget`; selected records lost to section rendering
 are `render_budget_exhausted`. These are different events. The receipt names
 selected IDs and rendered IDs separately, including selected-but-not-rendered
-records. Its content digest covers the full stored summary, not the potentially
-shorter escaped projection.
+records, and lists withheld records as `rendering.indexed_records`. Its
+content digest covers the full stored summary, not the potentially shorter
+escaped projection.
 
 `recall_status()` reports the last pack actually returned by `prefetch`, not a
 queued replacement. Its count is rendered full blocks plus rendered record
@@ -234,7 +243,10 @@ elements, never selected records or consolidation reminders. A reference-only
 index is memory content without a discrete count. Initialization and shutdown
 clear in-memory served status and receipts. A newly served empty pack replaces
 the old state. The status line alone doesn't name records or prove host delivery
-or model use.
+or model use. It reports nothing on a platform the profile's `recall_line`
+excludes (by default every one but `cli`, `tui` and `desktop`), while the pack
+and its receipt stay the same; see
+[Turning the recall line or recall off](MEMORY.md#turning-the-recall-line-or-recall-off).
 
 ## Receipt privacy and identity
 
@@ -261,7 +273,9 @@ other local memory metadata. Redaction isn't anonymity.
 
 The reader caps input at 64 KiB, contains decoder-recursion failures, and rejects
 malformed, oversized, foreign-schema, internally inconsistent, or digest-mismatched receipts.
-Validation checks that rendered IDs form the selected prefix and that
+Validation checks that rendered IDs form a prefix of the selected IDs with
+indexed IDs removed, that no indexed ID is reported as selected-but-not-rendered,
+and that
 `delivery_observed` and `model_use_observed` remain `null`.
 
 `receipt_id` is an ordinary SHA-256 over the preparation body, excluding

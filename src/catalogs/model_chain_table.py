@@ -14,8 +14,8 @@ table out of human hands the same way the ULW regions are.
 Two things the table shows do not exist as catalog data, so they live here and
 only here:
 
-- The display label for a model alias (`claude-fable-5-1` -> `Claude Fable
-  5.1`). The alias is what routing uses; the label is what a reader needs.
+- The display label for a model alias (`claude-fable-5-2` -> `Claude Fable
+  5.2`). The alias is what routing uses; the label is what a reader needs.
 - The "What it is for" phrase per surface. This is editorial one-line prose,
   and the same strings are already duplicated into `site/i18n.js` under the
   `chain.*` keys; source is the better home for them.
@@ -67,6 +67,7 @@ _REGEN_COMMAND: Final[str] = "uv run python -m omh.cli docs chain-table"
 # stays the pointer because the endpoint rejects `deepseek-v4.1-flash`.
 MODEL_DISPLAY_LABELS: Final[dict[str, str]] = {
     "claude-fable-5-1": "Claude Fable 5.1",
+    "claude-fable-5-2": "Claude Fable 5.2",
     "claude-haiku-4-5": "Claude Haiku 4.5",
     "claude-haiku-5-5": "Claude Haiku 5.5",
     "claude-opus-5": "Claude Opus 5",
@@ -74,6 +75,7 @@ MODEL_DISPLAY_LABELS: Final[dict[str, str]] = {
     "claude-sonnet-5-5": "Claude Sonnet 5.5",
     "deepseek-flash": "DeepSeek V4.1 Flash",
     "gemini-3.1-pro": "Gemini 3.1 Pro",
+    "gemini-4-argon": "Gemini 4 Argon",
     "glm-5.3": "GLM 5.3",
     "glm-5.3-flash": "GLM 5.3 Flash",
     "gpt-5.6-luna": "GPT-5.6 Luna",
@@ -83,12 +85,20 @@ MODEL_DISPLAY_LABELS: Final[dict[str, str]] = {
     "gpt-6-luna": "GPT-6 Luna",
     "gpt-6-sol": "GPT-6 Sol",
     "gpt-6.1-sol": "GPT-6.1 Sol",
+    "gpt-6.2-astra": "GPT-6.2 Astra",
+    "gpt-6.2-sol": "GPT-6.2 Sol",
+    "gpt-6.1-terra": "GPT-6.1 Terra",
+    "gpt-6-cyber": "GPT-6 Cyber",
+    "gpt-5.6-cyber": "GPT-5.6 Cyber",
+    "gpt-6-rosalind": "GPT-6 Rosalind",
+    "grok-4.7": "Grok 4.7",
     "grok-build-0.1": "Grok Build 0.1",
     "grok-code-fast": "Grok Code Fast",
     "kimi-k3": "Kimi K3",
     "kimi-k3.1-pro": "Kimi K3.1 Pro",
     "kimi-k3.1-pro-highspeed": "Kimi K3.1 Pro Highspeed",
     "qwen3-coder": "Qwen3-Coder",
+    "qwen4-max": "Qwen4-Max",
 }
 
 # One editorial phrase per chain surface, keyed by the row id built below.
@@ -112,6 +122,12 @@ CHAIN_SURFACE_PURPOSES: Final[dict[str, str]] = {
     "capable": "Strong general work",
     "simple-work": "Small everyday tasks",
     "deep-work": "Long tasks at frontier depth",
+    "google-search": "Research grounded in Google Search",
+    "x-search": "Live search on X",
+    "review": "A different model tries to break the diff",
+    "swarm": "Many parallel workers on separate slices",
+    "forensics": "Root-causing a live symptom or a captured trace",
+    "synthesize": "Merging many results into one answer",
     "domain.x_platform_data": "X-platform data affinity",
     "last_resort.any": "Last resort when a chain is exhausted",
 }

@@ -7,6 +7,11 @@ real wait when the turn armed a background process that exits when CI does. A
 turn that says it is waiting and then ends has stopped, and CI passing changes
 nothing because nothing is listening (#1721).
 
+The same stall has a second entrance: the turn a FAILED watcher opens. The
+CI check or merge watcher the session armed exits non-zero, its notice opens a
+turn, the turn reports the failure, and it ends with nothing armed again. See
+`FAILED WAIT` below; that half reads the notice the host wrote, at turn start.
+
 Measured on the reporter's own session history: of 48 turn endings that
 mentioned CI or a deploy and a wait, one had armed a background waiter and was
 woken by it. The longest idle gap was 168 minutes, on a turn whose verification
@@ -66,11 +71,15 @@ directive is delivered on the call that starts the remote work rather than at
 the turn's end, which is the earliest point at which the fact is known and the
 last point at which the model can still act on it cheaply.
 
-A turn that receives the directive, arms nothing anyway, and ends is caught
-once more at `transform_llm_output`, the one host seam after the tool loop:
-`honest_stop_output` appends a sentence telling the person the session has
-stopped. It keys on the directive's own per-turn latch and a fresh read of
-the process record, never on the final response's wording.
+A turn that receives the directive, arms nothing anyway, and ends is left
+alone. An earlier version appended a sentence to the person's reply at
+`transform_llm_output` ("the session has stopped, send a message"), and it
+landed on very nearly every successful push -- a README edit pushed to main
+included, where nothing was ever going to be waited on. The owner rejected it
+as noise repeated on every push (2026-11-07), and it also contradicted the
+model when the model had just said it would stop writing that line. The
+in-loop directive is the whole mechanism for a push now; the end-of-turn
+sentence survives only on a turn a FAILED watcher opened (see `FAILED WAIT`).
 
 The directive drives to neither exit by force. It names arming a watcher and
 telling the person plainly, and it says not to poll in the foreground -- a
@@ -112,10 +121,12 @@ import json
 import re
 import shlex
 from collections import Counter, OrderedDict
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Final
 
 from . import runtime_paths
+from .catch_log import UNARMED_WAIT, record_catch
 from .hooks.nudge_budget import (
     MAX_TRACKED_SESSIONS,
     engagement_count,
@@ -224,10 +235,48 @@ APPROVAL_GATE_CAUSE: Final = "remote_wait_approval"
 # The residual is stated rather than hidden: a session that arms a watcher for
 # one piece of work and later pushes a second without arming gets nothing.
 # That is a directive not issued, which is the direction this module fails in.
-# The end-of-turn sentence (`honest_stop_output`) does not catch it either: it
-# speaks only on a turn whose directive was delivered, and it honours the same
-# latch, for the reason given there.
 ARMS_WATCHERS_LATCH: Final = "remote_wait_arms_watchers"
+
+# ---------------------------------------------------------------------------
+# FAILED WAIT: the turn a failed background process opened.
+#
+# The unarmed-wait directive above covers the turn that STARTS remote work.
+# The other way a session stalls is the turn that a watcher's failure opens:
+# the CI check or merge watcher the session armed exits non-zero, the host's
+# completion notice opens a turn, the model reports the failure, and the turn
+# ends with nothing armed. Nothing will wake that session again, and the
+# authorized work it was carrying (fix, push, re-watch, merge) waits for a
+# person to notice. Measured on the owner's Discord history over 45 days: 50
+# turns opened by a failed-process notice, 20 of which ended with no watcher,
+# background delegation or follow-up job armed, and the next message after
+# those arrived up to 24 hours later.
+#
+# Both triggers are records again. "A failed process opened this turn" is the
+# row's `display_kind` (the host types its notices) plus the notice header the
+# host formats itself (`tools/process_registry_notifications.py::
+# format_process_notification` and the gateway's coalesced batch in
+# `gateway/run_notifications.py`), never the model's prose. "Nothing is armed
+# at the end" is the process record plus what this turn's own tool results
+# showed being armed: a notifying background spawn, a background
+# `delegate_task` dispatch, or a scheduled follow-up job.
+#
+# A process the host or the session killed (`SIGTERM`, `terminated by ...`,
+# `reason=killed`) is not a failure here: superseded watchers are killed
+# routinely, and a kill says nothing about the work. The residual: a notice
+# whose OUTPUT carries a line that looks like a notice header at a block
+# boundary is read as one, which costs one directive and never a missed one.
+FAILED_WAIT_CAUSE: Final = "remote_wait_failed_notice"
+# Set by this turn's own tool results, so the end-of-turn sentence for a
+# failed wait can tell a turn that re-armed from one that did not. Unlike
+# `ARMS_WATCHERS_LATCH` it is per turn: the session that armed the watcher
+# which just failed has, by definition, armed watchers before.
+ARMED_THIS_TURN_CAUSE: Final = "remote_wait_armed_this_turn"
+# Results that arm a wake without a terminal spawn: a background delegation
+# (its completion re-enters the session) and a scheduled job (the merge
+# follow-up job that carries the work on).
+DELEGATE_TOOL: Final = "delegate_task"
+CRON_TOOL: Final = "cronjob_manage"
+CRON_ARMING_ACTIONS: Final[frozenset[str]] = frozenset({"create", "run", "update", "resume"})
 
 # ---------------------------------------------------------------------------
 # SPAWN OBSERVATION: why the record alone cannot answer "is anything armed".
@@ -352,35 +401,45 @@ APPROVAL_GATE_TEXT: Final = (
 _declines: "Counter[str]" = Counter()
 
 
-# The end-of-turn half (#1721). The directive above rides a tool result while
-# the model can still act on it; this sentence is for the turn that received
-# the directive, armed nothing anyway, and ended. It is written to the PERSON
-# reading the final response, and it states only what the records show: this
-# turn started remote work, nothing is armed, and a session resumes only on a
-# message. It deliberately does not say the remote work is still running --
-# a foreground poll may already have seen it finish -- and it does not say the
-# model claimed to be waiting, because nothing here reads what the model said.
-#
-# The sentence is in the reply's own language (owner decision, 2026-09-28) and
-# carries no OMH vocabulary: no `[OMH]` head, no "armed". The language comes
-# from the response text alone -- see `reply_language` -- and never from the OS
-# locale. The copy is vendored here because this bundle cannot import `omh.*`.
-HONEST_STOP_TEXTS: Final[dict[str, str]] = {
-    "en": (
-        "This session has stopped: the remote work it started will not wake it "
-        "when it finishes, so send a message to pick it back up."
-    ),
-    "ko": (
-        "원격 작업이 끝나도 이 세션은 자동으로 다시 시작되지 않습니다. "
-        "이어서 하려면 메시지를 보내 주세요."
-    ),
-    "ja": (
-        "リモートの作業が終わっても、このセッションは自動では再開しません。"
-        "続けるには、メッセージを送ってください。"
-    ),
-    "zh": "远程工作完成后，此会话不会自动恢复。如需继续，请发送一条消息。",
+
+# The turn-start directive for a turn a failed process opened. Rides the
+# fenced `pre_llm_call` context, so the model reads it before its first call,
+# while both exits are still reachable. Conditional like the unarmed-wait
+# text: a failure the person has to decide on is a legitimate stop, and the
+# directive asks only that the stop be said.
+FAILED_WAIT_TEXT: Final = (
+    "[OMH failed wait] Background process {process} exited with code {code}, its notice "
+    "opened this turn, and nothing else is armed to wake this session after it. If the "
+    "work it watched is still this session's to finish (a fix, a push, a re-run), do it "
+    "in this turn and arm the next wait (terminal, background=true, notify=true). "
+    "Otherwise end by saying plainly that the session has stopped and what the person "
+    "has to decide."
+)
+# The end-of-turn sentence for that turn when it re-armed nothing, and the
+# only sentence OMH still appends to a reply here. It is written to the
+# PERSON, in the reply's own language (owner decision, 2026-09-28; see
+# `reply_language`), carries no OMH vocabulary, and is appended rather than
+# rewritten. It does not mention remote work this turn started, because it
+# started none.
+FAILED_WAIT_STOP_TEXTS: Final[dict[str, str]] = {
+    "en": "Nothing is set to wake this session again, so send a message to pick it back up.",
+    "ko": "이 세션을 다시 깨울 작업이 걸려 있지 않습니다. 이어서 하려면 메시지를 보내 주세요.",
+    "ja": "このセッションを再び起こす処理は設定されていません。続けるには、メッセージを送ってください。",
+    "zh": "没有任务会再次唤醒此会话。如需继续，请发送一条消息。",
+    "zh-Hant": "沒有任何工作會再次喚醒這個對話。如需繼續，請傳送一則訊息。",
 }
-HONEST_STOP_TEXT: Final = HONEST_STOP_TEXTS["en"]
+
+# The host's notice header for one finished process, wherever a block starts:
+# `[IMPORTANT: Background process <id> <status> (exit code <n>[, SIGTERM]).`
+_NOTICE_HEAD = re.compile(
+    r"\[IMPORTANT: Background process (\S+) ([^\n(]*?) \(exit code (-?\d+)(, SIGTERM)?\)\."
+)
+# A sender prefix a messaging gateway puts before the notice (`[name] `). Only
+# at the very start, and never the notice's own opening bracket.
+_SENDER_PREFIX = re.compile(r"^\[(?!IMPORTANT:)[^\]\n]*\] ")
+# The gateway's coalesced batch: an opener, then one line per process.
+_BATCH_OPENER: Final = "background processes completed for this session."
+_BATCH_LINE = re.compile(r"(?m)^- (\S+): exit_code=(-?\d+), reason=(\S+)$")
 
 # When a reply outside code is written in a non-Latin script rather than
 # quoting one. A script counts only through a run of at least
@@ -411,6 +470,15 @@ _HANGUL = "ᄀ-ᇿ㄰-㆏가-힣"
 _KANA = "぀-ゟ゠-ヿㇰ-ㇿｦ-ﾟ"
 _HAN = "㐀-䶿一-鿿豈-﫿"
 _CJK_CHARS = re.compile(f"[{_HANGUL}{_KANA}{_HAN}]")
+_HAN_CHAR = re.compile(f"[{_HAN}]")
+# Which Chinese script a Han character belongs to is read from the two
+# national character sets CPython ships codecs for: Big5 (Taiwan, Hong Kong)
+# holds Traditional forms and GB2312 (mainland) Simplified ones. A character
+# only one of them encodes is that script's own form (請, 測, 錯 against 请,
+# 测, 错); one both encode (完, 成, 合格) or neither does (Japanese 変, 験) says
+# nothing. No word list to keep up and no dependency.
+_TRADITIONAL_CODEC = "big5"
+_SIMPLIFIED_CODEC = "gb2312"
 _QUOTATION = re.compile(r'"[^"\n]*"|“[^”\n]*”|「[^」\n]*」|『[^』\n]*』')
 _SCRIPT_RUNS: Final = tuple(
     (language, re.compile(f"[{chars}]{{{REPLY_SCRIPT_MIN_RUN},}}"))
@@ -419,7 +487,7 @@ _SCRIPT_RUNS: Final = tuple(
 
 
 def reply_language(text: object) -> str:
-    """The language of *text*: ``ko``, ``ja``, ``zh`` or ``en``.
+    """The language of *text*: ``ko``, ``ja``, ``zh``, ``zh-Hant`` or ``en``.
 
     Fenced and inline code are removed first, because a Korean string in a
     code block says nothing about the language the reply is written in, and
@@ -430,10 +498,14 @@ def reply_language(text: object) -> str:
     majority script: a Japanese reply is often mostly kanji, so a majority
     rule would call it Chinese.
 
+    A Chinese reply is ``zh-Hant`` when its Traditional-only characters
+    outnumber its Simplified-only ones, else ``zh``; a tie, including a reply
+    built only from characters both scripts share, keeps ``zh``.
+
     The stated limit: a Japanese reply with no run of two kana (all kanji, or
-    kanji with single-kana particles) reads as Chinese. Nothing in the text
-    tells the two apart without a dictionary. Anything else, including a
-    script with no copy here, is English.
+    kanji with single-kana particles) reads as Chinese, usually Traditional.
+    Nothing in the text tells the two apart without a dictionary. Anything
+    else, including a script with no copy here, is English.
     """
     prose = _INLINE_CODE.sub("", _FENCED_CODE.sub("", str(text or "")))
     prose = _NAME_TOKEN.sub(" ", _QUOTATION.sub(" ", prose))
@@ -441,8 +513,30 @@ def reply_language(text: object) -> str:
         return "en"
     for language, run in _SCRIPT_RUNS:
         if run.search(prose):
+            if language == "zh" and _traditional_leads(prose):
+                return "zh-Hant"
             return language
     return "en"
+
+
+def _traditional_leads(prose: str) -> bool:
+    lead = 0
+    for char in _HAN_CHAR.findall(prose):
+        traditional = _encodes(char, _TRADITIONAL_CODEC)
+        if traditional != _encodes(char, _SIMPLIFIED_CODEC):
+            lead += 1 if traditional else -1
+    return lead > 0
+
+
+@lru_cache(maxsize=8192)
+def _encodes(char: str, codec: str) -> bool:
+    # A host built without the CJK codecs answers LookupError for both, so
+    # every character says nothing and a Chinese reply keeps ``zh``.
+    try:
+        char.encode(codec)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
 
 
 def remote_wait_declines() -> dict[str, int]:
@@ -477,6 +571,7 @@ def annotate_remote_wait(
     session_id: str = "",
     turn_id: str = "",
     hermes_home: str = "",
+    omh_home: str = "",
 ) -> str | None:
     """Return *result* carrying the directive, or ``None`` to pass it through.
 
@@ -492,6 +587,7 @@ def annotate_remote_wait(
             session_id=session_id,
             turn_id=turn_id,
             hermes_home=hermes_home,
+            omh_home=omh_home,
         )
     except Exception as exc:  # noqa: BLE001 - see module docstring: the host
         # swallows and debug-logs anything this raises, so a raise here is a
@@ -509,8 +605,15 @@ def _annotate(
     session_id: str,
     turn_id: str,
     hermes_home: str,
+    omh_home: str = "",
 ) -> str | None:
-    if str(tool_name or "") != TERMINAL_TOOL:
+    tool = str(tool_name or "")
+    if tool in (DELEGATE_TOOL, CRON_TOOL):
+        # Read, never changed: these results only tell the failed-wait stop
+        # that this turn armed a wake another way.
+        _observe_waking_dispatch(tool, args, result, session_id=session_id, turn_id=turn_id)
+        return None
+    if tool != TERMINAL_TOOL:
         _declines["tool_not_terminal"] += 1
         return None
     session = str(session_id or "").strip()
@@ -541,6 +644,7 @@ def _annotate(
     if spawned is not None:
         if spawned:
             latch_engagement(session, ARMS_WATCHERS_LATCH)
+            record_turn_cause(session_id=session, turn_id=turn, cause=ARMED_THIS_TURN_CAUSE)
         _declines["background_spawn_observed"] += 1
         return None
 
@@ -566,6 +670,11 @@ def _annotate(
         return None
     for cause, _text in pending:
         record_turn_cause(session_id=session, turn_id=turn, cause=cause)
+        # The turn's latch makes this once per turn, and only the unarmed wait
+        # is a catch the person sees: the approval-gate sentence is about a
+        # command the person is already being asked to approve.
+        if cause == UNARMED_WAIT_CAUSE:
+            record_catch(omh_home, session, UNARMED_WAIT)
     return carried
 
 
@@ -616,35 +725,19 @@ def _consider_unarmed_wait(
 def honest_stop_output(
     *, response_text: object, session_id: object, turn_id: object, hermes_home: str = ""
 ) -> str | None:
-    """Return *response_text* ending in the honest-stop sentence, or ``None``.
+    """Return *response_text* ending in the failed-wait stop sentence, or ``None``.
 
     Hermes fires ``transform_llm_output`` once per turn, after the tool loop,
-    with the final response and the turn's own ``turn_id`` -- the same value
-    every tool hook of that turn received (`agent/turn_context.py` binds it
-    once as ``agent._current_turn_id``). It can replace the text; it cannot
-    re-enter the loop, so it can deliver the honest stop and never the
-    arm-a-watcher half. Those are the two honest exits the directive named,
-    and this is the only one still reachable once the turn has ended.
+    with the final response and the turn's own ``turn_id``. Only a turn a
+    failed watcher's notice opened can end on a sentence here: that latch is
+    recorded by ``failed_wait_context`` at turn start. A turn that pushed with
+    nothing armed is left alone -- the in-loop directive already told the
+    model, and the person does not need a line about it on every push.
 
-    The decision reads two records and never ``response_text``:
-
-    * this turn's per-turn latch for ``UNARMED_WAIT_CAUSE``, recorded only when
-      the in-loop directive was actually carried onto a result, so it means
-      "this turn started remote work while nothing was armed";
-    * the process record, re-read now, through the same
-      ``armed_waiter_present`` the directive used. Arming a watcher after the
-      directive is exactly the exit it asked for, and that turn is left alone.
-
-    A session observed arming a notifying watcher at any point is also left
-    alone, even when that watcher has already exited: a process that finished
-    during the turn queued a completion notice that will still wake it, and
-    the record no longer shows it. That is ``ARMS_WATCHERS_LATCH``, the same
-    evidence the directive honours.
-
-    Appended rather than rewritten, because the CLI prints only the suffix of
-    a transformed response when the new text starts with the streamed one
-    (`cli.py::_post_stream_transform_output`); anything else re-prints the
-    whole response under a "transformed" banner. Fail-open like every other
+    The decision reads records and never ``response_text``. Appended rather
+    than rewritten, because the CLI prints only the suffix of a transformed
+    response when the new text starts with the streamed one
+    (`cli.py::_post_stream_transform_output`). Fail-open like every other
     entry here: any failure is counted and the response passes through.
     """
     try:
@@ -673,11 +766,25 @@ def _honest_stop(
         # right answer for suppressing a repeat and the wrong one here.
         _declines["end_of_turn_unkeyed"] += 1
         return None
-    if not turn_cause_fired(session_id=session, turn_id=turn, cause=UNARMED_WAIT_CAUSE):
-        _declines["end_of_turn_no_unarmed_wait"] += 1
-        return None
-    if engagement_count(session, ARMS_WATCHERS_LATCH):
-        _declines["end_of_turn_session_arms_watchers"] += 1
+    if turn_cause_fired(session_id=session, turn_id=turn, cause=FAILED_WAIT_CAUSE):
+        return _failed_wait_stop(response_text, session=session, turn=turn, hermes_home=hermes_home)
+    # A push with nothing armed is not announced to the person: see the
+    # module docstring for why that sentence was removed.
+    _declines["end_of_turn_no_failed_wait"] += 1
+    return None
+
+
+def _failed_wait_stop(response_text: str, *, session: str, turn: str, hermes_home: str) -> str | None:
+    """The end of a turn a failed process opened: the sentence, unless it re-armed.
+
+    `ARMS_WATCHERS_LATCH` is deliberately not consulted: the session that
+    armed the watcher which just failed has armed watchers before, and that
+    says nothing about whether anything will wake it after THIS turn. What
+    counts is this turn's own arming, observed from its tool results, or a
+    notifying process still live in the record.
+    """
+    if turn_cause_fired(session_id=session, turn_id=turn, cause=ARMED_THIS_TURN_CAUSE):
+        _declines["failed_wait_rearmed"] += 1
         return None
     armed = armed_waiter_present(session_id=session, hermes_home=hermes_home)
     if armed is None:
@@ -686,7 +793,129 @@ def _honest_stop(
     if armed:
         _declines["end_of_turn_waiter_armed"] += 1
         return None
-    return f"{response_text}\n\n{HONEST_STOP_TEXTS[reply_language(response_text)]}"
+    return f"{response_text}\n\n{FAILED_WAIT_STOP_TEXTS[reply_language(response_text)]}"
+
+
+def failed_wait_context(
+    *,
+    user_message: object,
+    display_kind: object,
+    session_id: object,
+    turn_id: object,
+    hermes_home: str = "",
+    delegated: bool = False,
+) -> str:
+    """The turn-start directive for a turn a failed process opened, or ``""``.
+
+    Called from ``pre_llm_call``, once per turn. Both halves are records: the
+    host's typing of the row that opened the turn (``display_kind``, which a
+    person's own message never carries) and the notice header the host wrote
+    into it. The cause is latched for the turn here, so the end-of-turn half
+    knows this turn owes either a re-armed wait or a plain stop. Fail-open:
+    any failure is counted and nothing is said.
+    """
+    try:
+        return _failed_wait_context(
+            user_message=user_message,
+            display_kind=display_kind,
+            session_id=session_id,
+            turn_id=turn_id,
+            hermes_home=hermes_home,
+            delegated=delegated,
+        )
+    except Exception as exc:  # noqa: BLE001 - `pre_llm_call` runs inside the
+        # host's own swallow (`agent/turn_context.py::_collect_pre_llm_call_context`
+        # logs and drops a raise), so a raise here would also drop every other
+        # OMH line of the turn. Recorded by type; the turn gets no directive.
+        _declines[f"error:{type(exc).__name__}"] += 1
+        return ""
+
+
+def _failed_wait_context(
+    *,
+    user_message: object,
+    display_kind: object,
+    session_id: object,
+    turn_id: object,
+    hermes_home: str,
+    delegated: bool,
+) -> str:
+    kind = display_kind.strip() if isinstance(display_kind, str) else ""
+    if not kind or kind == "steer":
+        # A person's row. The host types every notice row it writes; what a
+        # person types cannot open this directive whatever it says.
+        return ""
+    if delegated:
+        _declines["delegated_session"] += 1
+        return ""
+    session, turn = _tracked_key(session_id), _tracked_key(turn_id)
+    if not session or not turn:
+        _declines["failed_wait_unkeyed"] += 1
+        return ""
+    failed = failed_processes(user_message)
+    if not failed:
+        return ""
+    armed = armed_waiter_present(session_id=session, hermes_home=hermes_home)
+    if armed is None:
+        _declines["process_record_unreadable"] += 1
+        return ""
+    if armed:
+        _declines["failed_wait_other_waiter_live"] += 1
+        return ""
+    record_turn_cause(session_id=session, turn_id=turn, cause=FAILED_WAIT_CAUSE)
+    process, code = failed[0]
+    return FAILED_WAIT_TEXT.format(process=process, code=code)
+
+
+def failed_processes(message: object) -> list[tuple[str, int]]:
+    """``(process id, exit code)`` for each process a notice reports as failed.
+
+    Read from the host's own notice shapes only: the single-process header at
+    the start of a block, and the gateway's coalesced batch lines. A zero exit
+    is not a failure, and neither is a kill (`SIGTERM`, `terminated by ...`,
+    `reason=killed`): a superseded watcher is killed on purpose.
+    """
+    if not isinstance(message, str) or "[IMPORTANT:" not in message:
+        return []
+    failed: list[tuple[str, int]] = []
+    for block in message.split("\n\n"):
+        head = _NOTICE_HEAD.match(_SENDER_PREFIX.sub("", block, count=1))
+        if head is None:
+            continue
+        process, status, code, sigterm = head.group(1), head.group(2), int(head.group(3)), head.group(4)
+        if code != 0 and not sigterm and not status.startswith("terminated by"):
+            failed.append((process, code))
+    if _BATCH_OPENER in message:
+        for process, code, reason in _BATCH_LINE.findall(message):
+            if int(code) != 0 and reason != "killed":
+                failed.append((process, int(code)))
+    return failed
+
+
+def _observe_waking_dispatch(
+    tool: str, args: object, result: object, *, session_id: str, turn_id: str
+) -> None:
+    """Record that this turn armed a wake through a delegation or a scheduled job.
+
+    The host's own result says so: a background ``delegate_task`` returns
+    ``status: dispatched`` with ``mode: background``, and a ``cronjob_manage``
+    create, run, update or resume returns ``success: true``. Only the turn
+    latch is touched, so the failed-wait stop can tell a turn that carried the
+    work on from one that did not; nothing else here reads it.
+    """
+    session, turn = _tracked_key(session_id), _tracked_key(turn_id)
+    if not session or not turn:
+        return
+    parsed = _parsed_result(result)
+    if parsed is None:
+        return
+    if tool == DELEGATE_TOOL:
+        arms = parsed.get("status") == "dispatched" and parsed.get("mode") == "background"
+    else:
+        action = str(args.get("action") or "") if isinstance(args, dict) else ""
+        arms = parsed.get("success") is True and action in CRON_ARMING_ACTIONS
+    if arms:
+        record_turn_cause(session_id=session, turn_id=turn, cause=ARMED_THIS_TURN_CAUSE)
 
 
 def _observe_background_spawn(session: str, result: object) -> bool | None:
@@ -984,4 +1213,4 @@ def _carry(result: object, text: str) -> str | None:
     if REMOTE_WAIT_NUDGE_KEY in parsed:
         return None
     parsed[REMOTE_WAIT_NUDGE_KEY] = text
-    return json.dumps(parsed)
+    return json.dumps(parsed, ensure_ascii=False)

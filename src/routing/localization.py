@@ -2,37 +2,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-import re
-import unicodedata
 
+# The fold and tokenizers live in the bundle, so the plugin's route hint runs
+# the same ones on a host without the `omh` package; re-exported here for the
+# router's callers.
+from ..plugin_bundle.omh.text_fold import fold_for_match as _fold_for_match
+from ..plugin_bundle.omh.text_fold import normalized_phrase as normalized_phrase
+from ..plugin_bundle.omh.text_fold import routing_terms as routing_terms
+from ..plugin_bundle.omh.text_fold import routing_tokens as routing_tokens
 from .visual_qa_cues import contains_cue_phrase
 
 
-_TOKEN_RE = re.compile(r"[^\W_][^\W_'-]*(?:-[^\W_][^\W_'-]*)?", re.UNICODE)
-_STOPWORDS = {
-    "the",
-    "and",
-    "are",
-    "as",
-    "for",
-    "in",
-    "is",
-    "of",
-    "or",
-    "to",
-    "with",
-    "that",
-    "this",
-    "when",
-    "use",
-    "user",
-    "task",
-    "request",
-    "workflow",
-    "skill",
-    "agent",
-    "hermes",
-}
 _CANONICAL_PAYMENT_FAILURE = (
     "payment failure payment failure issue payment failure feedback "
     "customer feedback feedback triage bug reports reproduce"
@@ -700,43 +680,8 @@ def _folded_alias_phrases() -> tuple[tuple[LocaleAlias, tuple[str, ...]], ...]:
     return tuple(folded_aliases)
 
 
-def routing_tokens(value: str, *, stopwords: set[str] | None = None) -> set[str]:
-    stopword_key = frozenset(_STOPWORDS if stopwords is None else stopwords)
-    return set(_routing_tokens_cached(value, stopword_key))
-
-
-@lru_cache(maxsize=8192)
-def _routing_tokens_cached(value: str, stopwords: frozenset[str]) -> frozenset[str]:
-    tokens: set[str] = set()
-    for raw_token in routing_terms(value):
-        for token in (raw_token, *raw_token.split("-")):
-            if len(token) >= 3 and token not in stopwords:
-                tokens.add(token)
-    return frozenset(tokens)
-
-
-def routing_terms(value: str) -> set[str]:
-    return set(_routing_terms_cached(value))
-
-
-@lru_cache(maxsize=8192)
-def _routing_terms_cached(value: str) -> frozenset[str]:
-    folded = _fold_for_match(value)
-    terms: set[str] = set()
-    for raw_token in _TOKEN_RE.findall(folded):
-        token = raw_token.strip("-")
-        if token:
-            terms.add(token)
-            terms.update(part for part in token.split("-") if part)
-    return frozenset(terms)
-
-
-def normalized_phrase(value: str) -> str:
-    return _fold_for_match(value)
-
-
 def phrase_is_spoken(message: str, phrase: str) -> bool:
-    """True when `phrase` occurs in `message` as its own run of Latin text.
+    """True when `phrase` occurs in `message` as its own run of words.
 
     Plain containment cannot tell a phrase that was said from a phrase that
     merely happens to spell part of a longer word. `loop` is inside
@@ -754,42 +699,75 @@ def phrase_is_spoken(message: str, phrase: str) -> bool:
     CJK trigger in the language packs: `アップロード` inside
     `大きなpdfのアップロード` is the phrase, spoken normally.
 
+    Cyrillic and Greek are written with spaces, so they get the same edges as
+    ASCII, and for the same reason: `ревью` inside `превью` and `выкати`
+    inside `выкатил` are other words (#2284). Both sides must be letters of
+    the same script, as both must be ASCII for Latin, so a Latin name glued to
+    a Russian word keeps the reading it had before.
+
     A phrase EXTENDED on the right is a different question, and the answer
     depends on how much the phrase has already pinned down. One word extended
     is a different word: `asked` is not `ask`. Several words extended is the
     same phrase inflected: `attack scenarios` is `attack scenario` and
     `smooth scrolling` is `smooth scroll`, and the leading words have already
-    established the sense. So the right edge is enforced only for a
-    single-word phrase.
+    established the sense. So the right edge is enforced for a single-word
+    phrase, and for a last word of two letters or fewer, where extending it
+    usually makes another word: `time in` is not in `time instead`. A plural
+    `s` is the one extension such a short word keeps: `reviewable prs` is
+    `reviewable pr`.
+
+    Hangul folds to jamo here, so a phrase ending on an open syllable would
+    match that syllable with a final consonant: `주가` inside `주간`. Those
+    are other syllables and do not count; a particle after the phrase does
+    (`주가가`).
 
     `message` and `phrase` must already share a fold; this compares them
     verbatim, the same contract `contains_boundary_phrase` carries.
     """
     if not message or not phrase:
         return False
-    require_right_edge = " " not in phrase
+    require_right_edge = " " not in phrase or len(phrase.rsplit(" ", 1)[1]) <= 2
     start = message.find(phrase)
     while start != -1:
-        if not _continues_a_latin_word(message, start - 1, phrase[0]):
+        if not _continues_a_spaced_word(message, start - 1, phrase[0]):
             end = start + len(phrase)
-            if not require_right_edge or not _continues_a_latin_word(message, end, phrase[-1]):
+            if _closes_an_open_hangul_syllable(message, end):
+                pass
+            elif not require_right_edge or not _continues_a_spaced_word(message, end, phrase[-1]):
+                return True
+            elif (
+                " " in phrase
+                and message[end] == "s"
+                and not _continues_a_spaced_word(message, end + 1, phrase[-1])
+            ):
                 return True
         start = message.find(phrase, start + 1)
     return False
 
 
-def _continues_a_latin_word(message: str, index: int, edge: str) -> bool:
+def _closes_an_open_hangul_syllable(message: str, index: int) -> bool:
+    return index < len(message) and "\u11a8" <= message[index] <= "\u11ff"
+
+
+def _continues_a_spaced_word(message: str, index: int, edge: str) -> bool:
     if index < 0 or index >= len(message):
         return False
-    return _is_latin_word_character(message[index]) and _is_latin_word_character(edge)
+    script = _spaced_word_script(edge)
+    return bool(script) and _spaced_word_script(message[index]) == script
 
 
-def _is_latin_word_character(character: str) -> bool:
-    return character.isascii() and character.isalnum()
+def _spaced_word_script(character: str) -> str:
+    """The space-delimited script `character` spells a word in, or "" for any other.
 
-
-@lru_cache(maxsize=8192)
-def _fold_for_match(value: str) -> str:
-    normalized = unicodedata.normalize("NFKC", value).casefold()
-    decomposed = unicodedata.normalize("NFKD", normalized)
-    return "".join(char for char in decomposed if not unicodedata.combining(char))
+    CJK, Hangul and every script not named here answer "", so their edges are
+    never checked.
+    """
+    if character.isascii():
+        return "latin" if character.isalnum() else ""
+    if not character.isalpha():
+        return ""
+    if "\u0400" <= character <= "\u052f":
+        return "cyrillic"
+    if "\u0370" <= character <= "\u03ff" or "\u1f00" <= character <= "\u1fff":
+        return "greek"
+    return ""

@@ -6,6 +6,8 @@ from functools import lru_cache
 import re
 
 from ..plugin_bundle.omh.data_share_cues import DATA_SHARE_REVIEW_KOREAN_PHRASES, data_share_request_admitted
+from ..coding.pi_family_interop import PI_DISTRIBUTION_HOST, RUNTIME_SHORT_NAME, RUNTIME_USER_PHRASE, SCORING_ONLY_TRIGGERS
+from ..plugin_bundle.omh.korean_request import SOFTENERS, korean_request, without_particle
 from ..plugin_bundle.omh.request_lead import after_courtesy
 from ..plugin_bundle.omh.spend_signals import SPEND_GATE_KOREAN_PHRASES, spend_request_clause
 from ..skills.catalog import SkillDefinition, builtin_definitions, routable_definitions
@@ -35,6 +37,19 @@ from .trigger_language_packs import (
     merged_trigger_phrases,
     shipped_trigger_language_packs,
 )
+from .model_compression_cues import names_a_model_by_parameter_count
+from .bot_template_cues import (
+    BOT_TEMPLATE_SHARED_PHRASES,
+    bot_template_korean_match,
+    bot_template_korean_unanchored,
+    bot_template_names_the_job,
+)
+from .skill_eval_cues import (
+    SKILL_EVAL_JOB_PHRASES,
+    SKILL_EVAL_SHARED_PHRASES,
+    skill_eval_korean_match,
+    skill_eval_korean_unanchored,
+)
 from .path_signal import PATH_GLOB_SCORE, matching_path_glob, path_mentions
 from .query import RoutingQuery
 from ..plugin_bundle.omh.hermes_session_commands import LOOP_TIMER_NONE
@@ -58,10 +73,14 @@ from .policy import (
     dependency_upgrade_guard_applies,
     employer_hiring_intent,
     explicit_skill_invocation,
+    FRONTEND_DESIGN_GUARD,
+    frontend_design_guard_applies,
     is_explicit_one_off_request,
     jit_learn_guard_applies,
     llm_wiki_request,
     media_input_operator_guard_applies,
+    MODEL_COMPRESSION_ANCHORS,
+    MODEL_COMPRESSION_SHARED_PHRASES,
     ops_observability_external_blocked,
     ops_observability_generic_metrics_blocked,
 )
@@ -100,6 +119,23 @@ _FALLBACK_WHY = "No strong catalog metadata match; start with general routing/pl
 _GUARDRAIL_CANDIDATE_INJECTION_IDS = frozenset(
     {
         "adversarial_qa_before_generic_help",
+        # "슬랙 채널 지켜보다가 … 알려줘" scores on gateway-intent-card's platform
+        # and notify triggers and on almost nothing of automation-blueprint's.
+        "channel_watch_before_gateway_or_connector",
+        # "노션 페이지 바뀌면 알려줘" scores on connector-operator's and wiki's
+        # platform triggers and on nothing of automation-blueprint's.
+        "monitor_trigger_before_connector_or_wiki",
+        # "watch PR 42 until its checks finish" scores on ultrawork's `until` and
+        # `finish` triggers and on nothing of github-event-ops'.
+        "pr_watch_before_loop_or_ultrawork",
+        # "센트리 에러 알림 왔어 고쳐줘" and "이 메일 답장하지 말고 작업으로 만들어줘" name no
+        # English trigger of app-work-intake, so its guard needs a candidate to land on.
+        "app_work_intake_before_connector_or_coding",
+        # "회의록 리니어 이슈로 만들어줘" names no operating-rhythm trigger the frozen Korean table holds.
+        "meeting_to_issues_before_connector",
+        # "does this change introduce a bug?" names no word `code-review`
+        # triggers on, so the guard's boost needs a candidate to land on.
+        "code_review_request_before_generic_clarify",
         "coding_progress_status_before_clarify",
         "deep_interview_before_generic_plan",
         "direct_coding_task_before_fallback",
@@ -107,6 +143,11 @@ _GUARDRAIL_CANDIDATE_INJECTION_IDS = frozenset(
         "executor_runtime_readiness_before_generic_advice",
         "feedback_before_coding",
         "gateway_intent_before_feedback_triage",
+        # A game request names no UI vocabulary `frontend` triggers on ("슈팅
+        # 게임 만들어줘", "make the game feel juicier"), so the guard's boost
+        # needs a candidate to land on.
+        "frontend_design_before_generic_picker",
+        "game_build_before_greenfield_interview",
         # A greenfield request scores 0 on `deep-interview` by construction - the
         # user types "build a todo list", never "interview me" - so without
         # injection the guard's boost has no candidate to land on.
@@ -210,6 +251,25 @@ _GENERIC_TRIGGER_TOKENS = frozenset(
 _RISKY_REFACTOR_GUARD_ID = "risky_refactor_before_cleanup"
 _RISKY_REFACTOR_FOLLOWUP_ONLY_SKILLS = frozenset({"ai-slop-cleaner"})
 _RISKY_REFACTOR_FOLLOWUP_SCORE_CAP = 7
+# The architecture-deepening phrases name `tech-debt-audit` in a clarifying
+# question but never dispatch it on their own (#2501 review). Each phrase
+# holds the very words the skill's metadata credit reads ("architecture",
+# "codebase", "repo", "deepening"), so a sentence that only quotes one -- a
+# job post, a README line, a contract -- reached the dispatch bar from the
+# phrase alone. Without evidence outside these phrases (another trigger, the
+# name, a direct or path match) the score stops below that bar.
+_TECH_DEBT_AUDIT_CLARIFY_ONLY_SCORE_CAP = 7
+_TECH_DEBT_AUDIT_CLARIFY_ONLY_TRIGGERS = frozenset(
+    f"trigger:{normalized_phrase(phrase)}"
+    for phrase in (
+        "improve the codebase architecture",
+        "improve the architecture of this repo",
+        "deepening opportunities in this codebase",
+        "shallow modules in this codebase",
+        "코드베이스 아키텍처 개선해줘",
+        "코드 아키텍처 개선해줘",
+    )
+)
 _RISKY_REFACTOR_FOLLOWUP_MATCHED = "guard:risky_refactor_followup_after_plan"
 _RISKY_REFACTOR_FOLLOWUP_WHY = (
     "Follow-up only: use cleanup after a reviewed plan locks scope, risks, and verification."
@@ -410,6 +470,16 @@ _RELEASE_CUT_EXPLICIT_PHRASES = tuple(
 # bare "AGENTS.md" or "CLAUDE.md" is not boosted, because "distill these
 # lessons into AGENTS.md rule candidates" is `rules-distill` and "explain what
 # is in CLAUDE.md" is a question about the file, not a request to write it.
+# `skill-eval` names checking a skill folder against the hosts that load it.
+# Every word its triggers are built from is ordinary ("skill", "load", "good",
+# "harness"), so only complete phrases score. The shared ones are also said of a
+# person's ability and reach here only alone or beside a word of agent skills
+# (`EVERYDAY_SENSE_PHRASES`); the Korean ones pass `skill_eval_korean_match`.
+_SKILL_EVAL_EXPLICIT_PHRASES = tuple(
+    normalized_phrase(phrase)
+    for phrase in (*SKILL_EVAL_JOB_PHRASES, *SKILL_EVAL_SHARED_PHRASES)
+)
+
 _AGENT_INSTRUCTIONS_EXPLICIT_PHRASES = tuple(
     normalized_phrase(phrase)
     for phrase in (
@@ -461,6 +531,86 @@ _MODEL_FINETUNING_EXPLICIT_PHRASES = tuple(
         "dpo or sft",
     )
 )
+
+# `model-compression` holds back every everyday token its phrases are built
+# from. Listed are the phrases that name making a model smaller by changing its
+# weights: a method phrase, a method verb on a model family, a quantization
+# tool. A bare "compress", "quantize", "prune" or "distill" is not: people
+# compress a video, quantize a drum track, prune a hedge and distill whisky. A
+# method verb on "the model" is listed too; it reaches scoring only beside a
+# word of model weights or on its own (`EVERYDAY_SENSE_PHRASES`), because a 3D
+# asset or a business model is compressed and distilled as well.
+_MODEL_COMPRESSION_EXPLICIT_PHRASES = tuple(
+    normalized_phrase(phrase)
+    for phrase in (
+        "model-compression",
+        *MODEL_COMPRESSION_SHARED_PHRASES,
+        *(
+            f"{verb} {family}"
+            for verb in ("quantize", "quantise", "quantizing", "prune", "pruning", "distill", "distil", "distilling")
+            for family in ("llama", "qwen", "deepseek", "gpt-oss")
+        ),
+        *(f"convert {target} to gguf" for target in ("it", "this model", "the model", "our model", "my model")),
+        "quantization-aware training",
+        "quantization aware training",
+        "model quantization",
+        "weight quantization",
+        "llm quantization",
+        "llm compression",
+        "int4 quantization",
+        "int8 quantization",
+        "fp8 quantization",
+        "bitsandbytes quantization",
+        "model pruning",
+        "2:4 sparsity",
+        "model distillation",
+        "smaller student model",
+        "gptq",
+        "awq",
+        "sparsegpt",
+        "llm-compressor",
+        "llmcompressor",
+        "llama-quantize",
+        "모델 양자화",
+        "모델을 양자화",
+        "모델 증류",
+        "모델을 증류",
+        "모델 프루닝",
+        "모델을 프루닝",
+        "모델 가지치기",
+        "양자화 인식 학습",
+    )
+)
+# Korean phrases a game asset, a team's know-how, a photo or distilled water
+# share ("3D 모델 경량화", "노하우를 지식 증류", "색상 양자화", "증류수"). They
+# are not pack phrases, because the Korean pack has no everyday-sense row to
+# withdraw them; each counts as this skill's request only beside a word of
+# model weights or a model named by its size
+# (`_MODEL_COMPRESSION_KOREAN_WEIGHT_WORDS`, `names_a_model_by_parameter_count`),
+# or beside the further words its row lists, all of which must be said. Without
+# that, it adds nothing. A word is matched with `phrase_is_spoken`, so a
+# particle after it still counts (`gguf로`, `가중치를`). A bit width or 양자화 is
+# not a weight word here: a game model is quantized to 8 bits for a retro look,
+# and a 3D mesh is compressed with quantized vertices.
+_MODEL_COMPRESSION_KOREAN_WEIGHT_WORDS = tuple(
+    normalized_phrase(word) for word in (*sorted(MODEL_COMPRESSION_ANCHORS), "가중치", "q4_k_m", "q5_k_m", "q8_0")
+)
+_MODEL_COMPRESSION_KOREAN_ANCHORED: dict[str, tuple[tuple[str, ...], ...]] = {
+    normalized_phrase(phrase): tuple(tuple(normalized_phrase(word) for word in words) for words in further)
+    for phrase, further in (
+        ("모델 압축", ()),
+        ("모델을 압축", ()),
+        ("모델 경량화", ()),
+        ("모델을 경량화", ()),
+        ("증류", ()),
+        ("양자화", ()),
+        # Know-how is distilled with no model in the sentence.
+        ("지식 증류", (("모델",),)),
+    )
+}
+# "distill this 70b into an 8b" names the models by their sizes; one size alone
+# is any billion, so it needs a second one or `model` after it.
+_MODEL_COMPRESSION_DISTILL_TOKENS = frozenset({"distill", "distil", "distilling", "distilled"})
 
 # `internal-audit` holds back every everyday token its phrases are built from.
 # Listed are the phrases that name testing or grading an internal control. A
@@ -961,16 +1111,16 @@ _HARNESS_SESSION_INVENTORY_INTENT_PHRASES = (
     "control pane inventory",
     "codex session inventory",
     "claude code session inventory",
-    # omo-runtime hosts; bare "pi" belongs to Raspberry-Pi routing, so pi only
+    # pi-family-runtime hosts; bare "pi" belongs to Raspberry-Pi routing, so pi only
     # appears inside longer phrases here.
-    "senpi session inventory",
+    f"{PI_DISTRIBUTION_HOST} session inventory",
     "opencode session inventory",
-    "omo runtime session inventory",
+    f"{RUNTIME_USER_PHRASE} session inventory",
     "pi session inventory",
     "find previous coding session",
     "recover coding session",
     "previous codex coding session",
-    "previous senpi coding session",
+    f"previous {PI_DISTRIBUTION_HOST} coding session",
     "previous pi coding session",
     "coding session recall",
     "세션 인벤토리",
@@ -1002,11 +1152,11 @@ _HARNESS_SESSION_INVENTORY_CONTEXT_TOKENS = frozenset(
         "codex",
         "claude",
         "hermes",
-        # omo-runtime hosts. Bare "pi" cannot appear here: routing tokens are
+        # pi-family-runtime hosts. Bare "pi" cannot appear here: routing tokens are
         # three characters or longer, so it is unreachable as a token.
-        "senpi",
+        PI_DISTRIBUTION_HOST,
         "opencode",
-        "omo",
+        RUNTIME_SHORT_NAME,
         "wrapper",
         "하네스",
         "세션",
@@ -1040,6 +1190,9 @@ class _PreparedDefinition:
     # The skill's own name when it is a single word, else "". See
     # `_one_word_self_name`.
     one_word_self_name: str
+    # Trigger-pack phrases every word of which is held back. See
+    # `_held_back_pack_phrases`.
+    held_back_pack_phrases: frozenset[str] = frozenset()
 
 
 _DEFAULT_POLICY = RecommendationPolicy(
@@ -1192,7 +1345,7 @@ _SKILL_POLICIES = {
         ),
         wrapper_guidance=(
             "Prepare native_fault_statement/v1, hypothesis_set/v1 with at least three hypotheses on distinct axes, "
-            "distinguishing_observation_plan/v1, and debugger_session_plan/v1 naming the DAP adapter, breakpoints, "
+            "distinguishing_observation_plan/v1, and debugger_session_plan/v1 naming the instrument, breakpoints, "
             "watchpoints, threads, frames, and values the executor reads at each stop."
         ),
     ),
@@ -1231,6 +1384,19 @@ _SKILL_POLICIES = {
             "Prepare finetune_decision/v1 first, returning do_not_finetune when prompting or retrieval closes the gap; "
             "training_method_choice/v1 from the data's shape; training_data_plan/v1 with a held-out split; "
             "baseline_comparison/v1 on the same eval; and checkpoint_promotion_gate/v1 with its margin and tolerance."
+        ),
+    ),
+    "model-compression": RecommendationPolicy(
+        next_action="prepare_compression_plan",
+        evidence_boundary=(
+            "A compression plan is not a quantized, pruned or distilled model, a measured size, or an eval score until "
+            "observed; OMH compresses nothing and runs no eval, and no smaller model is kept without the uncompressed "
+            "baseline measured on the same task eval."
+        ),
+        wrapper_guidance=(
+            "Prepare compression_target/v1 from the hardware, memory budget and runtime; compression_method_choice/v1 "
+            "with the cheapest method first; calibration_data_plan/v1 kept apart from the held-out eval; and "
+            "compression_quality_gate/v1 comparing baseline and compressed on the person's own task."
         ),
     ),
     "internal-audit": RecommendationPolicy(
@@ -1387,6 +1553,11 @@ _SKILL_POLICIES = {
         evidence_boundary="A brief, storyboard or renderer handoff is not a rendered video, locale/font/voice review, export QA, attachment, receipt or publication. Missing required production evidence keeps HOLD.",
         wrapper_guidance="Prepare audience and language tracks, source/brand rights, three concepts and segment direction, measured timing, selected renderer capability, revision budget, export/QA and source delivery with honest gaps.",
     ),
+    "sprite-forge": RecommendationPolicy(
+        next_action="prepare_sprite_forge",
+        evidence_boundary="A prepared grid contract or command is not generated art or processed frames; require actual frames, aligned sheet and a read-back qc.json with body_scale_cv and anchor_y_std.",
+        wrapper_guidance="Confirm the host image tool's grid sheet on #FF00FF, cell size and baseline, isolated Pillow environment and host timeout; regenerate the source on REGENERATE instead of patching frames.",
+    ),
     "geospatial-analysis": RecommendationPolicy(
         next_action="prepare_geospatial_analysis",
         evidence_boundary="Prepared CRS checks and commands are not observed spatial computation; require actual geometry, metric summary and hash-checked replay outputs.",
@@ -1474,7 +1645,7 @@ _SKILL_POLICIES = {
             "passed tests, or completed review."
         ),
         wrapper_guidance=(
-            "Prepare paired_run_decision/v1; retain not_observed until authenticated persisted receipt evidence exists."
+            "Prepare paired_run_decision/v2; retain not_observed until authenticated persisted receipt evidence exists."
         ),
     ),
     "rules-distill": RecommendationPolicy(
@@ -1567,6 +1738,28 @@ _SKILL_POLICIES = {
             "Prepare the skill health card with catalog/generated/reference surface status, "
             "observed-only failure clusters, pending amendment review, and top safe actions while routing setup "
             "health to doctor and mutation work to reviewed implementation."
+        ),
+    ),
+    "skill-eval": RecommendationPolicy(
+        next_action="prepare_skill_eval",
+        evidence_boundary=(
+            "A skill eval is not a host verdict until `omh skill-eval` output is observed, and a host verdict is not "
+            "proof the skill improves results; lift needs a with/without run on the same tasks."
+        ),
+        wrapper_guidance=(
+            "Run `omh skill-eval <dir>` offline with the install root, quote each host row and the count line, list "
+            "fixes at their source (not_loaded first), and offer the with/without reference only for a lift question."
+        ),
+    ),
+    "bot-template": RecommendationPolicy(
+        next_action="prepare_bot_template",
+        evidence_boundary=(
+            "An applied bot template is not a written persona, an installed skill or a created job until Hermes shows "
+            "them; every job it creates is paused until the person turns it on."
+        ),
+        wrapper_guidance=(
+            "Load the template from the skill's references, stop at the first missing skill with its one line, append "
+            "the persona only after Hermes' approval, create each schedule paused, and list webhooks and apps."
         ),
     ),
     "context-budget-review": RecommendationPolicy(
@@ -1681,6 +1874,16 @@ _SKILL_POLICIES = {
             "budget, extract each range with page anchors, delegate above the range threshold, and close every range "
             "with covered / next / missing before claiming coverage."
         ),
+    ),
+    "repro-audit": RecommendationPolicy(
+        next_action="prepare_repro_audit",
+        evidence_boundary="A prepared audit is not imported evidence review, completed evaluation or scientific reproduction. Missing conditions and human confirmation remain unknown.",
+        wrapper_guidance="Select acc or acc_norm explicitly, import supplied local Harness results, preserve original and derived hashes, and audit normalized conditions without running a model.",
+    ),
+    "systematic-review": RecommendationPolicy(
+        next_action="prepare_systematic_review",
+        evidence_boundary="A prepared screening plan is not reviewer answers, a merge, adjudication or a review team's decision. Agreement is not accuracy; same-model reviewers are not independent.",
+        wrapper_guidance="Agree and freeze the criteria and exclusion codes, prepare blind batches, give reviewers A and B only their own task files, merge, and report conflicts, pending records, agreement and the independence label.",
     ),
     "paper-learning": RecommendationPolicy(
         next_action="prepare_paper_learning",
@@ -1891,6 +2094,11 @@ _SKILL_POLICIES.update(
             evidence_boundary="A GitHub event ops card is not webhook delivery, API mutation, label application, review completion, CI rerun, or fix execution evidence.",
             wrapper_guidance="Classify PR, issue, review, and CI events into triage/review/label/fix-handoff actions; record GitHub mutations only when observed.",
         ),
+        "app-work-intake": RecommendationPolicy(
+            next_action="prepare_app_work_intake_card",
+            evidence_boundary="An app work intake card is not an app read, a plan, a dispatch, a PR, a write-back to the source, a thread, or a fix.",
+            wrapper_guidance="Read the spec, issue, mail, or alert through the bot's own Hermes tool, choose spec to PR, inbox to work, or alert to fix, and record each write to the app only with its read-back.",
+        ),
         "github-issue-intake": RecommendationPolicy(
             next_action="prepare_github_issue_intake",
             evidence_boundary=(
@@ -2003,7 +2211,7 @@ _SKILL_POLICIES.update(
             ),
             wrapper_guidance=(
                 "Prepare connector_task_card/v1 with provider, target object or recipient, allowed action, "
-                "payload summary, auth boundary, confirmation gate, result manifest slots, and a stop condition "
+                "exact outbound payload, auth boundary, confirmation gate, result manifest slots, and a stop condition "
                 "before external app execution is claimed."
             ),
         ),
@@ -2548,7 +2756,7 @@ class _RawMessageKey:
     and a miss reuses the caller's prepared query when it handed one in.
     """
 
-    __slots__ = ("raw", "query", "shielded")
+    __slots__ = ("raw", "query", "shielded", "original")
 
     def __init__(self, raw: str, query: RoutingQuery | None = None) -> None:
         self.raw = raw
@@ -2556,12 +2764,19 @@ class _RawMessageKey:
         # A caller that masked the text before passing it says so on its
         # query; the same masked text unmasked by nobody is another entry.
         self.shielded = bool(query is not None and query.shielded)
+        # So is the same text cut from a different turn (`RoutingQuery.original`).
+        self.original = query.original if query is not None and query.original else raw
 
     def __hash__(self) -> int:
         return hash(self.raw)
 
     def __eq__(self, other: object) -> bool:
-        return isinstance(other, _RawMessageKey) and other.raw == self.raw and other.shielded == self.shielded
+        return (
+            isinstance(other, _RawMessageKey)
+            and other.raw == self.raw
+            and other.shielded == self.shielded
+            and other.original == self.original
+        )
 
 
 def held_back_trigger_tokens(skill: str) -> frozenset[str]:
@@ -2645,6 +2860,7 @@ def _recommend_skills_cached(key: _RawMessageKey, apply_guardrails: bool) -> tup
         explicit_skill = None
     return _scored_field(
         q.raw,
+        raw_query=q.original,
         routing_query=q.scrubbed,
         routing_text=q.routing_text,
         normalized_query=q.normalized,
@@ -2683,6 +2899,7 @@ def scored_field_winner_without_explicit_invocation(query: str | RoutingQuery, c
     prepared_definitions = _prepared_routable_definitions()
     field = _scored_field(
         q.raw,
+        raw_query=q.original,
         routing_query=q.scrubbed,
         routing_text=q.routing_text,
         normalized_query=q.normalized,
@@ -2710,6 +2927,7 @@ def confident_scored_field_winner(query: str | RoutingQuery) -> str:
     prepared_definitions = _prepared_routable_definitions()
     field = _scored_field(
         q.raw,
+        raw_query=q.original,
         routing_query=q.scrubbed,
         routing_text=q.routing_text,
         normalized_query=q.normalized,
@@ -2738,6 +2956,7 @@ def _scored_field(
     name_credited_skill: str | None = None,
     loop_timer: str = LOOP_TIMER_NONE,
     shielded: bool = False,
+    raw_query: str = "",
 ) -> tuple[Recommendation, ...]:
     ecosystem_identity_connector_match = _ecosystem_identity_connector_explicit_match(normalized_query)
     domain_signal = specialist_domain_route_signal(routing_text.scoring_text)
@@ -2759,6 +2978,7 @@ def _scored_field(
             domain_operator_override=domain_operator_override,
             name_credited_skill=name_credited_skill,
             shielded=shielded,
+            raw_query=raw_query,
         )
         if recommendation is not None:
             scored.append(replace(recommendation, suggested_prompt=_suggested_prompt(recommendation.skill, query)))
@@ -2780,6 +3000,12 @@ def _scored_field(
         guards = active_routing_guard_rules(
             normalized_query, query_tokens, explicit_skill=explicit_skill, loop_timer=loop_timer
         )
+        # The frontend design guard admits a whole request, and
+        # `normalized_query` has lost whatever masking, path stripping or a
+        # reply pointer removed ("대시보드 `schema.sql` 다시 디자인해줘" reads as
+        # the bare redesign). The shape must hold on the message as sent too.
+        if (shielded or raw_query) and not frontend_design_guard_applies(normalized_phrase(raw_query)):
+            guards = tuple(guard for guard in guards if guard.id != FRONTEND_DESIGN_GUARD.id)
         public_plugin_connector_match = _public_plugin_connector_readiness_match(normalized_query)
         if (
             ecosystem_identity_connector_match
@@ -2836,11 +3062,38 @@ _SIBLING_POINTER_METADATA_TOKENS = {
 # phrases. Crediting them separately made unrelated sentences containing
 # `models` and `work` look like observed-work inventory requests.
 _WHOLE_PHRASE_ONLY_TRIGGER_TOKENS = {
+    # `write a handover guide`: the skill's closing handover. Each word is everyday alone.
+    # The vault-as-knowledge phrases add `memory`, `recall`, `journal` and `daily`: each is
+    # everyday alone, and the vault guard reaches the recipe when a vault is named beside one.
+    "wiki": frozenset({"write", "handover", "guide", "memory", "recall", "journal", "daily"}),
+    # Every app-work-intake trigger is a phrase of everyday words and app names; its guard
+    # needs the app item and the work it becomes together, so the words alone score nothing
+    # ("set an alert for 5pm", "summarize the Sentry issues").
+    "app-work-intake": frozenset({
+        "app", "work", "intake", "spec", "pr", "notion", "confluence", "linear", "issue", "into", "jira",
+        "ticket", "link", "back", "inbox", "email", "task", "mail", "alert", "fix", "sentry", "error", "datadog",
+    }),
+    # The meeting-to-issues phrases add `issues`, `tickets`, `transcript`, `notes`, `items` and
+    # `into` to operating-rhythm; alone they are a tracker's, a media input's, or no one's.
+    "operating-rhythm": frozenset({"issues", "tickets", "transcript", "notes", "items", "into"}),
+    # The audit phrases name the instrumentation review. Alone these words mean a school's
+    # instruments, a race car's sensors and contact tracing, and `audit` is code review's.
+    "agent-ops-review": frozenset({"instrumentation", "audit", "telemetry", "tracing"}),
     # Only complete domain phrases may score; their ordinary component words
     # must not turn unrelated market, customer or profile mentions into work.
     "market-research": frozenset({"market", "research", "sizing", "tam", "sam", "som", "bottom", "up", "size", "sensitivity", "customer", "evidence", "analysis", "jtbd", "matrix", "competitor", "pricing", "profiles", "competitive"}),
-    # Product/video/reel words alone must not acquire a motion-production owner.
-    "show-reel": frozenset({"show", "reel", "product", "showcase", "video", "animated", "film", "motion", "portfolio", "launch", "teaser"}),
+    # Product/video/reel words alone must not acquire a motion-production owner,
+    # and neither may the idea-video genre words (a logo, an intro, music).
+    "show-reel": frozenset({
+        "show", "reel", "product", "showcase", "video", "animated", "film", "motion", "portfolio", "launch", "teaser",
+        "promo", "promotional", "sizzle", "hyperframes",
+        "graphics", "kinetic", "typography", "logo", "intro", "animation", "music", "visualizer",
+    }),
+    # Sheet/pixel/game/character words alone must not reach sprite processing.
+    "sprite-forge": frozenset({"sprite", "sheet", "pixel", "art", "character", "game", "frames", "2d", "animation"}),
+    # Review, screening and criteria words alone must not reach literature
+    # screening: a systematic code review or applicant screening stays elsewhere.
+    "systematic-review": frozenset({"rapid", "review", "reviewer", "dual", "screening", "title", "abstract", "inclusion", "exclusion", "criteria"}),
     "geospatial-analysis": frozenset({"analysis", "overlay", "spatial", "intersection", "intersect", "layers", "compute", "overlap", "area"}),
     "biomedical-evidence": frozenset({"evidence", "reconciliation", "cross", "check", "variant", "matrix", "capture"}),
     "molecular-docking": frozenset({"molecular", "docking", "rigid", "receptor", "ligand", "poses"}),
@@ -2865,6 +3118,10 @@ _WHOLE_PHRASE_ONLY_TRIGGER_TOKENS = {
     # data-analysis clarify to a `plan` one, which is the widening this table
     # exists to prevent.
     "plan": frozenset({"make", "write"}),
+    # "pi-family" names the runtime only as a whole phrase: `family` alone is an
+    # everyday word ("is my family ready for the move?") and bare `pi` belongs
+    # to Raspberry-Pi routing.
+    "executor-runtime-readiness": frozenset({"family", "pi"}),
     # `dag-ulw` is reached through its complete phrases ("dag ulw", "ulw dag", ...) and by intent through the
     # heavy-lane redirect in `routing/chat.py`. Its words are held back: `dag` alone is data-pipelines'
     # ("airflow dag"), and `ulw` / `ultrawork` alone are `ultrawork`'s own names.
@@ -2978,6 +3235,11 @@ _WHOLE_PHRASE_ONLY_TRIGGER_TOKENS = {
     # is untouched.
     "verification-gate": frozenset(
         {
+            # `run the release gate` and `release gate check` count whole: these words
+            # alone dispatched "run the release gate at the dam". Holding `gate` also
+            # makes bare `quality gate` ask instead of dispatching; its longer forms
+            # still dispatch.
+            "release", "run", "check", "gate",
             "artifact",
             "editing",
             "file",
@@ -3109,6 +3371,50 @@ _WHOLE_PHRASE_ONLY_TRIGGER_TOKENS = {
             "write",
         }
     ),
+    # `model-compression` is built from "compress", "quantize", "prune",
+    # "distill" and their nouns, from "model", "weight", "student", "smaller"
+    # and "structured", and from number formats a database or a GPU spec also
+    # names (int8, fp8, 4-bit) -- a compressed video, a quantized drum track, a
+    # pruned hedge, distilled whisky, a teacher-student ratio, an earthquake's
+    # magnitude and an int8 column all say them. Only the complete phrases score; the four tool
+    # names that mean nothing else stay creditable: `gptq`, `awq`, `sparsegpt`,
+    # `bitsandbytes`.
+    "model-compression": frozenset(
+        {
+            "4-bit",
+            "8-bit",
+            "aware",
+            "bit",
+            "compress",
+            "compression",
+            "distill",
+            "distillation",
+            "fp8",
+            "int8",
+            "into",
+            "knowledge",
+            "magnitude",
+            "make",
+            "model",
+            "our",
+            "post",
+            "post-training",
+            "prune",
+            "pruning",
+            "quantization",
+            "quantization-aware",
+            "quantize",
+            "quantized",
+            "smaller",
+            "structured",
+            "student",
+            "the",
+            "this",
+            "training",
+            "unstructured",
+            "weight",
+        }
+    ),
     # `model-finetuning` is built from "fine", "tune", "tuning", "model",
     # "data", "checkpoint", "baseline", "eval", "adapter", "preference",
     # "promote" and "supervised" -- a fine-tuned email, a workout that needs
@@ -3144,6 +3450,24 @@ _WHOLE_PHRASE_ONLY_TRIGGER_TOKENS = {
             "tuned",
             "tuning",
             "verifiable",
+        }
+    ),
+    # `skill-eval` is built from "skill", "eval", "evaluate", "load", "good",
+    # "harness", "check" and "compatibility" -- "explain these three functions:
+    # parse_args, load_config, and run_main" reached it on `load` alone (main's
+    # inline-functions negative). Only its complete phrases score.
+    "skill-eval": frozenset(
+        {
+            "any",
+            "check",
+            "compatibility",
+            "eval",
+            "evaluate",
+            "good",
+            "harness",
+            "load",
+            "skill",
+            "will",
         }
     ),
     # `internal-audit` is built from "internal", "control", "audit", "test",
@@ -3422,6 +3746,9 @@ _WHOLE_PHRASE_ONLY_TRIGGER_TOKENS = {
     # (the skill name), `cve`, `gpl` and `agpl`.
     "security-event-response": frozenset(
         {
+            # The words of the incident phrases: each is everyday alone, so only the
+            # whole phrase says something is happening.
+            "account", "takeover", "suspected", "unauthorized", "access", "exfiltrating", "customer", "data",
             "advisory",
             "alert",
             "analysis",
@@ -3754,8 +4081,39 @@ _WHOLE_PHRASE_ONLY_TRIGGER_TOKENS = {
     # they claimed finance chat and every review request. Complete phrases
     # ("tech debt", "debt ledger", ...) carry the intent; no single token is
     # unambiguous alone.
+    # The architecture-deepening phrases are held the same way, and each one
+    # names the code it is about ("... this codebase", "... this repo"); they
+    # are clarify-only too (`_TECH_DEBT_AUDIT_CLARIFY_ONLY_TRIGGERS`):
+    # "architecture" is ML models, cloud and network infra, buildings, org
+    # charts and system design; "improve" is everyday;
+    # "shallow modules" and "deepening opportunities" are courses and client
+    # accounts. Without the code noun inside the phrase nothing scores, and
+    # the message routes exactly as it did before these phrases existed.
     "tech-debt-audit": frozenset(
-        {"audit", "code", "debt", "is", "ledger", "our", "report", "tech", "technical", "where"}
+        {
+            "architecture",
+            "audit",
+            "code",
+            "codebase",
+            "debt",
+            "deepening",
+            "improve",
+            "in",
+            "is",
+            "ledger",
+            "modules",
+            "of",
+            "opportunities",
+            "our",
+            "repo",
+            "report",
+            "shallow",
+            "tech",
+            "technical",
+            "the",
+            "this",
+            "where",
+        }
     ),
     # `award-bar-score` names its work with words every other lane owns --
     # "design" is the whole materials lane, "review" is code-review, "site",
@@ -3879,6 +4237,8 @@ _WHOLE_PHRASE_ONLY_TRIGGER_TOKENS = {
     # trial phrasings never touched.
     "external-connector-readiness": frozenset(
         {
+            # Its video phrases count whole: the words alone ask for the video, not a connector.
+            "video", "generation", "provider", "text",
             "benchmark",
             "delete",
             "disable",
@@ -4015,8 +4375,16 @@ _WHOLE_PHRASE_ONLY_TRIGGER_TOKENS = {
     # complete phrases. `marquee` is held back because "a marquee signing"
     # is sports vocabulary; `neobrutalism`, `shadcn`, and `tooltip` stay
     # creditable as distinctive UI vocabulary.
+    # The rendered-scene lane builds its phrases from "scene", "voxel",
+    # "art", and the "three" of three.js: credited alone they name this
+    # workflow for a crime scene, voxel-based morphometry, and a city's art
+    # scene. `webgl` and `threejs` stay creditable.
     "frontend": frozenset(
         {
+            "scene",
+            "voxel",
+            "art",
+            "three",
             "effect",
             "hero",
             "scroll",
@@ -4048,6 +4416,14 @@ _WHOLE_PHRASE_ONLY_TRIGGER_TOKENS = {
             "feels",
             "like",
             "screams",
+            # The design-to-code phrases ("figma frame", "implement this figma") add these;
+            # a Figma file to export, a picture frame, or code sent by Friday is not a UI.
+            "figma",
+            "frame",
+            "code",
+            "implement",
+            "build",
+            "this",
         }
     ),
     # `anti-slop pass`, `anti-slop review`, `anti-slop sweep`, `ai slop`, and
@@ -4085,6 +4461,7 @@ _WHOLE_PHRASE_ONLY_TRIGGER_TOKENS = {
     # logging", and turned "how much does it cost" from a direct answer into
     # a clarify. Only the complete phrases score.
     "websearch-setup": frozenset({"backend", "costs", "free", "much", "tier", "too"}),
+    "rules-distill": frozenset({"distill"}),
 }
 
 
@@ -4236,6 +4613,43 @@ def _shipped_latin_pack_phrases() -> dict[str, frozenset[str]]:
     }
 
 
+# Trigger-pack languages whose held-back phrases credit once per skill per
+# message (see `_held_back_pack_phrases`). An explicit opt-in: a pack built on
+# the rule that every everyday word is held back belongs here, and one whose
+# held-back phrases are meant to sum does not.
+_ONE_HELD_BACK_PHRASE_PACK_LANGUAGES = frozenset({"ru"})
+
+
+def _held_back_pack_phrases(name: str, holdback: frozenset[str]) -> frozenset[str]:
+    """`name`'s trigger-pack phrases whose every word is held back, normalized.
+
+    Such a phrase is evidence only as a whole, worth one phrase credit and
+    nothing else, so it asks rather than dispatches. Two of them in one
+    message are still one piece of evidence: the words of "monthly report for
+    the bosses" and "report to management" overlap, and an everyday sentence
+    can say both, so crediting each one summed two everyday phrases into a
+    dispatch (#2301). Scoring credits at most one of these per skill per
+    message, for the packs named in `_ONE_HELD_BACK_PHRASE_PACK_LANGUAGES`
+    only. The Korean pack was written the other way: its nested and paired
+    phrases (`차트 스타일링` holding `스타일링`'s words, `모델 서빙` beside
+    `서빙 벤치마크`) are meant to add up, so it keeps scoring every phrase,
+    and so does the English catalog.
+    """
+    phrases = {
+        normalized_phrase(phrase)
+        for pack in _trigger_pack_packs()
+        if pack.language in _ONE_HELD_BACK_PHRASE_PACK_LANGUAGES
+        for skill, pack_phrases in pack.skills
+        if skill == name
+        for phrase in pack_phrases
+    }
+    return frozenset(
+        phrase
+        for phrase in phrases
+        if (words := routing_tokens(phrase, stopwords=_STOPWORDS)) and words <= holdback
+    )
+
+
 def shipped_latin_pack_phrases(skill: str) -> frozenset[str]:
     """`skill`'s shipped pack phrases that score only as whole phrases."""
     return _shipped_latin_pack_phrases().get(skill, frozenset())
@@ -4358,10 +4772,21 @@ def _one_word_self_name(definition: SkillDefinition) -> str:
     return "" if (" " in name or "-" in name) else name
 
 
+# Triggers that score but are never written into generated skill text
+# (`SCORING_ONLY_TRIGGERS` in the interop names): the runtime's short name is
+# an external product name the repo does not ship, yet a user who types it
+# still means this skill.
+_SCORING_ONLY_TRIGGERS = SCORING_ONLY_TRIGGERS
+_OPS_REVIEW_KOREAN_PAIR = tuple(normalized_phrase(word) for word in ("리스크", "블로커"))
+
+
 def _prepare_definition(definition: SkillDefinition) -> _PreparedDefinition:
     triggers = definition.triggers + tuple(
         phrase
-        for phrase in _user_trigger_pack_phrases().get(definition.name, ())
+        for phrase in (
+            *_user_trigger_pack_phrases().get(definition.name, ()),
+            *_SCORING_ONLY_TRIGGERS.get(definition.name, ()),
+        )
         if phrase not in definition.triggers
     )
     trigger_phrases = tuple(normalized_phrase(trigger) for trigger in triggers)
@@ -4369,6 +4794,7 @@ def _prepare_definition(definition: SkillDefinition) -> _PreparedDefinition:
     metadata_tokens = frozenset(
         _tokens(" ".join((definition.name, definition.description, definition.use_when)))
     ) - _SIBLING_POINTER_METADATA_TOKENS.get(definition.name, frozenset())
+    holdback = _trigger_token_holdback_for(definition.name)
     return _PreparedDefinition(
         definition=definition,
         policy=_policy_for(definition),
@@ -4376,7 +4802,7 @@ def _prepare_definition(definition: SkillDefinition) -> _PreparedDefinition:
         command_trigger_phrases=tuple(trigger for trigger in trigger_phrases if trigger in _COMMAND_TRIGGER_PHRASES),
         plain_trigger_phrases=tuple(trigger for trigger in trigger_phrases if trigger and trigger not in _COMMAND_TRIGGER_PHRASES),
         trigger_tokens=frozenset(_tokens(" ".join(trigger for trigger in triggers if trigger not in phrase_only)))
-        - _trigger_token_holdback_for(definition.name),
+        - holdback,
         name_phrase=normalized_phrase(definition.name),
         description_phrase=normalized_phrase(definition.description),
         use_when_phrase=normalized_phrase(definition.use_when),
@@ -4384,6 +4810,7 @@ def _prepare_definition(definition: SkillDefinition) -> _PreparedDefinition:
         phase_phrase=normalized_phrase(definition.phase),
         metadata_tokens=metadata_tokens,
         one_word_self_name=_one_word_self_name(definition),
+        held_back_pack_phrases=_held_back_pack_phrases(definition.name, holdback),
     )
 
 
@@ -4399,6 +4826,7 @@ def _score_definition(
     domain_operator_override: DomainOperatorOverride | None,
     name_credited_skill: str | None = None,
     shielded: bool = False,
+    raw_query: str = "",
 ) -> Recommendation | None:
     definition = prepared.definition
     policy = prepared.policy
@@ -4417,7 +4845,7 @@ def _score_definition(
     # eighth meant editing the function every skill is scored by. The rules
     # live in `_SKILL_OFFERS_ITSELF` at the foot of this module now: same
     # predicates, same evaluation order, one row per skill.
-    offers_itself = _offers_itself_predicate(definition.name, shielded=shielded)
+    offers_itself = _offers_itself_predicate(definition.name, shielded=shielded, raw=raw_query)
     if (
         offers_itself is not None
         and (
@@ -4431,6 +4859,14 @@ def _score_definition(
     ):
         return None
     if explicit_skill != definition.name and everyday_sense_phrase_unanchored(definition.name, normalized_query):
+        return None
+    if explicit_skill != definition.name and definition.name == "skill-eval" and skill_eval_korean_unanchored(
+        normalized_query
+    ):
+        return None
+    if explicit_skill != definition.name and definition.name == "bot-template" and bot_template_korean_unanchored(
+        normalized_query
+    ):
         return None
 
     if definition.name == explicit_skill:
@@ -4460,10 +4896,16 @@ def _score_definition(
     if definition.name == "spend-gate":
         trigger_text = _spend_gate_clause(normalized_query)
         query_tokens = _tokens(trigger_text)
+    held_back_pack_phrase_scored = False
     for trigger_phrase in prepared.plain_trigger_phrases:
         if trigger_phrase == self_name:
             continue
         if _trigger_phrase_match(trigger_text, trigger_phrase):
+            # One held-back pack phrase per skill: see `_held_back_pack_phrases`.
+            if trigger_phrase in prepared.held_back_pack_phrases:
+                if held_back_pack_phrase_scored:
+                    continue
+                held_back_pack_phrase_scored = True
             score += 6
             matched.add(f"trigger:{trigger_phrase}")
 
@@ -4593,6 +5035,15 @@ def _score_definition(
     if definition.name == "llm-app-dev" and _llm_app_dev_explicit_match(normalized_query):
         score += 30
         matched.add("direct:llm_app_dev")
+    # `리스크` and `블로커` are held back one by one, so either word alone names
+    # nothing; said together, in any order or joiner, they are this review's pair.
+    # Each must sit inside one token (`리스크블로커`, `주요리스크와` included): a cue
+    # match on the spaceless copy would find `리스크` across `갤러리 스크린샷`.
+    if definition.name == "ops-review" and all(
+        any(word in token for token in query_tokens) for word in _OPS_REVIEW_KOREAN_PAIR
+    ):
+        score += 12
+        matched.add("direct:ops_review_risks_and_blockers")
     if definition.name == "todo-checklist" and _todo_checklist_explicit_match(normalized_query):
         score += 30
         matched.add("direct:todo_checklist")
@@ -4608,6 +5059,15 @@ def _score_definition(
     if definition.name == "model-finetuning" and _model_finetuning_explicit_match(normalized_query):
         score += 30
         matched.add("direct:model_finetuning")
+    if definition.name == "model-compression" and _model_compression_explicit_match(normalized_query, query_tokens):
+        score += 30
+        matched.add("direct:model_compression")
+    if definition.name == "skill-eval" and _skill_eval_explicit_match(normalized_query):
+        score += 30
+        matched.add("direct:skill_eval")
+    if definition.name == "bot-template" and _bot_template_explicit_match(normalized_query):
+        score += 30
+        matched.add("direct:bot_template")
     if definition.name == "data-pipelines" and _data_pipelines_explicit_match(normalized_query):
         score += 30
         matched.add("direct:data_pipelines")
@@ -4658,6 +5118,11 @@ def _score_definition(
     if definition.name == "failure-signal-audit" and _failure_signal_audit_explicit_match(normalized_query):
         score += 34
         matched.add("direct:failure_signal_audit")
+    # A review phrase OF a topic is the literature sense; one phrase's worth,
+    # so the bare `review` other skills credit no longer leads it.
+    if definition.name == "systematic-review" and _systematic_review_names_a_topic(normalized_query):
+        score += 6
+        matched.add("direct:literature_review_topic")
     if ecosystem_identity_connector_match:
         score += 36
         matched.add("direct:ecosystem_identity_connector")
@@ -4694,6 +5159,14 @@ def _score_definition(
         if glob and query_tokens & _tokens(" ".join(definition.triggers)):
             score += PATH_GLOB_SCORE
             matched.add(f"path:{glob}")
+
+    if (
+        definition.name == "tech-debt-audit"
+        and matched & _TECH_DEBT_AUDIT_CLARIFY_ONLY_TRIGGERS
+        and not {label for label in matched if not label.startswith("metadata:")}
+        - _TECH_DEBT_AUDIT_CLARIFY_ONLY_TRIGGERS
+    ):
+        score = min(score, _TECH_DEBT_AUDIT_CLARIFY_ONLY_SCORE_CAP)
 
     if score <= 0:
         return None
@@ -5493,6 +5966,45 @@ def _model_finetuning_explicit_match(normalized_query: str) -> bool:
     return any(_explicit_phrase_match(normalized_query, phrase) for phrase in _MODEL_FINETUNING_EXPLICIT_PHRASES)
 
 
+def _model_compression_explicit_match(normalized_query: str, query_tokens: set[str]) -> bool:
+    """A phrase that names compressing a model, a distill verb on models named by size, or a Korean anchored phrase.
+
+    The English shared phrases are in the explicit list: the everyday-sense
+    check withdrew the skill before this runs when one arrived unanchored.
+    """
+    if any(phrase_is_spoken(normalized_query, phrase) for phrase in _MODEL_COMPRESSION_EXPLICIT_PHRASES):
+        return True
+    sized_model = names_a_model_by_parameter_count(normalized_query)
+    if sized_model and query_tokens & _MODEL_COMPRESSION_DISTILL_TOKENS:
+        return True
+    weight_word = sized_model or any(
+        phrase_is_spoken(normalized_query, word) for word in _MODEL_COMPRESSION_KOREAN_WEIGHT_WORDS
+    )
+    for phrase, further in _MODEL_COMPRESSION_KOREAN_ANCHORED.items():
+        if not phrase_is_spoken(normalized_query, phrase):
+            continue
+        if weight_word or any(all(phrase_is_spoken(normalized_query, word) for word in words) for words in further):
+            return True
+    return False
+
+
+def _skill_eval_explicit_match(normalized_query: str) -> bool:
+    """A phrase that names checking a skill against its hosts, in English or anchored Korean."""
+    if any(phrase_is_spoken(normalized_query, phrase) for phrase in _SKILL_EVAL_EXPLICIT_PHRASES):
+        return True
+    return skill_eval_korean_match(normalized_query)
+
+
+def _bot_template_explicit_match(normalized_query: str) -> bool:
+    """A template id named as a template, an anchored "bot template" (the unanchored and code senses returned None
+    before scoring), or the Korean phrase beside an anchor."""
+    if bot_template_names_the_job(normalized_query):
+        return True
+    if any(phrase_is_spoken(normalized_query, normalized_phrase(phrase)) for phrase in BOT_TEMPLATE_SHARED_PHRASES):
+        return True
+    return bot_template_korean_match(normalized_query)
+
+
 def _data_pipelines_explicit_match(normalized_query: str) -> bool:
     return any(_explicit_phrase_match(normalized_query, phrase) for phrase in _DATA_PIPELINES_EXPLICIT_PHRASES)
 
@@ -5927,10 +6439,35 @@ def _market_research_method_phrases() -> tuple[tuple[str, ...], ...]:
     return tuple(sorted(phrases, key=len, reverse=True))
 
 
+# A Korean request puts its verb last, so the lead rule below cannot read one. It
+# is admitted when the method phrase sits right before the requested verb, as whole
+# words: "치과 시장 규모 추정해줘" and "경쟁사 분석해줘" ask for the method. "시장 규모
+# 뜻 정리해줘" tidies a word, "광장시장 규모 계산해줘" is a place, and "시장 규모
+# 슬라이드 보내줘" has another verb. A verb outside the closed list stays out.
+_MARKET_RESEARCH_KOREAN_METHODS = (("시장", "규모"), ("시장규모",), ("경쟁사", "분석"), ("경쟁사분석",))
+_MARKET_RESEARCH_KOREAN_VERBS = frozenset({"정리", "분석", "조사", "추정", "계산", "산정"})
+
+
+def _market_research_korean_request(message: str) -> bool:
+    request = korean_request(message)
+    if request is None:
+        return False
+    before = tuple(
+        without_particle(word) for word in request.words[: request.predicate_index] if word not in SOFTENERS
+    )
+    said = (*before, request.predicate)
+    return any(
+        said[-len(method) :] == method or (request.predicate in _MARKET_RESEARCH_KOREAN_VERBS and before[-len(method) :] == method)
+        for method in _MARKET_RESEARCH_KOREAN_METHODS
+    )
+
+
 def _market_research_offers_itself(normalized_query: str, query_tokens: set[str]) -> bool:
     """Admit only a request that leads with a market method, not a method named in passing."""
     del query_tokens
     message = normalized_query.strip()
+    if _market_research_korean_request(message):
+        return True
     request = after_courtesy(message)
     opener = message[: len(message) - len(request)]
     if "?" in message and ("you" not in _MARKET_RESEARCH_WORD.findall(opener) or "?" in message.rstrip("?")):
@@ -5951,6 +6488,136 @@ def _market_research_offers_itself(normalized_query: str, query_tokens: set[str]
                 return True
             return rest[0] in _MARKET_RESEARCH_FOLLOWERS and (len(rest) == 1 or rest[1] not in _MARKET_RESEARCH_NOT_A_MARKET)
     return False
+
+
+# `repro-audit` compares a HellaSwag record the person holds with what a paper
+# reported. Its phrases name the benchmark only, so they count on one request
+# shape alone, and the whole request must be that shape: one sentence that
+# leads with a comparison verb, names the person's own record, goes straight
+# from the record to a comparison relation and the paper or reported target,
+# and ends in a closed tail of what is compared ("my HellaSwag log against the
+# paper's reported few-shot setting"). Every position is an allow list, so a
+# trailing clause ("... and rescore it", "... with the paper's first author"),
+# a second sentence, or anything outside the record slot refuses; the
+# sentence then routes as it did before the skill. Asking for new numbers
+# cannot fit the shape today, since no position admits a verb; the execution
+# check below is the second, independent guard, so a later widening of any
+# slot still refuses a run, re-run, retrain, fine-tune, benchmark or "again".
+_REPRO_AUDIT_WORD = re.compile(r"[^\W_]+(?:['-][^\W_]+)*")
+_REPRO_AUDIT_LEAD_VERBS = frozenset({"compare", "check", "audit", "verify", "reconcile", "diff"})
+_REPRO_AUDIT_LEAD_FILLERS = frozenset({"whether", "if"})
+_REPRO_AUDIT_OWNERS = frozenset({"my", "our", "this", "these"})
+_REPRO_AUDIT_OWNER_MODIFIERS = frozenset({"own", "local", "latest", "lm-eval", "lm-evaluation-harness", "harness"})
+_REPRO_AUDIT_RECORD_WORDS = frozenset(
+    {"log", "logs", "result", "results", "score", "scores", "number", "numbers", "accuracy",
+     "acc", "norm", "acc-norm", "output", "outputs", "json", "file"}
+)
+_REPRO_AUDIT_RELATIONS = frozenset(
+    {"against", "with", "to", "vs", "versus", "match", "matches", "differ", "differs", "from"}
+)
+_REPRO_AUDIT_RELATION_FILLERS = frozenset({"the", "a", "what", "its", "their"})
+_REPRO_AUDIT_TARGETS = frozenset({"paper", "paper's", "papers", "reported", "published"})
+_REPRO_AUDIT_TAIL = frozenset(
+    {"reported", "conditions", "condition", "settings", "setting", "setup", "numbers", "number", "score",
+     "scores", "results", "result", "table", "few-shot", "count", "acc", "norm", "acc-norm", "metric"}
+)
+_REPRO_AUDIT_EXECUTION = re.compile(
+    r"(?:re-?)?(?:run|runs|running|ran|execut(?:e|es|ed|ing)|evaluat(?:e|es|ed|ing)|train|trains|trained|training"
+    r"|generat(?:e|es|ed|ing)|comput(?:e|es|ed|ing)|download(?:s|ed|ing)?|benchmark(?:s|ed|ing)?)"
+    r"|fine-?tun(?:e|es|ed|ing)|produc(?:e|es|ed|ing)|re-?do(?:es|ing|ne)?|again"
+)
+
+
+def _repro_audit_offers_itself(normalized_query: str, query_tokens: set[str]) -> bool:
+    """Admit a request that is exactly one comparison of the person's HellaSwag record with a paper."""
+    del query_tokens
+    request = after_courtesy(normalized_query.strip()).rstrip("?.! ")
+    if re.search(r"[.!?;,:](?:\s|$)", request):
+        return False
+    words = _REPRO_AUDIT_WORD.findall(request)
+
+    def skip(index: int, allowed: frozenset[str], limit: int = len(words)) -> int:
+        end = index
+        while end < len(words) and end - index < limit and words[end] in allowed:
+            end += 1
+        return end
+
+    if not words or words[0] not in _REPRO_AUDIT_LEAD_VERBS:
+        return False
+    index = skip(1, _REPRO_AUDIT_LEAD_FILLERS, 1)
+    if index == len(words) or words[index] not in _REPRO_AUDIT_OWNERS:
+        return False
+    index = skip(index + 1, _REPRO_AUDIT_OWNER_MODIFIERS)
+    if index == len(words) or words[index] != "hellaswag":
+        return False
+    index = skip(index + 1, _REPRO_AUDIT_RECORD_WORDS)
+    if index == len(words) or words[index] not in _REPRO_AUDIT_RELATIONS:
+        return False
+    index = skip(index + 1, _REPRO_AUDIT_RELATION_FILLERS, 2)
+    if index == len(words) or words[index] not in _REPRO_AUDIT_TARGETS:
+        return False
+    if skip(index + 1, _REPRO_AUDIT_TAIL) != len(words):
+        return False
+    return not any(_REPRO_AUDIT_EXECUTION.fullmatch(word) for word in words)
+
+
+# `systematic-review` reads what its review phrase is a review OF. A literature
+# review names a topic: "a systematic review of statin trials", "a scoping
+# review of telehealth in rural clinics". A software review names something
+# the person owns or points at: "a systematic review of our error handling",
+# "a rapid review of the auth module". A topic carries no owner, pointer or
+# software word anywhere in its clause ("security risks in our app" is the
+# person's own app). A topic earns the skill one phrase's worth more, so the
+# bare `review` code-review credits no longer outranks the whole phrase; a
+# pointed-at software object withdraws the skill from the shortlist. A
+# literature word anywhere ("the migration literature") keeps the skill.
+_SYSTEMATIC_REVIEW_PHRASE = re.compile(r"\b(?:systematic(?: literature)?|scoping|rapid) review\b")
+_SYSTEMATIC_REVIEW_WORD = re.compile(r"[^\W_]+(?:-[^\W_]+)*")
+_SYSTEMATIC_REVIEW_TOPIC_LINKS = frozenset({"of", "on", "about"})
+_SYSTEMATIC_REVIEW_OWNED_OBJECT = frozenset({"the", "this", "that", "these", "those", "our", "my", "your", "their", "its", "all"})
+_SYSTEMATIC_REVIEW_SOFTWARE_WORDS = frozenset(
+    {
+        "code", "codebase", "repo", "repository", "pr", "prs", "diff", "branch", "commit", "commits", "module", "modules",
+        "microservice", "microservices", "api", "apis", "endpoint", "endpoints", "function", "functions", "migration",
+        "migrations", "schema", "auth", "handling", "bug", "bugs", "app", "apps", "service", "services", "stack",
+        "logging", "logs", "tests", "testing", "deployment", "deployments", "infrastructure", "database", "databases",
+        "frontend", "backend", "dependencies", "configuration", "monitoring", "observability", "exceptions", "errors",
+        "error",
+    }
+)
+_SYSTEMATIC_REVIEW_LITERATURE_WORDS = frozenset(
+    {"literature", "studies", "study", "trials", "trial", "papers", "articles", "abstracts", "records", "evidence"}
+)
+
+
+def _systematic_review_objects(normalized_query: str) -> list[list[str]]:
+    """The words after each `of`/`on`/`about` that follows a review phrase."""
+    objects: list[list[str]] = []
+    for match in _SYSTEMATIC_REVIEW_PHRASE.finditer(normalized_query):
+        rest = _SYSTEMATIC_REVIEW_WORD.findall(re.split(r"[.!?;](?:\s|$)", normalized_query[match.end():], maxsplit=1)[0])
+        if len(rest) >= 2 and rest[0] in _SYSTEMATIC_REVIEW_TOPIC_LINKS:
+            objects.append(rest[1:])
+    return objects
+
+
+def _systematic_review_offers_itself(normalized_query: str, query_tokens: set[str]) -> bool:
+    """Withdraw from a review of a pointed-at software object."""
+    del query_tokens
+    if _SYSTEMATIC_REVIEW_LITERATURE_WORDS & set(_SYSTEMATIC_REVIEW_WORD.findall(normalized_query)):
+        return True
+    return not any(
+        words[0] in _SYSTEMATIC_REVIEW_OWNED_OBJECT and _SYSTEMATIC_REVIEW_SOFTWARE_WORDS & set(words)
+        for words in _systematic_review_objects(normalized_query)
+    )
+
+
+def _systematic_review_names_a_topic(normalized_query: str) -> bool:
+    """A review phrase followed by a topic: nothing owned, pointed at or software in its clause."""
+    return any(
+        words[0] not in _SYSTEMATIC_REVIEW_OWNED_OBJECT
+        and not (_SYSTEMATIC_REVIEW_SOFTWARE_WORDS | _SYSTEMATIC_REVIEW_OWNED_OBJECT - {"the", "all"}) & set(words)
+        for words in _systematic_review_objects(normalized_query)
+    )
 
 
 @lru_cache(maxsize=1)
@@ -5980,6 +6647,11 @@ _SKILL_OFFERS_ITSELF: dict[str, Callable[[str, set[str]], bool]] = {
     # (`show_reel_cues.show_reel_request_admitted`). It stands down no guard:
     # a film named inside another request stays that request's.
     "show-reel": lambda normalized_query, query_tokens: show_reel_request_admitted(normalized_query),
+    # `bot-template`: only a spoken template phrase (a template id named as a
+    # template, an anchored "bot template", or the anchored Korean phrase), so
+    # "template" or "bot" alone in "create a prompt template" or "jinja 템플릿
+    # 수정해줘" never makes it the clarify candidate.
+    "bot-template": lambda normalized_query, query_tokens: _bot_template_explicit_match(normalized_query),
     # Changing how a page looks is not operating a browser on it, even when
     # the page is named by a browser phrase ("login page").
     "browser-operator": lambda normalized_query, query_tokens: not appearance_edit_request(query_tokens),
@@ -6028,6 +6700,13 @@ _SKILL_OFFERS_ITSELF: dict[str, Callable[[str, set[str]], bool]] = {
     # (`_market_research_offers_itself`). Like the two gates above it has no
     # boost and stands down no guard.
     "market-research": _market_research_offers_itself,
+    # `repro-audit`: the whole request is one comparison of the person's own
+    # HellaSwag record with a paper's report, every word from an allow list
+    # (`_repro_audit_offers_itself`). No boost, no stand-down.
+    "repro-audit": _repro_audit_offers_itself,
+    # `systematic-review`: not a review of a pointed-at software object
+    # (`_systematic_review_offers_itself`). No stand-down.
+    "systematic-review": _systematic_review_offers_itself,
 }
 # A skill whose admission reads where the data goes reads a stricter predicate
 # when the masker removed quoted, code, link or relayed text from the message
@@ -6037,9 +6716,35 @@ _SKILL_OFFERS_ITSELF: dict[str, Callable[[str, set[str]], bool]] = {
 # (`awareness._rule_suppressed_by_context`).
 _SHIELDED_OFFERS_ITSELF: dict[str, Callable[[str, set[str]], bool]] = {
     "data-share-review": lambda normalized_query, query_tokens: data_share_request_admitted(normalized_query, shielded=True),
+    # `repro-audit` admits a whole request only when every word is in its
+    # shape; a masked quote, code span or link is words the predicate cannot
+    # read, such as a trailing "then rerun it". It never admits a shielded
+    # message, at the cost of a quoted paper title or an arXiv link (#2324).
+    "repro-audit": lambda normalized_query, query_tokens: False,
+    # A closed show-reel form must be the whole message; masked text after it
+    # may be the fault it shows (`show_reel_cues`).
+    "show-reel": lambda normalized_query, query_tokens: show_reel_request_admitted(normalized_query, shielded=True),
 }
 
 
-def _offers_itself_predicate(skill: str, *, shielded: bool) -> Callable[[str, set[str]], bool] | None:
-    """The offers-itself predicate for `skill`, the stricter one when the masker removed text from the message."""
+# A skill whose admission must also hold on the message as the user sent it.
+# Every stage between the raw text and `normalized_query` removes something
+# (masking, status-line scrubbing, path stripping, reply pointers), and only
+# the first reports it as `shielded`; a closed show-reel form is checked on
+# the raw text too, so no stage can hide the fault a clip would show.
+_RAW_TEXT_OFFERS_ITSELF: dict[str, Callable[[str, str, bool], bool]] = {
+    "show-reel": lambda normalized_query, raw, shielded: show_reel_request_admitted(
+        normalized_query, shielded=shielded, raw=raw
+    ),
+}
+
+
+def _offers_itself_predicate(skill: str, *, shielded: bool, raw: str = "") -> Callable[[str, set[str]], bool] | None:
+    """The offers-itself predicate for `skill`, the stricter one when the masker removed text from the message.
+
+    `raw`: the message as sent, for a skill in `_RAW_TEXT_OFFERS_ITSELF`.
+    """
+    raw_reader = _RAW_TEXT_OFFERS_ITSELF.get(skill) if raw else None
+    if raw_reader is not None:
+        return lambda normalized_query, query_tokens: raw_reader(normalized_query, raw, shielded)
     return (shielded and _SHIELDED_OFFERS_ITSELF.get(skill)) or _SKILL_OFFERS_ITSELF.get(skill)

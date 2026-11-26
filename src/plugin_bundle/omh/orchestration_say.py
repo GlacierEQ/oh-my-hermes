@@ -42,6 +42,7 @@ from typing import Any, Final
 # alias is the person's own word for a model, not OMH vocabulary.
 MODEL_DISPLAY_LABELS: Final[dict[str, str]] = {
     "claude-fable-5-1": "Claude Fable 5.1",
+    "claude-fable-5-2": "Claude Fable 5.2",
     "claude-haiku-4-5": "Claude Haiku 4.5",
     "claude-haiku-5-5": "Claude Haiku 5.5",
     "claude-opus-5": "Claude Opus 5",
@@ -49,6 +50,7 @@ MODEL_DISPLAY_LABELS: Final[dict[str, str]] = {
     "claude-sonnet-5-5": "Claude Sonnet 5.5",
     "deepseek-flash": "DeepSeek V4.1 Flash",
     "gemini-3.1-pro": "Gemini 3.1 Pro",
+    "gemini-4-argon": "Gemini 4 Argon",
     "glm-5.3": "GLM 5.3",
     "glm-5.3-flash": "GLM 5.3 Flash",
     "gpt-5.6-luna": "GPT-5.6 Luna",
@@ -58,12 +60,20 @@ MODEL_DISPLAY_LABELS: Final[dict[str, str]] = {
     "gpt-6-luna": "GPT-6 Luna",
     "gpt-6-sol": "GPT-6 Sol",
     "gpt-6.1-sol": "GPT-6.1 Sol",
+    "gpt-6.2-astra": "GPT-6.2 Astra",
+    "gpt-6.2-sol": "GPT-6.2 Sol",
+    "gpt-6.1-terra": "GPT-6.1 Terra",
+    "gpt-6-cyber": "GPT-6 Cyber",
+    "gpt-5.6-cyber": "GPT-5.6 Cyber",
+    "gpt-6-rosalind": "GPT-6 Rosalind",
+    "grok-4.7": "Grok 4.7",
     "grok-build-0.1": "Grok Build 0.1",
     "grok-code-fast": "Grok Code Fast",
     "kimi-k3": "Kimi K3",
     "kimi-k3.1-pro": "Kimi K3.1 Pro",
     "kimi-k3.1-pro-highspeed": "Kimi K3.1 Pro Highspeed",
     "qwen3-coder": "Qwen3-Coder",
+    "qwen4-max": "Qwen4-Max",
 }
 
 # What a routed part is FOR, keyed on the bundle's routable categories
@@ -82,6 +92,12 @@ ROUTE_PURPOSE_PHRASES: Final[dict[str, str]] = {
     "artistry": "unconventional work",
     "simple-work": "small everyday tasks",
     "deep-work": "long, demanding tasks",
+    "google-search": "research grounded in Google Search",
+    "x-search": "live search on X",
+    "review": "an independent attempt to break the change",
+    "swarm": "one of many parallel slices",
+    "forensics": "root-causing a live symptom or a captured trace",
+    "synthesize": "merging many results into one answer",
 }
 ROUTE_NO_PURPOSE_REASONS: Final[dict[str, str]] = {
     "deep": "a strength tier; it names no kind of work",

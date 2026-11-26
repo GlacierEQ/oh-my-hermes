@@ -7,7 +7,7 @@ import re
 import unicodedata
 from typing import Any, Mapping
 
-from ..goal_loop import explicit_loop_invocation_signal
+from ..workflows.loop_command import explicit_loop_invocation_signal
 from ..ingress import CHAT_SOURCES, MESSAGING_CHAT_SOURCES, extract_message_text
 from ..system.tracker_content import normalize_tracker_content
 from ..loopability import assess_loopability
@@ -19,6 +19,13 @@ from .catalog_questions import (
 )
 from .compound_intent import distinct_complete_domain_signals
 from .action_copy import next_action_label as _route_next_action_label
+from .capability_off import (
+    CAPABILITY_NOTE_KEY,
+    CAPABILITY_OFF_KEY,
+    REASON_CODE_NO_ENABLED_CANDIDATE,
+    route_without_disabled_skills,
+)
+from ..plugin_bundle.omh.capability_off import CAPABILITY_OFF_REASON_CODE
 from .candidate_handoff import SHORTLIST_LEXICAL, WEAK_DISPATCH_EVIDENCE, build_candidate_handoff, shortlist_clarification
 from .dispatch_evidence import EVIDENCE_WEAK, GUARD_TRUSTED, dispatch_evidence
 from .decision_contract import build_route_decision_contract
@@ -47,6 +54,8 @@ from ..plugin_bundle.omh.dag_ulw_cues import (
     big_work_for_dag_ulw,
     dag_ulw_control,
     dispatches_dag_ulw,
+    lists_several_code_changes,
+    names_several_features,
     reports_or_asks_after_the_name,
     refuses_dag_ulw,
     splits_without_evidence,
@@ -59,6 +68,7 @@ from ..plugin_bundle.omh.hermes_session_commands import (
     LOOP_TIMER_NATIVE,
     LOOP_TIMERS_ANSWERED_DIRECTLY,
     host_command_turn,
+    host_context_removed,
     loop_timer_verdict,
     person_request_text,
     typed_loop_sets_goal,
@@ -67,7 +77,7 @@ from ..plugin_bundle.omh.route_question_mode import ROUTE_QUESTION_MODE_OFF, rou
 from ..plugin_bundle.omh.spend_signals import SPEND_GATE_PHRASES, spend_request_clause
 from .intent import classify_workflow_intent, scrub_diagnostic_status_text
 from .reference_regions import executable_routing_text, reference_regions
-from .localization import normalized_phrase, prepare_routing_text, routing_tokens
+from .localization import normalized_phrase, phrase_is_spoken, prepare_routing_text, routing_tokens
 from .missed_route import is_missed_route_feedback
 from .omh_help import (
     is_omh_docs_question,
@@ -93,15 +103,17 @@ from .policy import (
     meets_confidence_threshold,
     point_in_time_web_guard_applies,
 )
-from .policy import _doctor_health_guard_applies
+from .policy import _doctor_health_guard_applies, monitor_trigger_guard_applies
 from .policy import asks_to_produce_materials, command_request_is_failure_or_agent_question, guard_label_dispatch_trust
 from .policy import _explicit_skill_candidate_is_negated, employer_hiring_intent
 from .policy import EXPLICIT_INVOCATION_PREFIXES, bare_name_reports_or_asks
 from .policy import _greenfield_project_bootstrap_requested
 from .policy import _hermes_setup_guide_requested
 from .policy import _github_event_ops_guard_applies
+from .policy import app_work_intake_guard_applies, meeting_to_issues_guard_applies
 from .policy import _github_issue_intake_guard_applies
 from .policy import _invocation_token
+from .bot_template_cues import bot_template_id_applied
 from .recommend import (
     has_strong_named_catalog_owner,
     recommendation_for_definition,
@@ -116,6 +128,7 @@ from .route_plan import (
     with_public_skill_names,
 )
 from .task_cards import classify_task, task_card_recommendation
+from .skill_eval_cues import skill_eval_names_the_check
 from .ulw_alias import _retired_name_and_alias_index, resolve_codex_owner_choice_cue, resolve_ulw_alias
 from .visual_qa_cues import (
     BROWSER_VISUAL_QA_COMMAND_PHRASES,
@@ -173,6 +186,14 @@ LOOP_CONSTRUCT_REASON = (
     "A programming or media loop on a timer is a question about that loop, not a request to repeat a "
     "check; answer directly instead of opening an OMH workflow or goal loop."
 )
+# A backlog of separate code changes handed over as a list (`dag_ulw_cues.lists_several_code_changes`) is made in the
+# current session, one change after another. Paired runs measured a dag-ulw graph slower than Hermes alone on such a
+# backlog at equal quality (each child re-reads the shared code), so the list is neither split nor handed to the lane a
+# word in one item scores ("stock", "price", "crash").
+CODE_BACKLOG_REASON = (
+    "A listed backlog of separate code changes: make them in this session, one after another; do not split them "
+    "into a dag-ulw graph or child agents, and do not open an OMH workflow for one item's word."
+)
 # The stable name of each fallback above, carried as the decision's
 # `reason_code` beside its prose. A consumer branches on the code: the prose is
 # for a reader and may be reworded, and the compact `route_decision` contract
@@ -183,6 +204,7 @@ REASON_CODE_HOST_COMMAND_TURN = "host_command_turn"
 REASON_CODE_NATIVE_LOOP_CADENCE = "native_loop_cadence"
 REASON_CODE_TYPED_LOOP_GOAL = "typed_loop_goal"
 REASON_CODE_LOOP_CONSTRUCT = "loop_construct"
+REASON_CODE_CODE_BACKLOG = "code_backlog"
 # The fallbacks answered directly in chat, without a workflow or picker, by
 # code, with the prose each one carries.
 _DIRECT_ANSWER_REASONS = {
@@ -191,6 +213,7 @@ _DIRECT_ANSWER_REASONS = {
     REASON_CODE_NATIVE_LOOP_CADENCE: NATIVE_LOOP_CADENCE_REASON,
     REASON_CODE_TYPED_LOOP_GOAL: TYPED_LOOP_GOAL_REASON,
     REASON_CODE_LOOP_CONSTRUCT: LOOP_CONSTRUCT_REASON,
+    REASON_CODE_CODE_BACKLOG: CODE_BACKLOG_REASON,
 }
 DIRECT_ANSWER_REASON_CODES = frozenset(_DIRECT_ANSWER_REASONS)
 # The direct answers to a loop on a timer: Hermes' own /loop, or a question
@@ -1650,6 +1673,7 @@ def route_chat_message(
     min_confidence: str = "high",
     skill_policy: dict[str, object] | None = None,
     active_design_direction_iteration: Mapping[str, object] | None = None,
+    disabled_skills: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     message = message.strip()
     if not message:
@@ -1668,7 +1692,34 @@ def route_chat_message(
         min_confidence,
         skill_policy=skill_policy,
         active_design_direction_iteration=active_design_direction_iteration,
+        disabled_skills=disabled_skills,
     )
+
+
+def capability_family_verdict(
+    message: str, disabled_skills: Mapping[str, str], *, source: str = "generic"
+) -> dict[str, object]:
+    """What the chat route does about a turned-off family for `message`, or `{}`.
+
+    `{"verdict": "off", ...record}` when the route answers that the family is
+    off, `{"verdict": "note", ...record}` when it asks an open question noting
+    it, `{}` when no turned-off skill was the route's pick. The per-turn hint
+    asks this rather than judging on its own, so the turn and `omh_interact`
+    reach one verdict, from one router pass.
+
+    `source` is the chat source to route as. The hook passes the person's own
+    words (`request_message`, gateway material already stripped), on which
+    every source routes alike; a caller passing a raw gateway turn should
+    name its real source, since a messaging source strips that material first.
+    """
+    if not disabled_skills or not message.strip():
+        return {}
+    route = route_chat_message(message, source=source, disabled_skills=disabled_skills)
+    for verdict, key in (("off", CAPABILITY_OFF_KEY), ("note", CAPABILITY_NOTE_KEY)):
+        record = route.get(key)
+        if isinstance(record, dict):
+            return {"verdict": verdict, **record}
+    return {}
 
 
 def user_trigger_pack_route_hint(message: str) -> dict[str, str]:
@@ -1768,6 +1819,7 @@ def _enriched_route(
     *,
     skill_policy: dict[str, object] | None,
     active_design_direction_iteration: Mapping[str, object] | None = None,
+    disabled_skills: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     """The cached decision plus everything every consumer must see.
 
@@ -1793,7 +1845,11 @@ def _enriched_route(
         source=source,
         min_confidence=min_confidence,
         context=active_design_direction_iteration,
-    ) or _clone_jsonish(_route_chat_message_cached(request, source, limit, min_confidence))
+    ) or _clone_jsonish(
+        _route_chat_message_cached(
+            request, source, limit, min_confidence, message.strip() if host_context_removed(message) else request
+        )
+    )
     _render_routing_prompt_from_turn(route, request, message)
     # Attach the input script here rather than at each ChatRouteDecision site so
     # every route -- fast path, catalog path, and full scoring -- reports it.
@@ -1906,6 +1962,10 @@ def _enriched_route(
                 f"Routing reason: {route.get('reason', '')}"
             )
     route["route_decision"] = build_route_decision_contract(route)
+    if disabled_skills:
+        # Last, so a turned-off skill is taken out of every list built above
+        # (`capability_off`); a home with nothing off never reaches it.
+        route = route_without_disabled_skills(route, disabled_skills, message=message)
     return _apply_skill_governance(route, skill_policy)
 
 
@@ -2021,6 +2081,7 @@ def public_chat_route_payload(
     include_message: bool = False,
     skill_policy: dict[str, object] | None = None,
     active_design_direction_iteration: Mapping[str, object] | None = None,
+    disabled_skills: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     message = message.strip()
     if not message:
@@ -2031,7 +2092,7 @@ def public_chat_route_payload(
         raise ValueError("chat route --limit must be at least 1")
     if min_confidence not in CONFIDENCE_LEVELS:
         raise ValueError(f"unsupported chat route confidence threshold: {min_confidence}")
-    if skill_policy is not None or active_design_direction_iteration is not None:
+    if skill_policy is not None or active_design_direction_iteration is not None or disabled_skills:
         return public_route_payload(
             route_chat_message(
                 message,
@@ -2040,6 +2101,7 @@ def public_chat_route_payload(
                 min_confidence=min_confidence,
                 skill_policy=skill_policy,
                 active_design_direction_iteration=active_design_direction_iteration,
+                disabled_skills=disabled_skills,
             ),
             include_message=include_message,
         )
@@ -2054,15 +2116,20 @@ def public_chat_route_payload(
     )
 
 
-def recommend_route_summary(message: str) -> dict[str, object]:
+def recommend_route_summary(message: str, *, disabled_skills: Mapping[str, str] | None = None) -> dict[str, object]:
     """The chat route's verdict for `message`, as the recommend surfaces show it.
 
     `omh recommend`, the `omh_recommend` plugin tool, and the MCP bridge rank
     with `recommend_skills`; this is the decision chat dispatch makes on top of
-    that ranking, so a reader of either surface sees the same answer.
+    that ranking, so a reader of either surface sees the same answer. A home's
+    turned-off families (`disabled_skills`) are taken out the way chat takes
+    them out, and a request for one carries the `capability_family_off` record.
     """
-    route = public_chat_route_payload(message)
-    return {key: route[key] for key in ("action", "selected_skill", "candidate_skill", "confidence")}
+    route = public_chat_route_payload(message, disabled_skills=disabled_skills)
+    summary = {key: route[key] for key in ("action", "selected_skill", "candidate_skill", "confidence")}
+    if CAPABILITY_OFF_KEY in route:
+        summary[CAPABILITY_OFF_KEY] = route[CAPABILITY_OFF_KEY]
+    return summary
 
 
 def _names_skill_display_label(message: str, skill: str) -> bool:
@@ -2170,6 +2237,7 @@ def _route_chat_message_cached(
     source: str,
     limit: int,
     min_confidence: str,
+    original: str = "",
 ) -> dict[str, object]:
     if host_command_turn(message):
         return _direct_answer_decision(
@@ -2212,14 +2280,28 @@ def _route_chat_message_cached(
         ).to_dict()
     # Built once: the fast paths and the scorer below read its stages instead
     # of each re-deriving the prep chain from `routing_message`.
-    query = RoutingQuery.from_message(routing_message, shielded=executable_message != message)
+    query = RoutingQuery.from_message(
+        routing_message, shielded=executable_message != message, original=original or message
+    )
     # Positive evidence of work over many targets dispatches dag-ulw before any lane's fast path reads one of its
     # words ("upstream", "pytest", "stale"), so the route hint, which starts dag-ulw on the same reading, never
     # starts a run the router did not dispatch. A request that invokes a skill or the loop is that skill's ("use
     # git-workflow: 열린 PR들 전부 리베이스해줘", "omh loop …").
+    # A backlog of separate code changes handed over as a list (`lists_several_code_changes`: four or more items, a
+    # request to make them all) is made in this session (`CODE_BACKLOG_REASON`), read before a lane's word in one item
+    # ("stock", "pipeline", "crash") can claim the whole list. A skill or the loop invoked by name keeps it.
+    explicit_skill = explicit_skill_invocation(routing_message, query=query)
+    if (
+        explicit_skill is None
+        and not explicit_loop_invocation_signal(routing_message)
+        and lists_several_code_changes(routing_message, reference_regions(message).links)
+    ):
+        return _direct_answer_decision(
+            message, source=source, min_confidence=min_confidence, reason_code=REASON_CODE_CODE_BACKLOG
+        ).to_dict()
     if (
         dispatches_dag_ulw(routing_message, reference_regions(message).links)
-        and explicit_skill_invocation(routing_message, query=query) in (None, DAG_ULW)
+        and explicit_skill in (None, DAG_ULW)
         and not explicit_loop_invocation_signal(routing_message)
     ):
         return _dag_ulw_by_evidence_decision(
@@ -2495,9 +2577,13 @@ def _route_chat_message_cached(
         normalized_phrase(routing_message),
         routing_tokens(routing_message),
     )
+    # A spec or issue in another app turned into a PR is app-work-intake: it reads the source and writes the
+    # PR link back, which the plan-to-PR delivery cycle does not.
+    app_work_context = app_work_intake_guard_applies(normalized_phrase(prepare_routing_text(routing_message).scoring_text))
     if (
         not is_missed_route_feedback(routing_message)
         and not github_event_context
+        and not app_work_context
         and classify_workflow_intent(message).intent_class
         not in {"meta_discussion", "feedback_signal"}
     ):
@@ -2551,6 +2637,7 @@ def _route_chat_message_cached(
     explicit_loop_signal = _explicit_loop_signal(routing_message, full_recommendations)
     file_or_text_lookup = is_file_or_text_lookup_question(routing_message) and not (
         (candidate_skill == "source-finder" and "source-finder" in normalized_phrase(routing_message))
+        or (candidate_skill == "skill-eval" and skill_eval_names_the_check(normalized_phrase(routing_message)))
         or (
             candidate_skill == "idea-to-deploy"
             and _greenfield_project_bootstrap_requested(
@@ -2691,7 +2778,10 @@ def _route_chat_message_cached(
         action in {"clarify", "fallback"}
         and selected_skill == _ROUTER_SKILL
         and not explicit_skill
-        and work_over_many_targets(routing_message, reference_regions(message).links)
+        and (
+            work_over_many_targets(routing_message, reference_regions(message).links)
+            or names_several_features(routing_message, reference_regions(message).links)
+        )
     ):
         # Work over many targets without that evidence ("review all open PRs") asks once, with dag-ulw as the skill it
         # asks about; it never dispatches it.
@@ -3650,6 +3740,10 @@ def _file_lookup_fast_path_decision(
         return None
     if not is_file_or_text_lookup_question(routing_message):
         return None
+    # "check SKILL.md compatibility" names a file, but asks for the host-fit
+    # check of the skill it belongs to, not a lookup in it.
+    if skill_eval_names_the_check(normalized_phrase(routing_message)):
+        return None
     # A fully-specified bootstrap-file request ("set up the standard project
     # files for this empty repo") shares vocabulary with a file-lookup
     # question ("files" + "project"/"repo") but is an action, not a question;
@@ -3827,6 +3921,33 @@ _MEMORY_RECALL_INCIDENT_CUES = (
     "forgot my preference",
     "memory was not used",
 )
+# Lessons taken from git history. A re-fix phrase alone also shows up when the
+# work is editing, reverting or reviewing such commits, so the fast path needs
+# BOTH a whole multi-word re-fix phrase and a lesson cue (`lesson`, `lessons`,
+# `교훈`). "fix", "commit", "merge" and "review" alone are never cues. English
+# phrases match as whole words: "fix of fix" must not read inside "fix of fixing
+# the build". Negation ("do not write lessons about the fixes of fixes") cannot
+# be told apart by phrases and is a known limit.
+_INSTINCT_LEDGER_HISTORY_PHRASES: tuple[str, ...] = (
+    "fix of fix",
+    "fixes of fixes",
+    "re-fixed commits",
+    "refixed commits",
+    "다시 고친 커밋",
+    "다시 고친 것들",
+)
+_INSTINCT_LEDGER_LESSON_CUE = re.compile(r"(?<![\w-])lessons?(?![\w-])|교훈")
+
+
+def _instinct_ledger_history_phrase_spoken(text: str, phrase: str) -> bool:
+    """A history phrase counts only as a whole word and next to a lesson cue."""
+    if phrase not in _INSTINCT_LEDGER_HISTORY_PHRASES:
+        return True
+    if phrase.isascii() and re.search(rf"(?<![\w-]){re.escape(phrase)}(?![\w-])", text) is None:
+        return False
+    return _INSTINCT_LEDGER_LESSON_CUE.search(text) is not None
+
+
 _OPERATOR_SURFACE_FAST_PATH_RULES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     (
         "ralplan",
@@ -4074,7 +4195,7 @@ _OPERATOR_SURFACE_FAST_PATH_RULES: tuple[tuple[str, tuple[str, ...], str, str], 
             "메모리 손상",
         ),
         "operator_surface_fast_path:native_debugging",
-        "Clear native-binary fault or crash-debugging request; prepare competing hypotheses, distinguishing observations, and a DAP-driven debugger session plan.",
+        "Clear native-binary fault or crash-debugging request; prepare competing hypotheses, distinguishing observations, and a debugger session plan.",
     ),
     (
         "accessibility-audit",
@@ -4988,6 +5109,7 @@ _OPERATOR_SURFACE_FAST_PATH_RULES: tuple[tuple[str, tuple[str, ...], str, str], 
             "전역 학습 승격",
             "학습 승격",
             "학습 패턴 승격",
+            *_INSTINCT_LEDGER_HISTORY_PHRASES,
         ),
         "operator_surface_fast_path:instinct_ledger",
         "Clear project/global instinct learning request; prepare scoped instinct candidates without automatic hooks, writes, or promotion.",
@@ -5219,6 +5341,16 @@ def _operator_surface_fast_path_decision(
         return None
     if selected_skill == "connector-operator" and _is_connector_operator_setup_or_gateway_request(routing_message):
         return None
+    # "turn Linear issue ENG-42 into a PR" and "turn the meeting transcript into Linear issues" name a
+    # tracker phrase this fast path holds; the work they ask for is app-work-intake's and operating-rhythm's,
+    # which scoring reaches through their guards; applying a template to a bot "for our linear issues" is
+    # bot-template's. "ping me when a Linear issue is assigned to me" holds it too,
+    # but it asks for a monitor recipe, not a connector action.
+    if selected_skill == "connector-operator" and (
+        _app_work_or_meeting_issues_applies(routing_message)
+        or monitor_trigger_guard_applies(normalized_phrase(prepare_routing_text(routing_message).scoring_text))
+    ):
+        return None
     if selected_skill == "live-info-operator" and _is_live_info_operator_setup_or_research_request(routing_message):
         return None
     if selected_skill == "content-operator" and _is_content_operator_research_connector_or_materials_request(routing_message):
@@ -5359,7 +5491,12 @@ def _operator_surface_fast_path_match(
             continue
         if skill == "live-info-operator" and normalized_pattern == "환율" and "전환율" in text:
             continue
+        # "at the same time instead" holds "time in", as a word it does not say.
+        if skill == "live-info-operator" and normalized_pattern == "time in" and not phrase_is_spoken(text, "time in"):
+            continue
         if skill == "memory-new" and _memory_new_scope_overroutes_curation(text):
+            continue
+        if skill == "instinct-ledger" and not _instinct_ledger_history_phrase_spoken(text, phrase):
             continue
         if marker == "operator_surface_fast_path:memory_recall_incident":
             if contains_cue_phrase(message, (phrase,)):
@@ -5653,6 +5790,16 @@ def _is_command_operator_failure_or_coding_request(message: str) -> bool:
             "스택 트레이스",
             "원인 찾아",
         )
+    )
+
+
+def _app_work_or_meeting_issues_applies(message: str) -> bool:
+    normalized_query = normalized_phrase(prepare_routing_text(message).scoring_text)
+    # "apply the meeting-to-issues template to this bot for our linear issues" sets a bot up from a template.
+    return (
+        app_work_intake_guard_applies(normalized_query)
+        or meeting_to_issues_guard_applies(normalized_query)
+        or bot_template_id_applied(normalized_query)
     )
 
 
@@ -7084,7 +7231,9 @@ def _keeps_dag_ulw_by_size(route: Mapping[str, object], request: str) -> bool:
     of the skill ("stop using dag ulw")."""
     regions = reference_regions(request)
     return route.get("candidate_skill") == DAG_ULW and (
-        big_work_for_dag_ulw(regions.executable_text) or work_over_many_targets(regions.executable_text, regions.links)
+        big_work_for_dag_ulw(regions.executable_text)
+        or work_over_many_targets(regions.executable_text, regions.links)
+        or names_several_features(regions.executable_text, regions.links)
     )
 
 
@@ -8064,6 +8213,8 @@ def _clarification(
     if action == "fallback":
         if reason_code == REASON_CODE_FILE_LOOKUP:
             return "Answer this as a file or text lookup, or ask for the target file/path if it is missing."
+        if reason_code == REASON_CODE_CODE_BACKLOG:
+            return "Make the listed code changes in this session, one after another; open no OMH workflow or child agents."
         if reason_code in DIRECT_ANSWER_REASON_CODES:
             return "Answer directly in the current chat; do not open an OMH workflow unless the user asks for one."
         return "Ask which workflow or outcome the user wants before choosing a specialist skill."
@@ -8099,12 +8250,24 @@ def _routing_prompt_template(
 
 
 def _routing_instruction(action: str, selected_skill: str, candidate_skill: str, reason_code: str = "") -> str:
+    if reason_code == CAPABILITY_OFF_REASON_CODE:
+        return (
+            "Do not dispatch: the requested workflow's capability family is turned off in this OMH home. "
+            "Say so and name the command that turns it back on."
+        )
+    if action == "clarify" and not candidate_skill and reason_code == REASON_CODE_NO_ENABLED_CANDIDATE:
+        return "Use the `oh-my-hermes` router and ask one open clarification question without naming a skill."
     if action == "dispatch":
         return f"Use the `{selected_skill}` workflow for this chat message."
     elif action == "clarify":
         return f"Use the `oh-my-hermes` router before dispatching to `{candidate_skill}`."
     if reason_code == REASON_CODE_FILE_LOOKUP:
         return "Answer this as a file or text lookup; do not dispatch to a workflow keyword unless the user explicitly asks."
+    if reason_code == REASON_CODE_CODE_BACKLOG:
+        return (
+            "Make the listed code changes in this session, one after another; do not open an OMH workflow, picker, "
+            "dag-ulw graph, child agents, or coding handoff."
+        )
     if reason_code in DIRECT_ANSWER_REASON_CODES:
         return "Answer directly in chat; do not open an OMH workflow, picker, or coding handoff."
     return "Use the `oh-my-hermes` router and ask one concise clarification question."

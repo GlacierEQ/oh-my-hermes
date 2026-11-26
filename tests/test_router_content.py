@@ -52,7 +52,7 @@ from omh.skills.catalog import (
     primary_harness_for_skill,
     retained_delegation_skill_names,
 )
-from omh.skills.catalog_types import ULW_ENGINE_SKILL_NAMES
+from omh.skills.catalog_types import ULW_ENGINE_SKILL_NAMES, _default_final_checklist
 from omh.skills.expert_question_rendering import (
     expert_question_reference_lines,
     expert_questions_markdown,
@@ -60,6 +60,7 @@ from omh.skills.expert_question_rendering import (
 from omh.skills.render import (
     frontmatter_description,
     loadable_skill_mentions,
+    translate_sibling_mentions,
     workflow_reference_markdown,
     workflow_reference_payload,
     workflow_skill,
@@ -83,6 +84,7 @@ FLAGSHIP_SKILLS = {
 FEATURE_SURFACE_EXPOSURES = {
     "automation-blueprint": ("workflow_skill", True),
     "github-event-ops": ("workflow_skill", True),
+    "app-work-intake": ("workflow_skill", True),
     "github-issue-intake": ("workflow_skill", True),
     "agent-board": ("workflow_skill", True),
     "memory-new": ("workflow_skill", True),
@@ -318,7 +320,22 @@ class RouterContentTests(unittest.TestCase):
         # the skills added since the last raise had used the rest); ~2.8%
         # headroom kept.
         # Three optional science index entries; no eager toolkit bytes.
-        self.assertLess(len(rendered.encode("utf-8")), 33_000)
+        # 33,000 -> 33,194: `systematic-review` adds one 194-byte index line
+        # (32,978 -> 33,172 measured); the existing 22-byte allowance is kept,
+        # not widened.
+        # 33,194 -> 33,236: the memory-new and memory-sync index lines name omh_memory recall for
+        # a past decision (33,172 -> 33,214 measured); the same 22-byte allowance is kept.
+        # 33,236 -> 33,274: descriptions backtick the sibling they hand to, so the rewrite can give it its
+        # label (33,214 -> 33,252 measured); the same 22-byte allowance is kept.
+        # 33,274 -> 33,622: `model-compression` adds its index entry (33,138 ->
+        # 33,486 measured, +348); the existing allowance is kept, not widened.
+        # 33,622 -> 33,892: `skill-eval` adds its index entry (33,486 -> 33,756
+        # measured, +270); the existing allowance is kept, not widened.
+        # 33,892 -> 34,218: `app-work-intake` adds its index entry (33,714 ->
+        # 34,040 measured on main 04ea74a2e, +326); the 178-byte allowance is kept.
+        # 34,218 -> 34,468: `bot-template` adds its index entry (34,040 -> 34,290
+        # measured, +250); the existing allowance is kept, not widened.
+        self.assertLess(len(rendered.encode("utf-8")), 34_468)
         for line in rendered.splitlines():
             self.assertLess(len(line.encode("utf-8")), 400, line)
 
@@ -378,7 +395,10 @@ class RouterContentTests(unittest.TestCase):
         # 13,300 -> 13,600: the same tail gives the persona the reply
         # language, speech level, endings, and progress updates, with the
         # user's language as the fallback; 13,329 measured.
-        self.assertLess(len(router.content.encode("utf-8")), 13_600)
+        # 13,600 -> 13,900: the tail's one reply line takes back the
+        # turn-ending rule (delivered work ends without a question; a choice
+        # the person asked to make ends on one specific question); 13,701 measured.
+        self.assertLess(len(router.content.encode("utf-8")), 13_900)
         self.assertIn("best-effort Hermes prompt guidance", router.content)
         self.assertIn("does not override Hermes core routing", router.content)
         self.assertIn(router_keyword_summary(), router.content)
@@ -464,7 +484,10 @@ class RouterContentTests(unittest.TestCase):
         # 13,300 -> 13,600: the same tail gives the persona the reply
         # language, speech level, endings, and progress updates, with the
         # user's language as the fallback; 13,329 measured.
-        self.assertLess(len(router.content.encode("utf-8")), 13_600)
+        # 13,600 -> 13,900: the tail's one reply line takes back the
+        # turn-ending rule (delivered work ends without a question; a choice
+        # the person asked to make ends on one specific question); 13,701 measured.
+        self.assertLess(len(router.content.encode("utf-8")), 13_900)
         # 24,500 -> 25,300: workflow-registry.md carries one row per routable
         # workflow, so the `web-research` split and the `codebase-uml` row
         # together took it past the old ceiling; one row per new skill, and
@@ -503,10 +526,31 @@ class RouterContentTests(unittest.TestCase):
             # existing 226-byte allowance (less than the historical ~2%).
             # The feature regression reconstructs and pins the legacy rows;
             # every other reference keeps the original 33,100 ceiling.
-            limit = 33_344 if (
-                template.skill_name == "oh-my-hermes"
-                and template.relative_path == "references/workflow-registry.md"
-            ) else 33_100
+            # 33,344 -> 33,565: merged with main, the registry measures 33,561:
+            # main's 33,340 (ru pack and repro-audit rows) plus sprite-forge's
+            # 221-byte row and operator token. Each side alone fit; main's
+            # 4-byte headroom is kept, not widened.
+            # 33,565 -> 33,841: `systematic-review` adds its 255-byte trigger
+            # row and 21-byte researcher token (33,561 -> 33,837 measured); the
+            # same 4-byte headroom is kept.
+            # catalog-index takes its own ceiling, the one the index test
+            # above holds: `systematic-review`'s 194-byte line moves it past
+            # 33,100 (33,172 measured).
+            if template.skill_name == "oh-my-hermes" and template.relative_path == "references/workflow-registry.md":
+                # 33,841 -> 34,079: `model-compression` adds its 217-byte trigger
+                # row and 21-byte planner token (33,808 -> 34,046 measured, +238);
+                # the existing headroom is kept.
+                # 34,079 -> 34,283: `skill-eval` adds its 190-byte trigger row and
+                # 14-byte tracker token (34,046 -> 34,250 measured, +204).
+                # 34,283 -> 34,492: `app-work-intake` adds its trigger row and
+                # token (34,250 -> 34,459 measured on main 04ea74a2e, +209).
+                # 34,492 -> 34,641: `bot-template` adds its 133-byte trigger row and
+                # 16-byte operator token (34,459 -> 34,608 measured, +149).
+                limit = 34_641
+            elif template.skill_name == "oh-my-hermes" and template.relative_path == "references/catalog-index.md":
+                limit = 34_468
+            else:
+                limit = 33_100
             self.assertLess(len(template.content.encode("utf-8")), limit, template.relative_path)
 
         schemas = (
@@ -1060,13 +1104,27 @@ class RouterContentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"unsafe picker aliases.*\$unsafe"):
             frontmatter_description(malformed)
 
+    def test_native_debugging_routed_text_promises_no_debug_adapter(self) -> None:
+        # Hermes has no debug-adapter client, so a route that names one sends the
+        # executor after something it cannot reach. An adapter belongs in the skill's
+        # body, not in text a route reads; `dap debugger` stays a trigger because a
+        # person may still ask for it.
+        definition = next(item for item in builtin_definitions() if item.name == "native-debugging")
+        route = route_chat_message("my binary segfaults, there is a core dump", source="discord")
+        top = recommend_module.recommend_skills("my binary segfaults, there is a core dump", limit=1)[0]
+        self.assertEqual(route["selected_skill"], "native-debugging")
+        self.assertEqual(top["skill"], "native-debugging")
+        for text in (definition.description, definition.use_when, str(route.get("reason")), str(top["wrapper_guidance"])):
+            with self.subTest(text=text):
+                self.assertNotIn("DAP", text)
+
     def test_picker_sibling_families_name_their_decision_boundaries(self) -> None:
         definitions = {definition.name: definition for definition in builtin_definitions()}
         expected_fragments = {
             "memory-new": ("omh-memory-sync", "decision-recall"),
             "memory-sync": ("memory-new", "decision-recall"),
             "research": ("research-brief", "web-research", "research-department"),
-            "research-brief": ("ulw-research", "research-department"),
+            "research-brief": ("source-finder", "research-department"),
             "research-department": ("research-brief", "source-finder"),
             "source-finder": ("ulw-research", "research-brief"),
             "executor-runtime-readiness": ("external-connector-readiness", "toolbelt-readiness"),
@@ -1200,20 +1258,25 @@ class RouterContentTests(unittest.TestCase):
             "native subagents -> Hermes delegation when available, otherwise sequential lanes",
             "Record observed delegation results",
             "not_observed",
-            # Completion is not itself a user decision or a reason to append a
-            # generic question or an unrelated list of actions nobody requested.
-            "real unresolved user decision or a useful briefing discussion",
-            "one specific, content-linked question",
-            "Completed work needs no question",
-            "omit unrelated non-action footers and generic offers to continue",
             # The reply is written in the user's words and the host's voice;
             # the persona owns the reply language, speech level, and endings,
-            # progress updates too, the user's language is the fallback, and
-            # OMH's record vocabulary stays in records and tool calls.
+            # progress updates too, the user's language is the fallback. That
+            # core stays in every body as one line; the record-term clause and
+            # the turn-ending detail live once in the shared rail (pinned below).
             "Reply in the user's own words and the host's own voice",
             "owns reply language, tone, speech level, and sentence endings, progress updates included",
             "where it sets no language, use the one the user wrote in",
             "OMH shapes structure and content only",
+            # The turn-ending rule itself stays in the line: a live run loaded
+            # the rail in none of its turns, so a pointer alone did not carry
+            # it, and decision replies stopped ending on one question. The test
+            # is the request itself, with delivery as the default: a clause
+            # keyed on "a decision remains" let open points inside finished
+            # work read as decisions and drew questions onto it.
+            "When the requested output is delivered, put any open points inside the result and end with no question or offer",
+            "only when the person asked to choose or decide and that choice is still theirs, end with one specific question about it",
+            "not a list, a generic offer, or a footer",
+            "the shared rail's Reply Language And Host Voice and Turn Ending sections hold the full rule",
         )
         templates = {template.name: template.content for template in builtin_skill_templates()}
         rendered_files = {
@@ -1240,20 +1303,55 @@ class RouterContentTests(unittest.TestCase):
         for name, content in sorted(templates.items()):
             if name != "oh-my-hermes":
                 self.assertIn("Preserve workflow intent and stop conditions", content, name)
+            # The clauses that left the body are not repeated in it.
+            self.assertNotIn("OMH's record terms (surface, lane", content, name)
+        from omh.skills.render import SHARED_RAIL_REFERENCE_PATH
+
+        rail = next(
+            template.content for template in builtin_skill_reference_templates()
+            if f"{omh_skill_display_name(template.skill_name)}/{template.relative_path}"
+            == SHARED_RAIL_REFERENCE_PATH
+        )
+        for fragment in (
+            # What the body's paragraph said beyond its one line, held by the rail.
+            "OMH's record vocabulary is for records and tool calls, not for the sentence the user reads",
+            "`surface`, `lane`, `wrapper`, `handoff`",
+            "`evidence boundary`",
+            "`not_observed`",
+            "A user who names a term gets it explained",
+            "OMH shapes what Hermes checks, records, and how a reply is structured, never how it sounds",
+            "real unresolved user decision or a useful briefing discussion",
+            "one specific, content-linked question",
+            "Completed work needs no question",
+            "omit unrelated non-action footers and generic offers to continue",
+        ):
+            with self.subTest(rail_fragment=fragment):
+                self.assertIn(fragment, rail)
 
     def test_brief_endings_are_relevant_in_native_and_portable_guidance(self) -> None:
-        """Pin delivered guidance, not a context-free ban on negative sentences."""
+        """Pin delivered guidance, not a context-free ban on negative sentences.
+
+        A portable body has no shared rail, so it carries the turn-ending rule
+        itself; a native body carries the short rule and names the rail's
+        Turn Ending section, and the rail carries the detail (checked below).
+        """
         from omh.skills.render import agent_skill_templates, SHARED_RAIL_REFERENCE_PATH
 
-        for renderer in (builtin_skill_templates, agent_skill_templates):
-            for template in renderer():
-                with self.subTest(renderer=renderer.__name__, skill=template.name):
-                    text = " ".join(template.content.split())
-                    self.assertIn("real unresolved user decision or a useful briefing discussion", text)
-                    self.assertIn("one specific, content-linked question", text)
-                    self.assertIn("Completed work needs no question", text)
-                    self.assertIn("omit unrelated non-action footers and generic offers to continue", text)
-                    self.assertNotIn("when a stop condition or a decision the user owns ends the turn", text)
+        for template in agent_skill_templates():
+            with self.subTest(renderer="agent_skill_templates", skill=template.name):
+                text = " ".join(template.content.split())
+                self.assertIn("real unresolved user decision or a useful briefing discussion", text)
+                self.assertIn("one specific, content-linked question", text)
+                self.assertIn("Completed work needs no question", text)
+                self.assertIn("omit unrelated non-action footers and generic offers to continue", text)
+                self.assertNotIn("when a stop condition or a decision the user owns ends the turn", text)
+        for template in builtin_skill_templates():
+            with self.subTest(renderer="builtin_skill_templates", skill=template.name):
+                text = " ".join(template.content.split())
+                self.assertIn("When the requested output is delivered, put any open points inside the result", text)
+                self.assertIn("only when the person asked to choose or decide and that choice is still theirs", text)
+                self.assertIn("Reply Language And Host Voice and Turn Ending sections hold the full rule", text)
+                self.assertNotIn("when a stop condition or a decision the user owns ends the turn", text)
 
         rail = next(
             template.content for template in builtin_skill_reference_templates()
@@ -1409,9 +1507,12 @@ class RouterContentTests(unittest.TestCase):
                 "result -> relevant evidence/limits -> observed accounting (when required) -> "
                 "specific question (if useful)", templates[name].content, name,
             )
-        from omh.skills.render import agent_skill_templates
+        from omh.skills.render import agent_skill_detail_templates, agent_skill_templates
 
+        # A body over the OpenClaw read cap moves its quality bar into references/details.md.
         portable = {template.name: template.content for template in agent_skill_templates()}
+        for detail in agent_skill_detail_templates():
+            portable[detail.skill_name] += detail.content
         for name in ("loop", "ultrawork", "ultraqa"):
             with self.subTest(portable=name):
                 content = portable[omh_skill_display_name(name)]
@@ -1432,11 +1533,13 @@ class RouterContentTests(unittest.TestCase):
 
     def test_delegated_runs_place_observed_accounting_before_optional_question(self) -> None:
         """DAG, work and maestro retain accounting without competing final lines."""
-        from omh.skills.render import agent_skill_templates
+        from omh.skills.render import agent_skill_detail_templates, agent_skill_templates
 
         definitions = {definition.name: definition for definition in installable_skill_definitions()}
         native = {template.name: template.content for template in builtin_skill_templates()}
         portable = {template.name: template.content for template in agent_skill_templates()}
+        for detail in agent_skill_detail_templates():
+            portable[detail.skill_name] += detail.content
         for name in ("ultrawork", "maestro", "dag-ulw"):
             definition = definitions[name]
             sections = [
@@ -1508,6 +1611,11 @@ class RouterContentTests(unittest.TestCase):
 
         definitions = {definition.name: definition for definition in installable_skill_definitions()}
         templates = {template.name: template for template in builtin_skill_templates()}
+        full_contracts = {
+            template.skill_name: template.content
+            for template in builtin_skill_reference_templates()
+            if template.relative_path == "references/full-contract.md"
+        }
         handoff_shaped = {
             name
             for name, definition in definitions.items()
@@ -1517,13 +1625,13 @@ class RouterContentTests(unittest.TestCase):
         self.assertLessEqual({"ultrawork", "ai-slop-cleaner"}, handoff_shaped)
         for name in sorted(handoff_shaped):
             with self.subTest(skill=name):
-                content = templates[name].content
+                content = templates[name].content + "\n" + full_contracts.get(name, "")
                 self.assertIn("Delegation transparency:", content)
                 for rule in DELEGATION_TRANSPARENCY_RULES:
                     self.assertIn(rule, content)
         # Non-delegating lanes must not pay the note's bytes.
         for name in ("ralplan", "research", "deep-interview"):
-            self.assertNotIn("Delegation transparency:", templates[name].content, name)
+            self.assertNotIn("Delegation transparency:", templates[name].content + "\n" + full_contracts.get(name, ""), name)
         # The harness contract and the rendered rules stay one maintained copy.
         contract = harness_quality_contract("coding-handling")
         quality_bar = tuple(contract["quality_bar"])
@@ -1677,11 +1785,16 @@ class RouterContentTests(unittest.TestCase):
             ),
         }
         templates = {template.name: template.content for template in builtin_skill_templates()}
+        full_contracts = {
+            template.skill_name: template.content
+            for template in builtin_skill_reference_templates()
+            if template.relative_path == "references/full-contract.md"
+        }
 
         for name in hermes_setup_skill_names:
             with self.subTest(skill=name):
                 self.assertIn(name, templates, f"{name} should be a rendered Hermes setup skill")
-                content = templates[name]
+                content = templates[name] + "\n" + full_contracts.get(name, "")
 
                 position = -1
                 for step in _HERMES_SETUP_FIVE_STEP_BAR:
@@ -1955,11 +2068,11 @@ class RouterContentTests(unittest.TestCase):
         self.assertTrue(any("destination or existing store" in item for item in wiki.required_inputs))
         self.assertIn("destination-aware", " ".join(wiki.expected_outputs))
         self.assertIn(
-            "Current lane: **Retained knowledge** (`memory-new`, `memory-sync`, `decision-recall`, `wiki`)",
+            "Current lane: **Retained knowledge**",
             content,
         )
         self.assertIn("observed external write", content)
-        self.assertNotIn("Current lane: **Materials and visual summaries** (`wiki`)", content)
+        self.assertNotIn("Current lane: **Materials and visual summaries**", content)
         self.assertNotEqual(wiki.category, "materials")
 
     def test_wiki_contract_surfaces_construction_design(self) -> None:
@@ -1990,6 +2103,7 @@ class RouterContentTests(unittest.TestCase):
             sorted(references),
             [
                 "references/handover-artifacts.md",
+                "references/vault-knowledge.md",
                 "references/wiki-blueprint.md",
                 "references/wiki-ecosystem.md",
                 "references/wiki-operations.md",
@@ -2900,10 +3014,10 @@ class RouterContentTests(unittest.TestCase):
                 "category": "operations",
                 "phase": "agent-evaluation",
                 "quality_tier": "agent-eval-gated",
-                "output": "paired_run_decision/v1",
+                "output": "paired_run_decision/v2",
                 "ladder": "selection_recommendation_recorded",
                 "action": "prepare_agent_evaluation",
-                "template": "paired_run_decision/v1",
+                "template": "paired_run_decision/v2",
             },
             "rules-distill": {
                 "category": "knowledge",
@@ -3017,7 +3131,7 @@ class RouterContentTests(unittest.TestCase):
 
         agent_evaluation = harnesses["agent-evaluation"]
         self.assertNotIn("scorecard_prepared", agent_evaluation.evidence_ladder)
-        self.assertEqual(agent_evaluation.expected_outputs, ("paired_run_decision/v1",))
+        self.assertEqual(agent_evaluation.expected_outputs, ("paired_run_decision/v2",))
 
     def test_paper_learning_contract_surfaces_stay_in_sync(self) -> None:
         definitions = {definition.name: definition for definition in builtin_definitions()}
@@ -3239,13 +3353,18 @@ class RouterContentTests(unittest.TestCase):
 
     def test_flagship_skills_render_quality_rubric_examples(self) -> None:
         templates = {template.name: template.content for template in builtin_skill_templates()}
+        full_contracts = {
+            template.skill_name: template.content
+            for template in builtin_skill_reference_templates()
+            if template.relative_path == "references/full-contract.md"
+        }
         definitions = {definition.name: definition for definition in builtin_definitions()}
 
         for name in FLAGSHIP_SKILLS:
             with self.subTest(name=name):
                 self.assertIn(name, templates)
                 definition = definitions[name]
-                content = templates[name]
+                content = templates[name] + "\n" + full_contracts.get(name, "")
 
                 self.assertIn("## Why This Exists", content)
                 self.assertIn("## Do Not Use When", content)
@@ -3313,7 +3432,7 @@ class RouterContentTests(unittest.TestCase):
                     )
                     if renderer is builtin_skill_templates:
                         for step in definition.opening_steps:
-                            self.assertIn(step, content)
+                            self.assertIn(translate_sibling_mentions(step, owner=definition.name), content)
 
     def test_catalog_marks_retained_and_codex_handoff_skills(self) -> None:
         definitions = {definition.name: definition for definition in builtin_definitions()}
@@ -3362,7 +3481,7 @@ class RouterContentTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "run the `research` workflow as a bounded in-plan stage" in item
+                "run the `ulw-research` workflow as a bounded in-plan stage" in item
                 for item in ralplan_bar
             )
         )
@@ -3525,8 +3644,8 @@ class RouterContentTests(unittest.TestCase):
         # #954 stage 5: the retired reference contract no longer belongs to a
         # primer lane roster; its rendered reference falls back to the router
         # guidance line.
-        self.assertIn("Use `omh_recommend` or the `oh-my-hermes` router", skills["ultragoal"].content)
-        self.assertIn("hand back to `oh-my-hermes`", skills["ultragoal"].content)
+        self.assertIn("Use `omh_recommend` or the `omh-routing` router", skills["ultragoal"].content)
+        self.assertIn("hand back to `omh-routing`", skills["ultragoal"].content)
         self.assertIn("Prepared OMH routing", skills["ultragoal"].content)
         self.assertIn("OMH Context Rail", common_rail)
         self.assertIn("not a standalone executor", common_rail)
@@ -3592,9 +3711,14 @@ class RouterContentTests(unittest.TestCase):
         self.assertIn("one delivery cycle", skills["ultraprocess"].content)
         self.assertIn("lane owner, next action, and missing evidence", skills["ultraprocess"].content)
         self.assertIn("PR readiness", skills["ultraprocess"].content)
-        self.assertIn("Findings come first", skills["code-review"].content)
-        self.assertIn("independent review evidence", skills["code-review"].content)
-        self.assertIn("hermes_coding_harness/v1", skills["code-review"].content)
+        full_contracts = {
+            template.skill_name: template.content
+            for template in builtin_skill_reference_templates()
+            if template.relative_path == "references/full-contract.md"
+        }
+        self.assertIn("Findings come first", skills["code-review"].content + "\n" + full_contracts.get("code-review", ""))
+        self.assertIn("independent review evidence", skills["code-review"].content + "\n" + full_contracts.get("code-review", ""))
+        self.assertIn("hermes_coding_harness/v1", skills["code-review"].content + "\n" + full_contracts.get("code-review", ""))
         self.assertIn("non-disjoint", skills["ultrawork"].content)
         self.assertIn("Worker ACK", skills["ultrawork"].content)
         self.assertIn("hermes_coding_harness/v1", skills["ultrawork"].content)
@@ -3734,9 +3858,11 @@ class RouterContentTests(unittest.TestCase):
         self.assertIn("source boundaries", " ".join(definitions["research"].final_checklist))
         self.assertIn("agenda", " ".join(definitions["meeting-brief"].final_checklist).lower())
         self.assertIn("selected coding or runtime owner", " ".join(definitions["ralph"].final_checklist))
-        # `skill` and `cancel` state their own checklists now; `agent-ops-review`
-        # still takes the operator lane's default.
-        self.assertIn("managed path", " ".join(definitions["agent-ops-review"].final_checklist))
+        # `skill`, `cancel` and `agent-ops-review` state their own checklists now, and no shipped
+        # skill takes the operator lane's default any more, so the default is read directly: a new
+        # operator skill without its own list still starts from it.
+        self.assertIn("managed path", " ".join(_default_final_checklist("new-operator", "operator", "", "")))
+        self.assertIn("ladder row", " ".join(definitions["agent-ops-review"].final_checklist))
 
     def test_coding_handoff_skills_include_executor_readiness_fallback(self) -> None:
         templates = {template.name: template.content for template in builtin_skill_templates()}
@@ -3949,7 +4075,7 @@ class RouterContentTests(unittest.TestCase):
         for path in paths:
             if path.is_dir():
                 continue
-            if path.suffix in {".png", ".jpg", ".jpeg", ".webp", ".pyc", ".gif", ".mp4", ".webm"}:
+            if path.suffix in {".png", ".jpg", ".jpeg", ".webp", ".ico", ".pyc", ".gif", ".mp4", ".webm", ".woff2"}:
                 continue
             text = path.read_text(encoding="utf-8").lower()
             for term in forbidden:
@@ -4044,8 +4170,8 @@ class RouterContentTests(unittest.TestCase):
         self.assertIn("hermes skills install rlaope/oh-my-hermes/skills/omh-routing --yes", readme)
         self.assertIn("hermes skills tap add rlaope/oh-my-hermes", installation)
         self.assertIn("hermes skills install rlaope/oh-my-hermes/skills/omh-routing --yes", installation)
-        self.assertIn("curl -fsSL https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.sh | sh", readme)
-        self.assertIn("https://rlaope.github.io/oh-my-hermes/", readme)
+        self.assertIn("curl -fsSL https://omher.app/install | sh", readme)
+        self.assertIn("https://omher.app/", readme)
         self.assertIn("[Documentation](docs/README.md)", readme)
         self.assertIn("[Installation](docs/INSTALLATION.md)", readme)
         self.assertIn("[Agent Install](INSTALL_FOR_AGENTS.md)", readme)
@@ -4189,7 +4315,7 @@ class RouterContentTests(unittest.TestCase):
         self.assertLess(readme.index("## Install"), readme.index("## What you get"))
         quick_start = readme.split("## Install", 1)[1].split("## What you get", 1)[0]
         self.assertIn(
-            "```sh\ncurl -fsSL https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.sh | sh\nomh setup\n```",
+            "```sh\ncurl -fsSL https://omher.app/install | sh\nomh setup\n```",
             quick_start,
         )
         install_options = readme.split("<summary><b>Install options</b></summary>", 1)[1].split("</details>", 1)[0]
@@ -4332,8 +4458,8 @@ class RouterContentTests(unittest.TestCase):
         self.assertIn("`deep-interview`, `ralplan`, `loop`", docs_readme)
         # Retired engines must not be presented as current planning skills.
         self.assertNotIn("`ultragoal`", docs_readme)
-        # omh-docs and github-issue-intake raise the measured catalog to 119.
-        self.assertIn("**151 installable skills**", docs_readme)
+        # The front door names no skill count: a literal drifts with every skill.
+        self.assertIn("groups the installable skills by user intent", docs_readme)
         self.assertIn("**Retain knowledge**", docs_readme)
         # The unit suite runs through the deterministic sharding tools (issue
         # #1294): plan once, run per shard plus the serial quarantine, then
@@ -4342,7 +4468,7 @@ class RouterContentTests(unittest.TestCase):
         # once per platform/version -- while matching the sharded workflow;
         # the monolithic discover command must not return as a silent
         # replacement that bypasses exact-once accounting.
-        self.assertIn("python tools/test_sharding/plan.py --shards 2", ci)
+        self.assertIn("python tools/test_sharding/plan.py --shards 3", ci)
         self.assertIn("--durations timings-history/timings.json", ci)
         self.assertIn("actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", ci)
         self.assertIn("actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", ci)
@@ -4373,7 +4499,7 @@ class RouterContentTests(unittest.TestCase):
         self.assertIn("harness validate", pages)
         self.assertIn("Pinned stable install", release)
         self.assertIn("release_readiness_checklist/v1", release)
-        self.assertIn("omh release checklist --version 1.0.5 --json", release)
+        self.assertIn("omh release checklist --version <version> --json", release)
         self.assertIn("all-skill awareness lane coverage", release)
         self.assertIn("bundled role context", release)
         self.assertIn("bounded context budgets", release)
@@ -4385,9 +4511,9 @@ class RouterContentTests(unittest.TestCase):
         self.assertIn("Hermes CLI Install Smoke", release)
         self.assertIn("omh release hermes-smoke --live --install-path tap --target-confirmed", release)
         self.assertIn("--hermes-home /tmp/hermes-smoke release hermes-smoke --live --install-path setup", release)
-        self.assertIn("hermes skills check oh-my-hermes", release)
+        self.assertIn("hermes skills check omh-routing", release)
         self.assertIn("uv build", release)
-        self.assertIn("oh_my_hermes-1.0.5-py3-none-any.whl", release)
+        self.assertIn("oh_my_hermes-<version>-py3-none-any.whl", release)
         self.assertIn("/tmp/omh-wheel-smoke/bin/omh --help", release)
         self.assertIn("OMH_VENV_DIR=/tmp/omh-installer-venv", release)
         self.assertIn("## Feature Report", pr_template)
@@ -4402,32 +4528,59 @@ class RouterContentTests(unittest.TestCase):
         self.assertIn("OMH", site)
         self.assertIn("Oh My Hermes", site)
         hero = site.split('<section class="hero hero--center"', 1)[1].split("</section>", 1)[0]
-        # The hero is the spectrum wordmark (the h1) under the app-icon logo,
-        # the README tagline, and the primary install path: the script
-        # installer then setup. Windows and the package managers live in the
-        # install section, which pins them below.
+        # The hero is the pixel wordmark under Kami's face logo, the repo
+        # description, and the primary install path: the script installer
+        # then setup. Windows and the package managers live in the install
+        # section, which pins them below.
         self.assertIn('src="assets/oh-my-hermes-wordmark.png" alt="Oh My Hermes"', hero)
-        self.assertIn('src="assets/omh-logo.png"', hero)
+        self.assertIn('src="assets/omh-logo-pinklight.png"', hero)
+        self.assertIn("The ultrawork agent with", hero)
         self.assertIn(
-            "All-in-one package for Hermes Agent. Install once, then just type <code>dag-ulw</code>.",
-            hero,
-        )
-        self.assertIn(
-            "curl -fsSL https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.sh | sh",
+            "curl -fsSL https://omher.app/install | sh",
             hero,
         )
         self.assertIn("omh setup", hero)
-        # The landing page carries the logo twice (header at 64 px, hero),
-        # the wordmark twice (hero, footer), and the sponsor logo, and
-        # nothing else. The exact count keeps decorative images off the page;
-        # the one product capture, the real /dag-ulw TUI recording, is a
-        # <video> transcoded from assets/omh-dag-ulw-tui.gif.
-        self.assertEqual(site.count("<img"), 5)
-        self.assertEqual(site.count('src="assets/omh-logo-64.png"'), 1)
-        self.assertEqual(site.count('src="assets/omh-logo.png"'), 1)
-        self.assertEqual(site.count('src="assets/oh-my-hermes-wordmark.png"'), 2)
+        # Every image the landing page loads ships inside site/assets. Two
+        # four <video>s: the omher app film in the top block's window slot,
+        # the faces loop in the band under it with the terminals film
+        # standing in front of it, and the real /dag-ulw TUI recording
+        # transcoded from assets/omh-dag-ulw-tui.gif.
+        for src in re.findall(r'<img[^>]*\ssrc="([^"]+)"', site):
+            with self.subTest(img=src):
+                self.assertTrue(src.startswith("assets/"), src)
+                self.assertTrue((Path("site") / src).is_file(), src)
         self.assertEqual(site.count('src="assets/sponsors/opengateway.svg"'), 1)
-        self.assertEqual(site.count("<video"), 1)
+        self.assertEqual(site.count("<video"), 4)
+        self.assertEqual(site.count('src="assets/omher-app.webm"'), 1)
+        self.assertEqual(site.count('src="assets/omher-app.mp4"'), 1)
+        self.assertEqual(site.count('src="assets/omher-faces.webm"'), 1)
+        self.assertEqual(site.count('src="assets/omher-faces.mp4"'), 1)
+        self.assertEqual(site.count('poster="assets/omher-faces.webp"'), 1)
+        self.assertEqual(site.count('src="assets/omher-terminals.mp4"'), 1)
+        self.assertEqual(site.count('poster="assets/omher-terminals.webp"'), 1)
+        self.assertTrue(Path("site/assets/omher-terminals.mp4").is_file())
+        self.assertTrue(Path("site/assets/omher-terminals.webp").is_file())
+        # The faces band sits between the omher block and the OMH hero, its
+        # copy is translated, and its one link is a real download link that
+        # the page's own script points at the visitor's build.
+        order = [site.index(mark) for mark in ('<section class="omher"', '<section class="faces"', '<section class="hero hero--center"')]
+        self.assertEqual(order, sorted(order))
+        faces = site.split('<section class="faces"', 1)[1].split("</section>", 1)[0]
+        self.assertEqual(faces.count("<a "), 1)
+        self.assertIn('href="https://github.com/rlaope/oh-my-hermes/releases?q=omher" data-dl-main', faces)
+        translations = Path("site/i18n.js").read_text(encoding="utf-8")
+        for key in re.findall(r'data-i18n="(faces\.[^"]+)"', faces):
+            with self.subTest(i18n=key):
+                block = translations.split(f'"{key}": {{', 1)[1].split("}", 1)[0]
+                for lang in ("en", "ko", "ja", "zh"):
+                    self.assertRegex(block, rf'\b{lang}: "[^"]+"')
+        self.assertEqual(len(re.findall(r'data-i18n="faces\.', faces)), 3)
+        for src in ("omher-faces.webm", "omher-faces.mp4", "omher-faces.webp"):
+            with self.subTest(faces=src):
+                self.assertTrue((Path("site") / "assets" / src).is_file(), src)
+        for src in ("omher-app.webm", "omher-app.mp4", "omh-dag-ulw-tui.webm", "omh-dag-ulw-tui.mp4"):
+            with self.subTest(video=src):
+                self.assertTrue((Path("site") / "assets" / src).is_file(), src)
         self.assertEqual(site.count('src="assets/omh-dag-ulw-tui.webm"'), 1)
         self.assertEqual(site.count('src="assets/omh-dag-ulw-tui.mp4"'), 1)
         self.assertEqual(site.count('poster="assets/omh-dag-ulw-tui-poster.webp"'), 1)
@@ -4656,8 +4809,8 @@ class RouterContentTests(unittest.TestCase):
         self.assertIn('href="https://github.com/rlaope/oh-my-hermes"', docs_topbar)
         self.assertNotIn(">GitHub<", docs_topbar)
         install_section = site.split('id="install"', 1)[1].split("</section>", 1)[0]
-        self.assertIn("curl -fsSL https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.sh | sh", install_section)
-        self.assertIn("irm https://raw.githubusercontent.com/rlaope/oh-my-hermes/main/install.ps1 | iex", install_section)
+        self.assertIn("curl -fsSL https://omher.app/install | sh", install_section)
+        self.assertIn("irm https://omher.app/install.ps1 | iex", install_section)
         self.assertIn("omh setup", install_section)
         self.assertIn("omh update", install_section)
         self.assertIn("omh doctor", install_section)
@@ -4707,8 +4860,8 @@ class RouterContentTests(unittest.TestCase):
                 "ru": "## Что вы получаете", "es": "## Qué obtienes", "fr": "## Ce que vous obtenez",
                 "de": "## Was du bekommst", "pt-BR": "## O que você ganha", "it": "## Cosa ottieni",
             }),
-            ("## DAG-ULW", {
-                locale: "## DAG-ULW"
+            ("## Graph Engineering", {
+                locale: "## Graph Engineering"
                 for locale in ("ko", "ja", "zh", "ru", "es", "fr", "de", "pt-BR", "it")
             }),
             ("## Others", {
@@ -5101,6 +5254,11 @@ class ExpertQuestionCatalogTests(unittest.TestCase):
         payload = workflow_reference_payload()
         skills = {skill["name"]: skill for skill in payload["skills"]}
         templates = {template.name: template.content for template in builtin_skill_templates()}
+        full_contracts = {
+            template.skill_name: template.content
+            for template in builtin_skill_reference_templates()
+            if template.relative_path == "references/full-contract.md"
+        }
         reference = workflow_reference_markdown()
 
         definitions = {definition.name: definition for definition in builtin_definitions()}
@@ -5114,7 +5272,10 @@ class ExpertQuestionCatalogTests(unittest.TestCase):
             ]
             with self.subTest(name=name):
                 self.assertEqual(skills[name]["expert_questions"], expected_payload)
-                self.assert_expert_question_block_rendered(definitions[name], templates[name])
+                self.assert_expert_question_block_rendered(
+                    definitions[name],
+                    templates[name] + "\n" + full_contracts.get(name, ""),
+                )
                 section = reference.split(f"### {name}\n", 1)[1].split("\n### ", 1)[0]
                 self.assertIn(
                     "\n".join(expert_question_reference_lines(definitions[name])),
@@ -5122,6 +5283,7 @@ class ExpertQuestionCatalogTests(unittest.TestCase):
                 )
 
         from omh.skills import packaging
+        from omh.skills.render import workflow_full_contract_reference
 
         definition = definitions["finance-analysis"]
         packaging._builtin_skill_templates_cached.cache_clear()
@@ -5130,10 +5292,11 @@ class ExpertQuestionCatalogTests(unittest.TestCase):
                 mutated_templates = {
                     template.name: template.content for template in builtin_skill_templates()
                 }
+                mutated_contract = workflow_full_contract_reference(definition, definition.name)
             with self.assertRaisesRegex(AssertionError, "missing its expert question block"):
                 self.assert_expert_question_block_rendered(
                     definition,
-                    mutated_templates[definition.name],
+                    mutated_templates[definition.name] + "\n" + mutated_contract,
                 )
         finally:
             packaging._builtin_skill_templates_cached.cache_clear()

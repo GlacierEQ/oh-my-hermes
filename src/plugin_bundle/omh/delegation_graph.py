@@ -51,6 +51,12 @@ node it repairs) or an extend (from the node whose check found the work
 missing). Dispatch waves of one parent (the children one turn started) are
 grouped as ``wave N · HH:MM``; that is order, not dependency, and no edge is
 drawn for it.
+
+While a dag run is drawn, a ledger child bound to no node of it is an
+``outside_dag`` lane: still a node with its state, title, usage and group, but
+with no edge and in no layer — the run's layers hold the run alone. The views
+draw such a lane under its own ``outside DAG`` heading rather than as a start
+node of the run. With no run drawn a child is a plain lane, as ever.
 """
 
 from __future__ import annotations
@@ -58,6 +64,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import sqlite3
@@ -66,20 +73,48 @@ from typing import Any, Final
 from urllib.parse import quote
 
 from .dag_core import layer_of
-from .dag_run import ADDED_ORIGIN_KINDS, HANDOFF_NOT_CHECKED, derive, handoff_unchecked, run_state, session_runs
-from .delegation_ledger import child_title, ledger_key, read_ledger, title_from_goal, with_unjoined_stop
+from .dag_run import (
+    ADDED_ORIGIN_KINDS,
+    FINISHED_STATES,
+    HANDOFF_NOT_CHECKED,
+    bound_children,
+    criteria_count,
+    criteria_view,
+    derive,
+    goal_verdict,
+    handoff_unchecked,
+    node_role,
+    run_state,
+    session_runs,
+)
+from .delegation_ledger import (
+    child_title,
+    ledger_key,
+    read_ledger,
+    title_from_goal,
+    valid_observed_route,
+    with_unjoined_stop,
+)
 from .live_session import conversation_segments
 from .subagent_graph import _roster_progress_fields as roster_progress_fields
 
 GRAPH_SCHEMA_VERSION: Final = "delegation_graph/v1"
 GRAPH_NODE_LIMIT: Final = 48
 GRAPH_BYTE_LIMIT: Final = 24_576
+# What the lanes of the layers a pane holds open may take: more than a glance, still well under the widget's budget.
+# ponytail: past these an open layer reads `+N more`; a lane-by-lane fetch is the step up if runs outgrow it.
+GRAPH_OPEN_NODE_LIMIT: Final = 192
+GRAPH_OPEN_BYTE_LIMIT: Final = 49_152
+# The `sessions` columns a lane's `usage` reads, in the order `_usage` takes them.
+USAGE_COLUMNS: Final = ("input_tokens", "cache_read_tokens", "cache_write_tokens", "actual_cost_usd", "estimated_cost_usd")
 GRAPH_LINGER_SECONDS: Final = 15 * 60
 CHILD_STALE_SECONDS: Final = 30 * 60
 TEAM_FILE_LIMIT: Final = 16
 TEAM_RECORD_BYTES: Final = 262_144
 TITLE_LIMIT: Final = 120
 OPENER_CHARS: Final = 400
+# A background unit's stored result is read for its per-task `route` only; one past this is not parsed.
+RESULT_JSON_BYTES: Final = 1_048_576
 COMPACTION_END_REASON: Final = "compression"
 GRAPH_CLAIM_BOUNDARY: Final = (
     "Delegation structure and states as Hermes' hooks, state.db and OMH's own records reported them. A category is "
@@ -111,7 +146,8 @@ def graph_fingerprint(graph: Mapping[str, Any]) -> str:
     """What a reader would see, minus the clock: structure, states and labels, never elapsed time."""
     nodes = graph.get("nodes") if isinstance(graph.get("nodes"), list) else []
     edges = graph.get("edges") if isinstance(graph.get("edges"), list) else []
-    keys = ("id", "kind", "title", "category", "model", "effort", "state", "status", "waits_on", "group")
+    keys = ("id", "kind", "title", "category", "model", "effort", "state", "status", "waits_on", "group",
+            "outside_dag")
     shape = {
         "nodes": [{key: node.get(key) for key in keys} for node in nodes if isinstance(node, Mapping)],
         "edges": [[edge.get("from"), edge.get("to"), edge.get("kind")] for edge in edges if isinstance(edge, Mapping)],
@@ -240,7 +276,8 @@ def _carry_on(
         row = facts["sessions"][session]
         written = [item["output_tokens"] for item in (row, *rows) if item["output_tokens"]]
         facts["sessions"][session] = {**row, "ended_at": last["ended_at"], "end_reason": last["end_reason"],
-                                      "output_tokens": sum(written) if written else None}
+                                      "output_tokens": sum(written) if written else None,
+                                      "usage": _sum_usage([item["usage"] for item in (row, *rows)])}
         usages = [usage for usage in (facts["usage"].get(session), *(extra["usage"].get(s) for s in segments)) if usage]
         if usages:
             models = {usage["model"] for usage in usages if usage["model"]}
@@ -248,6 +285,254 @@ def _carry_on(
             facts["usage"][session] = {"rows": sum(usage["rows"] for usage in usages),
                                        "model": models.pop() if len(models) == 1 else "",
                                        "last_seen": max(seen) if seen else None}
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _price(value: Any) -> float | None:
+    """A recorded cost, zero included; None where Hermes recorded none (NULL, or not a finite, non-negative number)."""
+    if not isinstance(value, int | float) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
+        return None
+    return float(value)
+
+
+def _usage(values: Sequence[Any], output: Any) -> dict[str, Any] | None:
+    """What a session's row counted besides its output, in `USAGE_COLUMNS` order; None when it counted none.
+
+    ``output`` is the row's output tokens, kept under ``output`` beside the other counts.
+    ``cost_usd`` is Hermes' recorded cost: the actual one wherever the row holds one (a provider-reported 0 too, as
+    `actual_cost_usd` stays NULL until a provider reports one), else a positive estimate, marked ``cost_estimated``.
+    A session Hermes did not price carries no cost, and no token is converted into one here.
+    """
+    uncached, read, write = (_count(value) for value in values[:3])
+    actual, estimated = _price(values[3]), _price(values[4]) or 0.0
+    if not (uncached or read or write or actual is not None or estimated):
+        return None
+    usage: dict[str, Any] = {"input": uncached, "cache_read": read, "cache_write": write, "output": _count(output)}
+    if actual is not None:
+        usage["cost_usd"] = actual
+    elif estimated:
+        usage["cost_usd"] = estimated
+        usage["cost_estimated"] = True
+    return usage
+
+
+def _sum_usage(items: Sequence[Mapping[str, Any] | None]) -> dict[str, Any] | None:
+    """The usage of a conversation's segments (or of a row and its auxiliary calls) added up.
+
+    The cost is the priced parts' sum, ``cost_partial`` where some counted part (or part of one) has no cost, so the
+    figure is a floor; no cost where no part was priced.
+    """
+    held = [item for item in items if item]
+    if not held:
+        return None
+    total: dict[str, Any] = {key: sum(item[key] for item in held)
+                             for key in ("input", "cache_read", "cache_write", "output")}
+    priced = [item for item in held if "cost_usd" in item]
+    if priced:
+        total["cost_usd"] = sum(item["cost_usd"] for item in priced)
+        if any(item.get("cost_estimated") for item in priced):
+            total["cost_estimated"] = True
+        if len(priced) < len(held) or any(item.get("cost_partial") for item in priced):
+            total["cost_partial"] = True
+    return total
+
+
+# `session_model_usage` tasks that are main-loop calls, already counted in the `sessions` row: every value Hermes
+# gives `agent._turn_route_task`, which `agent/turn_usage.py` passes to `update_token_counts(task=...)` (its docstring
+# in `hermes_state_usage.py`: a per-turn route's calls "count in the session totals and land in session_model_usage
+# under that task"). Today one, `agent/voice_turn_route.py`'s `TASK`. An auxiliary task, by contrast, is any name a
+# caller hands `auxiliary_client` (`agent/aux_accounting.record_aux_usage`) or `background_review`, an open set, so
+# the route tasks are the closed list here and a new one must join it.
+ROUTE_TASKS: Final = ("voice_chat",)
+
+
+def _auxiliary_usage(
+    connection: sqlite3.Connection, marks: str, ids: Sequence[str], columns: set[str]
+) -> dict[str, dict[str, Any]]:
+    """Each session's auxiliary calls, summed from `session_model_usage`, in `_usage`'s shape.
+
+    Hermes records an auxiliary call (compression, title generation, vision, ...) only there, under its task name,
+    and never in the `sessions` row (`record_auxiliary_usage`), so these add to the row's counts. The main loop's
+    own rows there repeat what the row already holds and are left out: task ``''``, a per-turn route's task
+    (`ROUTE_TASKS`), and any row with a `cost_status`, which only the main loop writes (`record_auxiliary_usage`
+    takes none, and the runtime worker refuses one for an auxiliary call). A table without `task` cannot tell the
+    two apart and gives nothing. An auxiliary row records no actual cost, so a positive estimate prices it; one with
+    tokens but no estimate is unpriced (Hermes stores an unknown estimate as 0), which makes the sum a floor.
+    """
+    if "task" not in columns:
+        return {}
+
+    def column(name: str) -> str:
+        return f"COALESCE({name}, 0)" if name in columns else "0"
+
+    tokens = " + ".join(column(name) for name in
+                        ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"))
+    actual, estimated = column("actual_cost_usd"), column("estimated_cost_usd")
+    figure = f"CASE WHEN {actual} > 0 THEN {actual} WHEN {estimated} > 0 THEN {estimated} END"
+    routes = ", ".join("?" for _ in ROUTE_TASKS)
+    unstated = " AND cost_status IS NULL" if "cost_status" in columns else ""
+    found: dict[str, dict[str, Any]] = {}
+    for row in connection.execute(
+        f"SELECT session_id, SUM({column('input_tokens')}), SUM({column('cache_read_tokens')}), "
+        f"SUM({column('cache_write_tokens')}), SUM({column('output_tokens')}), SUM({figure}), "
+        f"SUM(CASE WHEN {actual} > 0 THEN 0 WHEN {estimated} > 0 THEN 1 ELSE 0 END), "
+        f"SUM(CASE WHEN ({tokens}) > 0 AND {figure} IS NULL THEN 1 ELSE 0 END) "
+        f"FROM session_model_usage WHERE session_id IN ({marks}) AND COALESCE(task, '') <> '' "
+        f"AND task NOT IN ({routes}){unstated} GROUP BY session_id",
+        (*ids, *ROUTE_TASKS),
+    ):
+        usage = {"input": _count(row[1]), "cache_read": _count(row[2]), "cache_write": _count(row[3]),
+                 "output": _count(row[4])}
+        cost = _price(row[5])
+        if cost:
+            usage["cost_usd"] = cost
+            if row[6]:
+                usage["cost_estimated"] = True
+            if row[7]:
+                usage["cost_partial"] = True
+        elif not any(usage.values()):
+            continue
+        found[str(row[0])] = usage
+    return found
+
+
+def session_usage(hermes_home: Path, session_id: str) -> dict[str, Any] | None:
+    """What Hermes recorded for one chat, its compaction segments added up: the figures of the pane's usage board.
+
+    ``session_id`` is the chat asked about, so the pane can tell this chat's figures from the last one's.
+    ``model`` is the one the chat's own row names, ``output`` its output tokens and, besides
+    them, the `_usage` keys; each segment's auxiliary calls count with it (`_auxiliary_usage`). The cost is what
+    Hermes priced, marked ``cost_partial`` where some counted part is unpriced, and no token is turned into one.
+    ``None`` where the chat has no row or its row counted nothing.
+    """
+    try:
+        connection = _connect(hermes_home)
+    except OSError:  # Python 3.11's `Path.is_file` raises where the home cannot be searched
+        return None
+    if connection is None:
+        return None
+    try:
+        ids = _segments(connection, session_id)
+        facts = state_facts(hermes_home, ids, [], connection=connection)
+    finally:
+        connection.close()
+    rows = [facts["sessions"][item] for item in ids if item in facts["sessions"]]
+    usage = _sum_usage([row["usage"] for row in rows]) or {}
+    output = sum(row["usage"]["output"] if row["usage"] else row["output_tokens"] or 0 for row in rows)
+    if not (usage or output):
+        return None
+    model = (facts["sessions"].get(session_id) or rows[0])["model"]
+    return {"session_id": session_id, "model": model, **usage, "output": output}
+
+
+# How many child sessions one run's usage reads: `state_facts` takes 160 ids a call, and a child's compaction
+# segments count among them, so a run past this many children is read in part and says so (`children_unread`).
+RUN_USAGE_CHILD_LIMIT: Final = 64
+
+
+def run_usage(hermes_home: Path, child_sessions: Sequence[str]) -> dict[str, Any] | None:
+    """What Hermes recorded for a run's children, added up: the closing figures of a dag-ulw run.
+
+    ``child_sessions`` are the sessions of every child the run bound, each attempt's included, so a retried or
+    repaired node's earlier child counts too. Each child is read as `session_usage` reads a chat (its compaction
+    segments and auxiliary calls with it). ``children`` counts the children Hermes counted anything for,
+    ``children_unrecorded`` those it counted nothing for; ``priced`` the counted ones it put a cost on. The cost is
+    Hermes' recorded one only, ``cost_partial`` where a counted child has none, so the figure is a floor; no token
+    is turned into a price, and nothing is compared with a model the run did not use. ``None`` where no child
+    counted anything or the database cannot be read.
+    """
+    wanted = [item for item in dict.fromkeys(child_sessions) if item]
+    unread = max(0, len(wanted) - RUN_USAGE_CHILD_LIMIT)
+    wanted = wanted[:RUN_USAGE_CHILD_LIMIT]
+    if not wanted:
+        return None
+    try:
+        connection = _connect(hermes_home)
+    except OSError:  # Python 3.11's `Path.is_file` raises where the home cannot be searched
+        return None
+    if connection is None:
+        return None
+    try:
+        segments = {child: _segments(connection, child) for child in wanted}
+        ids = [item for listed in segments.values() for item in listed]
+        facts: dict[str, Any] = {"sessions": {}}
+        for at in range(0, len(ids), 160):
+            facts["sessions"].update(state_facts(hermes_home, ids[at:at + 160], [], connection=connection)["sessions"])
+    finally:
+        connection.close()
+    per_child: list[dict[str, Any]] = []
+    for child in wanted:
+        rows = [facts["sessions"][item] for item in segments[child] if item in facts["sessions"]]
+        usage = _sum_usage([row["usage"] for row in rows])
+        output = sum(row["usage"]["output"] if row["usage"] else row["output_tokens"] or 0 for row in rows)
+        if usage:
+            per_child.append({**usage, "output": output})
+        elif output:
+            per_child.append({"input": 0, "cache_read": 0, "cache_write": 0, "output": output})
+    total = _sum_usage(per_child)
+    if total is None:
+        return None
+    result: dict[str, Any] = {
+        **total,
+        "children": len(per_child),
+        "children_unrecorded": len(wanted) - len(per_child),
+        "priced": sum(1 for usage in per_child if "cost_usd" in usage),
+    }
+    if unread:
+        # Children past the cap were not read: their spend is missing, so a cost is a floor.
+        result["children_unread"] = unread
+        if "cost_usd" in result:
+            result["cost_partial"] = True
+    return result
+
+
+def _token_text(count: int) -> str:
+    """`410`, `12.6k`, `1.2m`: the pane's and the TUI's token figure (`tokenCountText`, `panels._token_count_text`)."""
+    if count < 1000:
+        return str(count)
+    amount, unit = (count / 1000, "k") if count < 999_950 else (count / 1_000_000, "m")
+    return f"{amount:.1f}{unit}"
+
+
+def run_usage_text(usage: Mapping[str, Any]) -> str:
+    """`4 children · 182.4k tokens · cache 71.3% · $0.4210 (3/4 priced)`: `run_usage` as one line of figures.
+
+    Tokens are every count (uncached input, cache read, cache write, output); the cache share is cache read over
+    the prompt side, as the pane's figure is. The cost is Hermes' recorded one: ``≥`` where a counted child has
+    none, ``~`` where a part is Hermes' estimate, and ``cost not recorded`` where nothing was priced.
+    """
+    prompt = usage["input"] + usage["cache_read"] + usage["cache_write"]
+    said = [f"{usage['children']} child{'' if usage['children'] == 1 else 'ren'}",
+            f"{_token_text(prompt + usage['output'])} tokens"]
+    if prompt:
+        said.append(f"cache {usage['cache_read'] / prompt * 100:.1f}%")
+    if "cost_usd" in usage:
+        mark = "≥" if usage.get("cost_partial") else "~" if usage.get("cost_estimated") else ""
+        said.append(f"{mark}${usage['cost_usd']:.4f} ({usage['priced']}/{usage['children']} priced)")
+    else:
+        said.append("cost not recorded")
+    if usage["children_unrecorded"]:
+        said.append(f"{usage['children_unrecorded']} with no record")
+    if usage.get("children_unread"):
+        said.append(f"{usage['children_unread']} not read")
+    return " · ".join(said)
+
+
+def closing_usage(hermes_home: Path, record: Mapping[str, Any],
+                  children: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    """What every child this dag run bound used, as Hermes recorded it (`run_usage`), or None.
+
+    Every child bound to the run counts, a retried or repaired attempt's earlier child too, since its spend is
+    spent. A node the parent did itself (``lane: parent``) or a fanout owner ran has no child here and is in
+    neither the counts nor the cost: those sit in the parent's own row and the fanout receipt.
+    """
+    bound = bound_children(children, str(record["run"]))
+    sessions = [str(child["child_session_id"]) for listed in bound.values() for child in listed
+                if child.get("child_session_id")]
+    return run_usage(hermes_home, sessions)
 
 
 def _effort(config: Mapping[str, Any]) -> str:
@@ -282,8 +567,10 @@ def state_facts(
                 ended = "ended_at" if "ended_at" in columns else "NULL"
                 reason = "end_reason" if "end_reason" in columns else "NULL"
                 written = "output_tokens" if "output_tokens" in columns else "NULL"
+                counted = ", ".join(name if name in columns else "NULL" for name in USAGE_COLUMNS)
                 for row in connection.execute(
-                    f"SELECT id, model, model_config, {ended}, {reason}, {written} FROM sessions WHERE id IN ({marks})",
+                    f"SELECT id, model, model_config, {ended}, {reason}, {written}, {counted} "
+                    f"FROM sessions WHERE id IN ({marks})",
                     ids,
                 ):
                     try:
@@ -297,6 +584,7 @@ def state_facts(
                         "ended_at": row[3] if isinstance(row[3], (int, float)) else None,
                         "end_reason": _text(row[4], 40),
                         "output_tokens": row[5] if isinstance(row[5], int) and row[5] > 0 else None,
+                        "usage": _usage(row[6:], row[5]),
                     }
                 facts["read"] = True
             except sqlite3.Error:
@@ -326,6 +614,19 @@ def state_facts(
             except sqlite3.Error:
                 pass
             try:
+                auxiliary = _auxiliary_usage(connection, marks, ids, usage_columns) if facts["usage_read"] else {}
+            except sqlite3.Error:
+                auxiliary = {}
+            for session, extra in auxiliary.items():
+                row = facts["sessions"].get(session)
+                if row is None:
+                    continue
+                own_usage = row["usage"] or (
+                    {"input": 0, "cache_read": 0, "cache_write": 0, "output": row["output_tokens"]}
+                    if row["output_tokens"] else None
+                )
+                row["usage"] = _sum_usage([own_usage, extra])
+            try:
                 for row in connection.execute(
                     f"SELECT session_id, substr(content, 1, {OPENER_CHARS}) FROM messages WHERE rowid IN ("
                     f"SELECT MIN(rowid) FROM messages WHERE session_id IN ({marks}) AND role = 'user' "
@@ -338,8 +639,12 @@ def state_facts(
         delegations = [item for item in dict.fromkeys(delegation_ids) if item][:32]
         if delegations:
             try:
+                columns = {str(row[1]) for row in connection.execute('PRAGMA table_info("async_delegations")')}
+                # Hermes 0.22.5+ keeps each finished child's result, `route` included, in `result_json`.
+                results = (f"CASE WHEN length(result_json) <= {RESULT_JSON_BYTES} THEN result_json END"
+                           if "result_json" in columns else "NULL")
                 for row in connection.execute(
-                    "SELECT delegation_id, task_json FROM async_delegations WHERE delegation_id IN ("
+                    f"SELECT delegation_id, task_json, {results} FROM async_delegations WHERE delegation_id IN ("
                     + ",".join("?" for _ in delegations) + ")",
                     delegations,
                 ):
@@ -353,6 +658,7 @@ def state_facts(
                     facts["delegations"][str(row[0])] = {
                         "goals": [title_from_goal(goal) for goal in goals[:64]],
                         "model": _text(task.get("model")),
+                        "routes": _result_routes(row[2]),
                     }
             except sqlite3.Error:
                 pass
@@ -480,6 +786,28 @@ def _child_state(
     return "dispatched", "dispatched", None
 
 
+def _result_routes(raw: object) -> dict[int, dict[str, Any]]:
+    """Per-task ``route`` from a background unit's stored result (a single task's own result is task 0)."""
+    try:
+        result = json.loads(raw) if isinstance(raw, str) else None
+    except (ValueError, RecursionError):
+        return {}
+    if not isinstance(result, dict):
+        return {}
+    listed = result.get("results")
+    entries: list[Any] = listed if isinstance(listed, list) else [result]
+    routes: dict[int, dict[str, Any]] = {}
+    for position, entry in enumerate(entries[:64]):
+        if not isinstance(entry, dict):
+            continue
+        index = entry.get("task_index")
+        index = index if isinstance(index, int) and not isinstance(index, bool) else position
+        route = valid_observed_route(entry.get("route"))
+        if route:
+            routes[index] = route
+    return routes
+
+
 def _observed_model(session: str, facts: Mapping[str, Any]) -> str:
     row = facts["sessions"].get(session) or {}
     return row.get("model") or facts["usage"].get(session, {}).get("model", "")
@@ -509,11 +837,22 @@ def build_delegation_graph(
     scope: str = "session",
     linger: float | None = GRAPH_LINGER_SECONDS,
     segments: Sequence[str] | None = None,
+    dag_run: str = "",
+    keep_dag: bool = False,
+    open_layers: Sequence[int] = (),
+    layered: bool = False,
 ) -> dict[str, Any]:
     """The graph of one conversation's delegated work, or of the fanout passed in when it has none.
 
+    ``dag_run`` names the dag run to draw instead of the newest. A named run that exists is drawn alone (no team,
+    no plain delegations beside it) and does not lapse after ``linger``; one that does not is the newest, as ever.
+    ``layered`` asks for the Desktop pane's cut (`_layered`): lanes kept by layer around the frontier, each carrying
+    its layer, with what each layer lost counted; ``open_layers`` are the layers that pane holds open, drawn whole
+    before the rest. Every other reader (the TUI block, the chat end post) gets `_bounded`'s cut, as before.
+
     A graph whose lanes have all settled is inactive once ``linger`` seconds
-    have passed since its last change; ``None`` keeps it (the chat end post of
+    have passed since its last change; ``None`` keeps it, and ``keep_dag`` keeps a dag run's (the Desktop pane, which
+    draws a finished run for its node summaries and figures) (the chat end post of
     a run it opened, `delegation_snapshot.py`). ``segments`` is
     `graph_segments`' answer for ``session_id`` when the caller already read
     it. Never raises: an unreadable record or database leaves the graph
@@ -527,8 +866,9 @@ def build_delegation_graph(
         connection = _connect(Path(hermes_home)) if session_id else None
         if session_id and not segments:
             segments = _segments(connection, session_id)
+        # A kept run past its linger yields to a current fanout: live work outranks a finished run nobody picked.
         graph = _build(omh_home, hermes_home, session_id, moment, root_model, titles, scope, linger, segments or [],
-                       connection)
+                       connection, dag_run, keep_dag and not fanout)
     except (OSError, ValueError, TypeError, KeyError, sqlite3.Error) as error:
         graph = inactive_graph(f"unreadable:{type(error).__name__}", scope=scope)
     finally:
@@ -539,7 +879,7 @@ def build_delegation_graph(
             graph = fanout_graph(fanout)
         except (ValueError, TypeError, KeyError) as error:
             graph = inactive_graph(f"unreadable_fanout:{type(error).__name__}", scope="global")
-    return _bounded(graph)
+    return _layered(graph, open_layers) if layered else _bounded(graph)
 
 
 def _build(
@@ -553,6 +893,8 @@ def _build(
     linger: float | None,
     segments: Sequence[str],
     connection: sqlite3.Connection | None,
+    dag_pick: str = "",
+    keep_dag: bool = False,
 ) -> dict[str, Any]:
     if not session_id:
         return inactive_graph("no_session", scope=scope)
@@ -560,10 +902,11 @@ def _build(
     teams = [found for found in (_team_record(Path(omh_home), segment) for segment in segments) if found is not None]
     team = max(teams, key=lambda found: found[1]) if teams else None
     children = [child for ledger in ledgers.values() if ledger for child in ledger["children"]]
-    dag = _dag_run(Path(omh_home), session_id, ledgers)
-    if dag is not None:
-        known = {child["child_session_id"] for child in children}
-        children += [child for child in dag["children"] if child["child_session_id"] not in known]
+    dag = _dag_run(Path(omh_home), session_id, ledgers, dag_pick)
+    if dag is not None and dag["picked"]:
+        # A run the pane named is drawn alone: no team, no lanes of the run's or outside it; only its own
+        # children feed its nodes' facts.
+        children, team, linger = list(dag["children"]), None, None
     if not children and team is None and dag is None:
         return inactive_graph("no_delegation", scope=scope)
     sessions = [session_id] + [child["child_session_id"] for child in children]
@@ -638,13 +981,17 @@ def _build(
         session = child["child_session_id"]
         observed = _observed_model(session, facts)
         delegation = facts["delegations"].get(child.get("delegation_id", ""), {})
-        model = observed or delegation.get("model", "")
+        reported = child.get("observed_route") or (delegation.get("routes") or {}).get(child.get("task_index"), {})
+        model = observed or delegation.get("model", "") or reported.get("model", "")
         category, source = _category(child.get("route") or {}, observed, parent_model)
+        if reported and not (child.get("route") or {}).get("category"):
+            # Hermes' backend picked this child's model: not OMH's route, and not the parent's by inheritance.
+            category, source = "?", "backend_route"
         state, status, elapsed = _child_state(child, facts, now)
         stop = child.get("stop")
-        return {
+        row = {
             "model": model or "?",
-            "effort": (facts["sessions"].get(session) or {}).get("effort", ""),
+            "effort": (facts["sessions"].get(session) or {}).get("effort", "") or reported.get("reasoning_effort", ""),
             "category": category,
             "category_source": source,
             "state": state,
@@ -654,6 +1001,16 @@ def _build(
             "ended_at": float(stop["observed_at"]) if isinstance(stop, Mapping) else None,
             "output_tokens": (facts["sessions"].get(session) or {}).get("output_tokens"),
         }
+        usage = (facts["sessions"].get(session) or {}).get("usage")
+        if usage:
+            row["usage"] = usage
+        if reported:
+            row["route_backend"] = reported["backend"]
+            if reported.get("label"):
+                row["route_label"] = reported["label"]
+            if reported.get("fallback_activated"):
+                row["route_origin"] = "fallback"
+        return row
 
     def title_for(child: Mapping[str, Any]) -> str:
         title = titles(child["subagent_id"])
@@ -702,7 +1059,7 @@ def _build(
             if child is not None:
                 derived = facts_for(child, model_of_node["root"])
                 node.update({key: derived[key] for key in ("model", "effort", "category", "category_source",
-                                                           "output_tokens")})
+                                                           "output_tokens", "usage") if key in derived})
                 node["session_tail"] = session_tail(child_session)
                 if states[unit_id] in ("dispatched", "repairing"):
                     # The team record says the attempt was sent; only the child's own records say it is moving.
@@ -722,7 +1079,8 @@ def _build(
                 edges.append({"from": "root", "to": node_id, "kind": "dispatch"})
 
     if dag is not None:
-        order = _dag_nodes(dag, nodes, edges, order, facts_for, model_of_node, node_of_subagent, node_of_session)
+        order = _dag_nodes(dag, nodes, edges, order, facts_for, model_of_node, node_of_subagent, node_of_session,
+                           now)
 
     def parent_of(child: Mapping[str, Any]) -> str:
         parent_id = node_of_subagent.get(child["parent_subagent_id"], "") if child["parent_subagent_id"] else ""
@@ -750,18 +1108,29 @@ def _build(
         derived = facts_for(child, model_of_node.get(parent_id, ""))
         key = (child["parent_session_id"], child["parent_turn_id"] or child.get("call_id", ""))
         group = f"wave {waves[key]} · {_clock(wave_start[key])}" if parent_id == "root" and key in waves else ""
-        nodes.append({
+        entry = {
             "id": node_id, "kind": "lane",
             "title": _text(title_for(child), TITLE_LIMIT) or f"session {session_tail(child['child_session_id'])}",
             **derived, "order": order, "group": group, "waits_on": 0,
             "session_tail": session_tail(child["child_session_id"]),
-        })
+        }
+        if dag is not None:
+            # No node of the run owns this child: it stays visible under its own outside-DAG group, out of the
+            # run's layers and edges (`_layers`, the strip below).
+            entry["outside_dag"] = True
+        nodes.append(entry)
         model_of_node[node_id] = derived["model"] if derived["model"] != "?" else ""
         order += 1
         edges.append({"from": parent_id, "to": node_id, "kind": "dispatch"})
 
     if linger is not None:
         nodes, edges = _without_old_waves(nodes, edges, children, now, linger)
+    if any(node.get("outside_dag") is True for node in nodes):
+        # The prune above still saw these edges (an outside lane goes with its wave as ever); the payload carries
+        # none touching an outside lane, so no view can draw it under the run.
+        edges = [edge for edge in edges
+                 if not any(node.get("outside_dag") is True and node["id"] in (edge["from"], edge["to"])
+                            for node in nodes)]
     lanes = [node for node in nodes if node["kind"] != "root"]
     if not lanes:
         return inactive_graph("no_delegation", scope=scope)
@@ -771,7 +1140,7 @@ def _build(
                  + [float(child["stop"]["observed_at"]) for child in children if isinstance(child.get("stop"), dict)]
                  + ([team[1]] if team is not None else [])
                  + ([float(dag["record"].get("updated_at") or 0.0)] if dag is not None else []))
-    if settled and linger is not None and now - newest > linger:
+    if settled and linger is not None and not (keep_dag and dag is not None) and now - newest > linger:
         return inactive_graph("settled", scope=scope)
     if dag is not None:
         name = dag_graph_name(dag["record"])
@@ -790,6 +1159,12 @@ def _build(
         # reopens the run (`delegation_snapshot`).
         graph["dag_open"] = dag_open
         graph["dag_topology"] = _dag_topology(dag["record"])
+        if dag["state"] in FINISHED_STATES:
+            # A finished run's goal verdict, as `omh_dag` and `omh_run_summary` give it (the same states).
+            graph["dag_verdict"] = goal_verdict(dag["record"], dag["derived"])[0]
+            criteria = criteria_view(dag["record"], dag["derived"])
+            if criteria is not None:
+                graph["dag_criteria"] = criteria_count(criteria)  # `2/3 criteria met`, shown beside the verdict
     return graph
 
 
@@ -811,6 +1186,7 @@ DAG_OPEN_STATES: Final = frozenset({"running"})
 _DAG_VIEW: Final = {
     "accepted": ("done", "accepted"),
     "repaired": ("done", "repaired"),
+    "carried": ("done", "carried"),  # taken over from an earlier run's accepted node (`dag_run.carry_forward`)
     "failed": ("failed", "failed"),
     "blocked": ("failed", "blocked"),
     "handed_out": ("dispatched", "handed out"),
@@ -820,6 +1196,8 @@ _DAG_VIEW: Final = {
     "waiting": ("waiting", "waiting"),
     "held": ("waiting", "held"),
     "cancelled": ("interrupted", "cancelled"),
+    # Settled to wait on a background process or a CI run until its `wake_at` (`dag_run.settle`): not over.
+    "parked": ("waiting", "parked"),
 }
 
 
@@ -847,49 +1225,105 @@ def dag_origin(node: Mapping[str, Any]) -> tuple[str, str]:
     return kind, str(node.get("found_by") or "")
 
 
-def _dag_run(
+def _dag_runs(
     omh_home: Path, session_id: str, ledgers: Mapping[str, Mapping[str, Any] | None]
-) -> dict[str, Any] | None:
-    """The conversation's newest `omh_dag/v1` run with the ledger children bound to it, or None.
+) -> tuple[list[str], list[tuple[dict[str, Any], Path]]]:
+    """The segments a conversation's runs are read from, and those runs.
 
     The run is stored under the segment that defined it; when this segment
     holds none, the conversation's other segments are read (the keys of
     ``ledgers``, `graph_segments`), so a compacted parent still finds its run.
-    The caller derives the states once it has joined the stops.
     """
     segments = [session_id]
     runs = session_runs(omh_home, session_id)
     if not runs:
         segments = sorted(ledgers)
         runs = [item for segment in segments for item in session_runs(omh_home, segment)]
+    return segments, runs
+
+
+def _dag_run(
+    omh_home: Path, session_id: str, ledgers: Mapping[str, Mapping[str, Any] | None], pick: str = ""
+) -> dict[str, Any] | None:
+    """The conversation's newest `omh_dag/v1` run, or the one named ``pick`` (``picked``), with its ledger children.
+
+    The caller derives the states once it has joined the stops.
+    """
+    segments, runs = _dag_runs(omh_home, session_id, ledgers)
     if not runs:
         return None
-    record = max(runs, key=lambda item: float(item[0].get("updated_at") or 0.0))[0]
+    named = next((item[0] for item in runs if pick and str(item[0].get("run")) == pick), None)
+    record = named or max(runs, key=lambda item: float(item[0].get("updated_at") or 0.0))[0]
     run = str(record["run"])
     children = [
         child for segment in segments for child in ((ledgers.get(segment) or {}).get("children") or [])
         if isinstance(child.get("dag"), Mapping) and child["dag"].get("run") == run
     ]
-    return {"record": record, "children": children}
+    return {"record": record, "children": children, "picked": named is not None}
 
+
+def dag_run_choices(
+    omh_home: Path, hermes_home: Path, session_id: str, *, now: float | None = None
+) -> list[dict[str, Any]]:
+    """Every dag run of one conversation, newest change first: what a pane offers to switch between.
+
+    Each is ``run``, ``name``, ``state`` (as `dag_run.run_state` words it), the ``nodes`` it holds and when it last
+    changed (``updated_at``). Never raises: an unreadable store is no choices.
+    """
+    if not session_id:
+        return []
+    moment = time.time() if now is None else now
+    connection = None
+    try:
+        connection = _connect(Path(hermes_home))
+        ledgers = {segment: read_ledger(Path(omh_home), segment) for segment in _segments(connection, session_id)}
+        segments, runs = _dag_runs(Path(omh_home), session_id, ledgers)
+        choices = []
+        for record, _path in runs:
+            run = str(record["run"])
+            children = [
+                child for segment in segments for child in ((ledgers.get(segment) or {}).get("children") or [])
+                if isinstance(child.get("dag"), Mapping) and child["dag"].get("run") == run
+            ]
+            choices.append({
+                "run": run,
+                "name": dag_graph_name(record),
+                "state": run_state(record, derive(record, children, moment)),
+                "nodes": len(record["nodes"]),
+                "updated_at": float(record.get("updated_at") or 0.0),
+            })
+    except (OSError, ValueError, TypeError, KeyError, sqlite3.Error):
+        return []
+    finally:
+        if connection is not None:
+            connection.close()
+    return sorted(choices, key=lambda choice: choice["updated_at"], reverse=True)
 
 
 def _dag_nodes(
     dag: Mapping[str, Any], nodes: list[dict[str, Any]], edges: list[dict[str, str]], order: int,
     facts_for: Callable[[Mapping[str, Any], str], dict[str, Any]], model_of_node: dict[str, str],
-    node_of_subagent: dict[str, str], node_of_session: dict[str, str],
+    node_of_subagent: dict[str, str], node_of_session: dict[str, str], now: float,
 ) -> int:
     """Add a dag run's nodes and its recorded edges; returns the next drawing order.
 
     A node a repair or an extend round added also gets an edge from where it
     came from (`dag_origin`) when nothing else of its own group leads to it,
-    so the drawing shows it below that node.
+    so the drawing shows it below that node. Each node carries its role
+    (`role`, `dag_run.node_role`: build, baseline, verify or review), which
+    the TUI names a finished child's briefing by, and its place in the run's
+    definition order (`node_index`: superseded and added nodes keep theirs),
+    which picks its handle's hue. A parked node is a waiting one
+    marked `parked`, with what its attempt recorded it waits on (`parked_at`,
+    `wake_at`, `wait_handle`, `wait_reason`); its elapsed time is the time
+    since it parked.
     """
     record, derived = dag["record"], dag["derived"]
     run = str(record["run"])
     # A held node of a run that is not moving (stopped, cancelled, or waiting on a repair) will not run on its own.
     stopped = dag["state"] not in DAG_OPEN_STATES
     drawn = {str(node["id"]) for node in record["nodes"] if derived[str(node["id"])]["state"] != "superseded"}
+    defined = {str(node["id"]): index for index, node in enumerate(record["nodes"])}
     for node_id, layer in _dag_layers(record, drawn).items():
         node = next(item for item in record["nodes"] if item["id"] == node_id)
         info = derived[node_id]
@@ -910,7 +1344,7 @@ def _dag_nodes(
             "category": _text(node.get("category"), 40) or "?", "category_source": "dag_plan", "model": "?",
             "effort": "", "state": state, "status": status, "elapsed_seconds": None, "order": order,
             "group": group, "waits_on": len(info["waits_on"]) if info["state"] == "waiting" else 0,
-            "dag_node": node_id, "dag_origin": origin,
+            "dag_node": node_id, "dag_origin": origin, "role": node_role(node), "node_index": defined[node_id],
         }
         summary = _prompt_summary(node.get("prompt"))
         if summary:
@@ -926,7 +1360,16 @@ def _dag_nodes(
             facts = facts_for(child, model_of_node["root"])
             # Once a child exists its category is the recorded route's, shown only where its model matches.
             entry.update({key: facts[key] for key in ("model", "effort", "category", "category_source",
-                                                       "output_tokens")})
+                                                       "output_tokens", "usage") if key in facts})
+            entry.update({key: facts[key] for key in ("route_backend", "route_label", "route_origin") if key in facts})
+            if facts["category_source"] == "backend_route":
+                # The plan's lane holds where Hermes ran the option this run handed out; any other option is not it.
+                attempts = node.get("attempts") if isinstance(node.get("attempts"), list) else []
+                handed = attempts[-1].get("option", "") if attempts and isinstance(attempts[-1], dict) else ""
+                if handed and handed == facts.get("route_label"):
+                    entry.update(category=_text(node.get("category"), 40) or "?", category_source="backend_option")
+                else:
+                    entry["category_source"] = "route_option_mismatch" if handed else "backend_route"
             entry["session_tail"] = session_tail(child["child_session_id"])
             if info["state"] == "running":
                 # The record says the node is out; only the child's own records say it is moving.
@@ -935,6 +1378,8 @@ def _dag_nodes(
             node_of_subagent[child["subagent_id"]] = graph_id
             node_of_session[child["child_session_id"]] = graph_id
             model_of_node[graph_id] = facts["model"] if facts["model"] != "?" else ""
+        if info["state"] == "parked":
+            entry.update(_parked_fields(node, now))
         nodes.append(entry)
         parents = [parent for parent in node["depends_on"] if parent in drawn]
         edges.extend({"from": dag_node_id(run, parent), "to": graph_id, "kind": "depends_on"} for parent in parents)
@@ -944,6 +1389,31 @@ def _dag_nodes(
         elif not parents:
             edges.append({"from": "root", "to": graph_id, "kind": "dispatch"})
     return order
+
+
+def _parked_fields(node: Mapping[str, Any], now: float) -> dict[str, Any]:
+    """What a parked node's last attempt says it waits on, and how long it has: `settle` stamps `settled_at`,
+    `handle`, `wake_at` and `reason` on a park. A field the attempt does not carry is left out.
+
+    Past its `wake_at` the node is ``parked_due``: its wait is over by its own deadline and it now waits on the
+    parent to pick it up (`dag_run.offerable` offers it again), not on its handle, so no view draws it as moving."""
+    attempts = node.get("attempts") if isinstance(node.get("attempts"), list) else []
+    attempt = attempts[-1] if attempts and isinstance(attempts[-1], Mapping) else {}
+    fields: dict[str, Any] = {"parked": True, "elapsed_seconds": None}  # never the child's run time
+    parked_at, wake_at = attempt.get("settled_at"), attempt.get("wake_at")
+    if isinstance(parked_at, int | float) and not isinstance(parked_at, bool) and 0 < parked_at <= now:
+        fields.update(parked_at=float(parked_at), elapsed_seconds=now - float(parked_at))
+    if isinstance(wake_at, int | float) and not isinstance(wake_at, bool) and wake_at > 0:
+        fields["wake_at"] = float(wake_at)
+        if wake_at <= now:
+            # Its time since it became due, under the word `due`: how long it has waited on the parent.
+            fields.update(parked_due=True, status="due", elapsed_seconds=now - float(wake_at))
+    handle, reason = _text(attempt.get("handle"), 120), _text(attempt.get("reason"), 120)
+    if handle:
+        fields["wait_handle"] = handle
+    if reason:
+        fields["wait_reason"] = reason
+    return fields
 
 
 def _origin_parent(node: Mapping[str, Any], record: Mapping[str, Any], drawn: set[str]) -> str:
@@ -1091,7 +1561,8 @@ def fanout_graph(record: Mapping[str, Any]) -> dict[str, Any]:
 # Kept on its own walk, not the DAG core's `layers`: given a repeated node id this walk answers no layers or
 # lists the id twice, where the core reads the id once, and its readers do not drop repeats first.
 def _layers(nodes: Sequence[Mapping[str, Any]], edges: Sequence[Mapping[str, str]]) -> list[list[str]]:
-    ids = [str(node["id"]) for node in nodes]
+    # An outside_dag lane is a node but no layer's member: callers hand it whatever they have, and it never lands.
+    ids = [str(node["id"]) for node in nodes if node.get("outside_dag") is not True]
     incoming = {node_id: 0 for node_id in ids}
     successors: dict[str, list[str]] = {node_id: [] for node_id in ids}
     for edge in edges:
@@ -1100,8 +1571,11 @@ def _layers(nodes: Sequence[Mapping[str, Any]], edges: Sequence[Mapping[str, str
             incoming[edge["to"]] += 1
     layer = {node_id: 0 for node_id in ids}
     ready = [node_id for node_id in ids if incoming[node_id] == 0]
-    while ready:
-        current = ready.pop(0)
+    # Walked by index, not popped from the front, and bucketed in one pass: a 5000-deep chain stays linear.
+    at = 0
+    while at < len(ready):
+        current = ready[at]
+        at += 1
         for lower in successors[current]:
             layer[lower] = max(layer[lower], layer[current] + 1)
             incoming[lower] -= 1
@@ -1110,7 +1584,10 @@ def _layers(nodes: Sequence[Mapping[str, Any]], edges: Sequence[Mapping[str, str
     if any(count for count in incoming.values()):
         return []
     depth = max(layer.values(), default=-1) + 1
-    return [[node_id for node_id in ids if layer[node_id] == index] for index in range(depth)]
+    buckets: list[list[str]] = [[] for _ in range(depth)]
+    for node_id in ids:
+        buckets[layer[node_id]].append(node_id)
+    return buckets
 
 
 def _finish(
@@ -1196,4 +1673,177 @@ def _cut(graph: dict[str, Any], keep: int) -> dict[str, Any]:
         "hidden_by_group": hidden_by_group,
         "hidden_by_state": hidden_by_state,
         "group_order": group_order,
+    }
+
+
+# The Desktop pane's cut. A lane in hand (running, or returned to be checked) is kept before any other, then a
+# lane that stopped short (failed, blocked, stuck, interrupted), then the rest by their layer's distance from the
+# frontier: a running or failed lane is never cut while a finished one is kept.
+_IN_HAND_STATES: Final = frozenset({"running", "dispatched"})
+_STOPPED_STATES: Final = frozenset({"failed", "stuck", "interrupted"})
+# The states a layer holds work in hand by; the pane's `ACTIVE_STATES` reads the same.
+_ACTIVE_STATES: Final = frozenset({"running", "stuck", "failed", "dispatched", "interrupted"})
+
+
+def _layered(graph: dict[str, Any], open_layers: Sequence[int] = ()) -> dict[str, Any]:
+    """The pane's cut: at most `GRAPH_NODE_LIMIT` nodes and `GRAPH_BYTE_LIMIT` bytes, kept by layer.
+
+    ``open_layers`` are the layers the pane has open: their lanes come after the lanes in hand and the stopped ones
+    and before the rest, under the larger `GRAPH_OPEN_NODE_LIMIT` and `GRAPH_OPEN_BYTE_LIMIT`. Every kept run lane
+    carries its ``layer``; an outside-dag lane is selected by the same ranking (after the run's own lanes of its
+    state's tier) but carries none. ``layer_count`` is how many layers the run has, and ``layer_hidden`` counts, for
+    each layer that lost any, the lanes it lost by state; a cut outside lane counts in ``hidden_nodes`` without a
+    layer. A kept lane whose parent was cut hangs from its nearest kept ancestor by an
+    ``elided`` edge, so it is never drawn under the wrong parent. With ``open_layers`` named the cut is sent even
+    when nothing was left out, so the pane's ask stays the same. A run whose layer rows alone overrun the bytes is
+    sent as its counts by state (``counts_only``), which the pane draws as one line.
+    """
+    nodes = graph.get("nodes") or []
+    if graph.get("status") != "active":
+        return graph
+    lanes = [node for node in nodes if node.get("kind") != "root"]
+    # Outside-dag lanes join the same bounded selection, never a free pass past it: within a state's tier they
+    # rank after the run's own lanes, so running DAG work is kept ahead of any outside lane and the outside
+    # roster can never consume the allowance the run's own work needs.
+    run_lanes = [node for node in lanes if node.get("outside_dag") is not True]
+    edges = graph.get("edges") or []
+    layer_ids = _layers(run_lanes, edges) or [[str(node["id"]) for node in run_lanes]]
+    layer_of = {node_id: at for at, ids in enumerate(layer_ids) for node_id in ids}
+    # The pane's frontier: the furthest layer with work in hand, else the first unsettled one, else the last.
+    states: list[set[str]] = [set() for _ in layer_ids]
+    for node in run_lanes:
+        states[layer_of[str(node["id"])]].add(str(node.get("state") or "unknown"))
+    active = [at for at, held in enumerate(states) if held & _ACTIVE_STATES]
+    unsettled = [at for at, held in enumerate(states) if held - {"done"}]
+    frontier = active[-1] if active else unsettled[0] if unsettled else len(layer_ids) - 1
+    wanted = {at for at in open_layers if 0 <= at < len(layer_ids)}
+
+    def rank(node: Mapping[str, Any]) -> tuple[Any, ...]:
+        state = str(node.get("state") or "")
+        tier = 0 if state in _IN_HAND_STATES else 1 if state in _STOPPED_STATES else 2
+        if node.get("outside_dag") is True:
+            # Its state's own tier, after the run's own lanes of that tier: outside work in hand still beats
+            # anything less urgent, but never displaces the run's own lanes.
+            return (tier, True, len(layer_ids), False, _KEEP_ORDER.get(state, 5), -int(node.get("order") or 0))
+        at = layer_of[str(node["id"])]
+        return (tier, at not in wanted, abs(at - frontier), at < frontier, _KEEP_ORDER.get(state, 5),
+                -int(node.get("order") or 0))
+
+    ranked = sorted(lanes, key=rank)
+    node_limit, byte_limit = (GRAPH_OPEN_NODE_LIMIT, GRAPH_OPEN_BYTE_LIMIT) if wanted else (GRAPH_NODE_LIMIT, GRAPH_BYTE_LIMIT)
+    roots = len(nodes) - len(lanes)
+    # Each lane's parents, and the nodes in the order a parent comes before its child (roots first, then by layer).
+    parents: dict[str, list[tuple[str, str]]] = {}
+    for edge in edges:
+        parents.setdefault(str(edge["to"]), []).append((str(edge["from"]), str(edge.get("kind") or "")))
+    walk = [str(node["id"]) for node in nodes if node.get("kind") == "root"] + [i for ids in layer_ids for i in ids]
+
+    def cut(keep: int) -> dict[str, Any]:
+        return _layered_cut(graph, {str(node["id"]) for node in ranked[:keep]}, layer_ids, layer_of, parents, walk)
+
+    def size(candidate: Mapping[str, Any]) -> int:
+        return len(json.dumps(candidate, sort_keys=True, default=str).encode("utf-8"))
+
+    whole = cut(len(ranked))
+    if len(nodes) <= node_limit and size(whole) <= byte_limit:
+        return whole if open_layers else graph
+    # Every kept lane adds its bytes, so what fits is (near enough) a prefix of the ranking: search its length.
+    low, high = 0, max(0, min(len(ranked), node_limit - roots))
+    while low < high:
+        middle = (low + high + 1) // 2
+        low, high = (middle, high) if size(cut(middle)) <= byte_limit else (low, middle - 1)
+    best = cut(low)
+    return best if size(best) <= byte_limit else _counts_only(graph, lanes, len(layer_ids))
+
+
+def _layered_cut(
+    graph: dict[str, Any],
+    kept_lanes: set[str],
+    layer_ids: list[list[str]],
+    layer_of: Mapping[str, int],
+    parents: Mapping[str, Sequence[tuple[str, str]]],
+    walk: Sequence[str],
+) -> dict[str, Any]:
+    nodes = graph["nodes"]
+    kept_ids = kept_lanes | {str(node["id"]) for node in nodes if node.get("kind") == "root"}
+    # An outside lane the selection kept carries no layer: it draws beside the run, never in it.
+    kept = [node if node.get("kind") == "root" or node.get("outside_dag") is True
+            else {**node, "layer": layer_of[str(node["id"])]}
+            for node in nodes if str(node["id"]) in kept_ids]
+    drawn = [edge for edge in graph["edges"] if str(edge["from"]) in kept_ids and str(edge["to"]) in kept_ids]
+    # For every cut node, its nearest kept ancestors, walked parents first; a kept lane under a cut parent takes an
+    # `elided` edge from each of them, which the pane draws as implied.
+    above: dict[str, dict[str, str]] = {}
+    for node_id in walk:
+        if node_id in kept_ids:
+            continue
+        reach: dict[str, str] = {}
+        for parent, kind in parents.get(node_id, ()):
+            for ancestor, first in ({parent: kind} if parent in kept_ids else above.get(parent, {})).items():
+                reach.setdefault(ancestor, first)
+        above[node_id] = reach
+    taken = {(str(edge["from"]), str(edge["to"])) for edge in drawn}
+    for node_id in walk:
+        if node_id not in kept_lanes:
+            continue
+        for parent, kind in parents.get(node_id, ()):
+            if parent in kept_ids:
+                continue
+            for ancestor in above.get(parent, {}):
+                if (ancestor, node_id) not in taken:
+                    taken.add((ancestor, node_id))
+                    drawn.append({"from": ancestor, "to": node_id, "kind": kind, "elided": True})
+    # Only the layers that lost lanes have a row; `layer_count` says how many there are in all.
+    rows: dict[int, dict[str, Any]] = {}
+    hidden_by_state: dict[str, int] = {}
+    for node in nodes:
+        if node.get("kind") == "root" or str(node["id"]) in kept_ids:
+            continue
+        state = str(node.get("state") or "unknown")
+        hidden_by_state[state] = hidden_by_state.get(state, 0) + 1
+        # An outside lane the cut omitted counts with the hidden lanes, but it lost no layer to name a row for.
+        if node.get("outside_dag") is not True:
+            at = layer_of[str(node["id"])]
+            row = rows.setdefault(at, {"layer": at, "count": 0, "states": {}})
+            row["count"] += 1
+            row["states"][state] = row["states"].get(state, 0) + 1
+    out = {key: value for key, value in graph.items() if key not in ("layers", "hidden_by_group", "group_order")}
+    topology = graph.get("dag_topology")
+    if isinstance(topology, Mapping):
+        # The path and the bottlenecks name lanes by title; only a kept lane's can be drawn.
+        titles = {str(node.get("title") or "") for node in kept}
+        out["dag_topology"] = {
+            **topology,
+            "critical_path": [title for title in topology.get("critical_path") or [] if str(title) in titles],
+            "bottlenecks": [row for row in topology.get("bottlenecks") or []
+                            if isinstance(row, Sequence) and row and str(row[0]) in titles],
+        }
+    return {
+        **out,
+        "nodes": kept,
+        "edges": drawn,
+        "hidden_nodes": len(nodes) - len(kept),
+        "hidden_by_state": hidden_by_state,
+        "layer_count": len(layer_ids),
+        "layer_hidden": [rows[at] for at in sorted(rows)],
+    }
+
+
+def _counts_only(graph: Mapping[str, Any], lanes: Sequence[Mapping[str, Any]], layer_count: int) -> dict[str, Any]:
+    """A run too deep for even its layer rows: no lanes, only what it holds by state."""
+    hidden_by_state: dict[str, int] = {}
+    for node in lanes:
+        state = str(node.get("state") or "unknown")
+        hidden_by_state[state] = hidden_by_state.get(state, 0) + 1
+    out = {key: value for key, value in graph.items()
+           if key not in ("layers", "hidden_by_group", "group_order", "dag_topology")}
+    return {
+        **out,
+        "nodes": [node for node in graph.get("nodes") or [] if node.get("kind") == "root"],
+        "edges": [],
+        "hidden_nodes": len(lanes),
+        "hidden_by_state": hidden_by_state,
+        "layer_count": layer_count,
+        "layer_hidden": [],
+        "counts_only": True,
     }

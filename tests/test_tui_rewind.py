@@ -13,14 +13,15 @@ the picked prompt's place; one that only prints leaves the rewind picked.
 
 from __future__ import annotations
 
+import math
 import unittest
 from dataclasses import replace
 
-from _tui_lines import line_text, lines_text
+from _tui_lines import line_text, lines_text, without_badge
 from test_tui_command_output import SKILL_LINE, SKILL_REFUSAL, SKILL_TURN
 from test_tui_gateway_contract import recorded_rows
 from test_tui_modes import PLAN_PROMPT, SID, answer, make_app, notices, type_text
-from omh.tui.app import DOUBLE_ESCAPE_SECONDS, REWIND_TURN_BACK_NOTICE, App, Attachment
+from omh.tui.app import DOUBLE_ESCAPE_SECONDS, HERMES_NEXT_TURN_SECONDS, REWIND_TURN_BACK_NOTICE, App, Attachment, QueuedLine
 from omh.tui.gateway import Event, Response
 from omh.tui.keys import CHAR, DOWN, ENTER, ESCAPE, Key
 from omh.tui.rewind_picker import CLOSE, PICK, RewindPicker, rewind_rows
@@ -56,7 +57,7 @@ def esc(app: App) -> None:
 
 
 def mode_row(app: App, cols: int) -> str:
-    return line_text(app._info_line(cols))
+    return without_badge(line_text(app._info_line(cols)))
 
 
 class PickerTests(unittest.TestCase):
@@ -90,10 +91,98 @@ class PickerTests(unittest.TestCase):
     def test_the_slot_names_what_picking_does(self) -> None:
         rows = lines_text(RewindPicker(rewind_rows(HISTORY)).lines(100, DEFAULT_THEME, 6, 1792006300.0))
         self.assertEqual(rows[0].rstrip(), " Rewind to a prompt (2)")  # its keys are the info line's
-        self.assertTrue(rows[1].startswith(" #2 Reply with exactly the word: two"), rows)
+        self.assertTrue(rows[2].startswith("❯ #2 Reply with exactly the word: two"), rows)  # under the header's rule
 
 
 class DoubleEscapeTests(unittest.TestCase):
+    def test_escape_after_leader_cancel_arms_fresh_before_completing(self) -> None:
+        for text, busy, kind in (("draft", False, "clear"), ("", True, "interrupt"), ("", False, "rewind")):
+            with self.subTest(kind=kind):
+                clock = Clock()
+                app, client = make_app(busy=busy, clock=clock)
+                app.composer.set_vim(True)
+                type_text(app, text)
+                esc(app)
+                before = (app.composer.text, app.composer.caret, app.composer.normal, list(app.composer.history))
+                esc(app)
+                self.assertEqual(app.escape_armed, (kind, 100.0))
+                clock.now = 100.1
+                app._on_input(Key(CHAR, " "))
+                self.assertEqual(app.escape_armed, (kind, 100.0))
+                clock.now = 100.2
+                esc(app)
+                self.assertIsNone(app.escape_armed)
+                self.assertFalse(app.composer.pending)
+                self.assertEqual(client.calls, [])
+                clock.now = 100.3
+                esc(app)  # Esc Space Esc Esc must only arm a fresh confirmation.
+                self.assertEqual(app.escape_armed, (kind, 100.3))
+                self.assertEqual(
+                    (app.composer.text, app.composer.caret, app.composer.normal, app.composer.history), before,
+                )
+                self.assertEqual(client.calls, [])
+                self.assertIsNone(app.rewind_picker)
+                clock.now = 100.4
+                esc(app)
+                self.assertIsNone(app.escape_armed)
+                if kind == "clear":
+                    self.assertEqual(app.composer.text, "")
+                    self.assertEqual(app.composer.history, [text])
+                    self.assertEqual(client.calls, [])
+                else:
+                    method = "session.interrupt" if busy else "session.history"
+                    self.assertEqual(client.calls, [(method, {"session_id": SID})])
+                    self.assertEqual(app.composer.history, [])
+                    if kind == "rewind":
+                        answer(app, client, HISTORY)
+                        self.assertIsNotNone(app.rewind_picker)
+                        self.assertEqual(len(app.rewind_picker.rows), 2)
+
+    def test_vim_double_escape_preserves_the_exact_inclusive_timeout(self) -> None:
+        self.assertEqual(DOUBLE_ESCAPE_SECONDS, 0.8)
+        for text, busy, kind in (("draft", False, "clear"), ("", True, "interrupt"), ("", False, "rewind")):
+            for canceled in (False, True):
+                for delta in (DOUBLE_ESCAPE_SECONDS, math.nextafter(DOUBLE_ESCAPE_SECONDS, math.inf)):
+                    with self.subTest(kind=kind, canceled=canceled, delta=delta):
+                        clock = Clock()
+                        clock.now = -0.3
+                        app, client = make_app(busy=busy, clock=clock)
+                        app.composer.set_vim(True)
+                        type_text(app, text)
+                        esc(app)
+                        if canceled:
+                            esc(app)
+                            clock.now = -0.2
+                            app._on_input(Key(CHAR, " "))
+                            clock.now = -0.1
+                            esc(app)
+                            self.assertIsNone(app.escape_armed)
+                        clock.now = 0.0  # Avoid rounding a tiny delta added to a large timestamp.
+                        esc(app)
+                        self.assertEqual(app.escape_armed, (kind, 0.0))
+                        self.assertEqual(client.calls, [])
+                        clock.now = delta
+                        esc(app)
+                        if delta > DOUBLE_ESCAPE_SECONDS:
+                            self.assertEqual(app.escape_armed, (kind, delta))
+                            self.assertEqual(app.composer.text, text)
+                            self.assertEqual(app.composer.history, [])
+                            self.assertEqual(client.calls, [])
+                            self.assertIsNone(app.rewind_picker)
+                            esc(app)  # The re-armed confirmation still works within its fresh window.
+                        self.assertIsNone(app.escape_armed)
+                        if kind == "clear":
+                            self.assertEqual(app.composer.text, "")
+                            self.assertEqual(app.composer.history, [text])
+                            self.assertEqual(client.calls, [])
+                        else:
+                            method = "session.interrupt" if busy else "session.history"
+                            self.assertEqual(client.calls, [(method, {"session_id": SID})])
+                            self.assertEqual(app.composer.history, [])
+                            if kind == "rewind":
+                                answer(app, client, HISTORY)
+                                self.assertIsNotNone(app.rewind_picker)
+
     def test_esc_twice_with_text_clears_it_into_the_history_and_once_keeps_it(self) -> None:
         clock = Clock()
         app, client = make_app(clock=clock)
@@ -262,15 +351,32 @@ class RewindTests(unittest.TestCase):
         self.assertIn("Hermes cut the session there", notices(app, NOTICE_WARN)[-1])
         self.assertFalse(app.turn_pending)
 
-    def test_the_images_sent_with_a_refused_rewind_come_back_as_chips(self) -> None:
-        # Hermes keeps an image queued when it refuses the prompt it was for, so the chip comes back with it.
+    def picked_with_image(self, text: str) -> tuple[App, object, Attachment]:
+        """A rewind picked and `text` with an image token sent: Hermes staged its bytes and answered the path."""
         app, client = self.picked()
-        chip = Attachment("/hermes/cache/images/upload_1.png", "shot.png", "")
-        app.attachments.append(chip)
+        app._set_composer(text)
+        image = Attachment("/hermes/cache/images/clip_1.png", "shot.png", "", "[Image #1]", b"\x89PNG")
+        app.composer.insert_image(image.label, image)
         app._on_input(Key(ENTER))
-        self.assertEqual(app.attachments, [])  # sent with the prompt
+        self.assertEqual(client.calls[-1][0], "image.attach_bytes")
+        answer(app, client, {"attached": True, "path": "/hermes/cache/images/upload_1.png"})
+        self.assertEqual(client.calls[-1][0], "prompt.submit")
+        return app, client, image
+
+    def test_the_images_staged_for_a_refused_rewind_are_detached_as_the_prompt_is_not_given_back(self) -> None:
+        # Hermes keeps what was staged for a prompt it refuses: it is detached, by the path Hermes answered.
+        app, client, _image = self.picked_with_image("")
         answer(app, client, error={"code": 4018, "message": "rewind target not found"})
-        self.assertEqual(app.attachments, [chip])
+        self.assertIn(("image.detach", {"session_id": SID, "path": "/hermes/cache/images/upload_1.png"}), client.calls)
+        self.assertEqual(app.composer.images, {})
+
+    def test_a_rewound_prompt_hermes_cut_for_but_refused_comes_back_with_its_tokens(self) -> None:
+        app, client, image = self.picked_with_image("again ")
+        answer(app, client, error={"code": 4001, "message": "Hermes cut the session, then refused the prompt (busy)",
+                                   "data": {"rewound": True}})
+        self.assertEqual(app.composer.expanded(), "again [Image #1] ")
+        self.assertEqual([held for _label, held in app.composer.images.values()], [image])
+        self.assertIn(("image.detach", {"session_id": SID, "path": "/hermes/cache/images/upload_1.png"}), client.calls)
 
     def test_a_refused_rewind_puts_the_screen_back_before_hermes_sends_its_history(self) -> None:
         app, client = self.sent_and_refused()
@@ -293,7 +399,6 @@ class RewindTests(unittest.TestCase):
         app._set_composer("an edited prompt")
         app._on_input(Key(ENTER))
         submit = len(client.calls)
-        app.busy_mode = "queue"
         type_text(app, "a queued prompt")
         app._on_input(Key(ENTER))
         app._on_response(Response(submit, None, {"code": 4018, "message": "rewind target not found"}))
@@ -330,7 +435,6 @@ class RewindTests(unittest.TestCase):
                 app._set_composer("an edited prompt")
                 app._on_input(Key(ENTER))
                 submit = len(client.calls)
-                app.busy_mode = "queue"
                 type_text(app, "a queued prompt")
                 app._on_input(Key(ENTER))
                 app._on_response(Response(submit, None, {"code": 4018, "message": "rewind target not found"}))
@@ -373,6 +477,23 @@ class RewindTests(unittest.TestCase):
         self.assertIn("between turns", notices(app, NOTICE_WARN)[-1])
         self.assertIsNone(app.rewind)
 
+    def test_a_rewind_sent_while_the_queue_waits_goes_first_and_the_queued_line_follows_its_turn(self) -> None:
+        # While the queue waits for the turn Hermes runs next a prompt joins the queue, but a rewind cannot: its cut
+        # would drop the turns the lines ahead of it start. It goes at once, and they follow its turn.
+        app, client = self.picked()
+        app.queued.append(QueuedLine("older queued line"))
+        app.hermes_next_due = app.clock() + HERMES_NEXT_TURN_SECONDS
+        app._set_composer("an edited prompt")
+        app._on_input(Key(ENTER))
+        submits = [params for method, params in client.calls if method == "prompt.submit"]
+        self.assertEqual([(params["text"], params.get("truncate_before_row_id")) for params in submits],
+                         [("an edited prompt", 7)])
+        self.assertEqual([line.text for line in app.queued], ["older queued line"])
+        app._on_event(Event("message.start", SID, {}))
+        self.assertIsNone(app.hermes_next_due)  # the rewind's turn ends the wait: the queue goes at its end
+        app._on_event(Event("message.complete", SID, {"text": "rewound answer", "status": "complete"}))
+        self.assertEqual(client.calls[-1], ("prompt.submit", {"session_id": SID, "text": "older queued line", "queued": True}))
+
     def test_esc_cancels_a_rewind_and_empties_the_composer(self) -> None:
         app, client = self.picked()
         esc(app)
@@ -391,12 +512,14 @@ class RewindTests(unittest.TestCase):
         answer(app, client, HISTORY)
         self.assertIsNotNone(app.rewind_picker)
 
-    def test_rewind_waits_for_the_turn_to_end(self) -> None:
+    def test_rewind_waits_in_the_queue_for_the_turn_to_end(self) -> None:
         app, client = make_app(busy=True)
         type_text(app, "/rewind")
         app._on_input(Key(ENTER))
         self.assertEqual(client.calls, [])
-        self.assertIn("between turns", notices(app, NOTICE_WARN)[-1])
+        self.assertEqual([line.text for line in app.queued], ["/rewind"])
+        app._on_event(Event("message.complete", SID, {"text": "done", "status": "complete"}))
+        self.assertEqual(client.calls[-1], ("session.history", {"session_id": SID}))
 
     def test_a_session_with_no_prompt_yet_has_nothing_to_rewind_to(self) -> None:
         app, client = make_app()

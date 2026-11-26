@@ -1,6 +1,6 @@
 ---
 name: "omh-model-finetuning"
-description: "[omh] Fine-tuning a model on your own data -- SFT, DPO, RLVR or a LoRA adapter: decide first whether prompting or retrieval already closes the gap, choose the method from the data you have, and promote a checkpoint only when it beats the untuned baseline on a held-out eval. Use when the user says: model-finetuning, model finetuning, model fine-tuning, fine-tune a model, fine-tune the model, fine tune a model, fine tune the model, fine-tune."
+description: "[omh] Fine-tuning a model on your own data: SFT, DPO, RLVR…"
 license: MIT
 metadata:
   hermes:
@@ -17,7 +17,7 @@ This is an OMH `model-finetuning` workflow skill, projected for Agent Skills hos
 
 ## Why This Exists
 
-`model-finetuning` exists because producing a model had no owner: `inference-serving` serves one that exists and `llm-app-dev` builds on top of one, while an SFT or DPO question had no baseline comparison and no way to answer that training is not needed.
+`model-finetuning` exists because producing a model had no owner: `omh-inference-serving` serves one that exists and `omh-llm-app-dev` builds on top of one, while an SFT or DPO question had no baseline comparison and no way to answer that training is not needed.
 
 ## First Steps
 
@@ -30,6 +30,7 @@ This is an OMH `model-finetuning` workflow skill, projected for Agent Skills hos
 - The ask is serving an existing model behind an endpoint or benchmarking that endpoint; use `omh-inference-serving`.
 - The ask is building an application on top of a hosted model -- RAG, structured output, prompt versions; use `omh-llm-app-dev`.
 - The ask is learning from an OMH run, a missed route, or a skill improvement candidate.
+- The ask is a smaller or cheaper copy of an existing network -- quantization, pruning, or distillation into a student whose goal is size; use `omh-model-compression`.
 
 ## Examples
 

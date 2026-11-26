@@ -32,7 +32,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          # The PR scope step diffs against the base branch's merge base.
+          fetch-depth: 0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.12"
       - name: Install package
@@ -55,22 +58,35 @@ jobs:
       # round trip 4 s, PowerShell parse/redirect ~7 s, compile). Re-read them
       # when those gates change. The serial quarantine runs after the last
       # shard's tests, and the planner seeds its duration onto that shard.
+      # A pull request that changes only apps/omher/ (and CHANGELOG.md) plans
+      # the unit tests whose source reads those paths, ~6% of the suite; any
+      # other change and every main push plans the whole inventory, and main
+      # re-runs everything on the merged tree (tools/test_sharding/scope.py).
+      - name: PR scope
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --name-only "origin/${{ github.base_ref }}...HEAD" > changed-paths.txt
+            echo "SCOPE_ARGS=--changed-paths changed-paths.txt" >> "$GITHUB_ENV"
+            wc -l < changed-paths.txt
+          fi
       - name: Plan test shards
         run: >-
-          python tools/test_sharding/plan.py --shards 2 --shard0-offset 25
+          python tools/test_sharding/plan.py --shards 3 --shard0-offset 25
           --durations timings-history/timings.json
           --quarantine tools/test_sharding/quarantine.json
-          --out shard-plan/plan.json
+          --out shard-plan/plan.json $SCOPE_ARGS
       # Windows runs the same suite more than twice as slowly as Linux, so its lane
-      # gets its own 4-shard plan over the same inventory and quarantine; the
-      # Linux lanes keep 2. The aggregate validates each lane against the plan
+      # gets its own 6-shard plan over the same inventory and quarantine; the
+      # Linux lanes run 3. At 2 and 4 every shard took 26-29 min of unit tests
+      # (PR #3215's run); 3 and 6 put both lanes near 17 min of measured test
+      # time per shard, and the longest single Windows test (12.6 min) still fits. The aggregate validates each lane against the plan
       # that lane actually ran.
       - name: Plan Windows test shards
         run: >-
-          python tools/test_sharding/plan.py --shards 4 --shard0-offset 90
+          python tools/test_sharding/plan.py --shards 6 --shard0-offset 90
           --durations timings-history/timings.json
           --quarantine tools/test_sharding/quarantine.json
-          --out shard-plan/plan-windows.json
+          --out shard-plan/plan-windows.json $SCOPE_ARGS
       - name: Upload shard plan
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -93,7 +109,7 @@ jobs:
         # EXPECTED_LANES spells the same sets per event and fails closed when
         # one of them is missing; the tests pin the two together.
         python-version: ${{ github.event_name == 'pull_request' && fromJSON('["3.11"]') || fromJSON('["3.11", "3.13"]') }}
-        shard: [0, 1]
+        shard: [0, 1, 2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -102,7 +118,7 @@ jobs:
           # `git diff --check` with no range compares the working tree to the
           # index -- always empty after checkout, so it would always pass.
           fetch-depth: 0
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: ${{ matrix.python-version }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -112,7 +128,7 @@ jobs:
         with:
           bun-version: "1.3.14"
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
       - name: Install package
         run: python -m pip install -e .
       - name: Download shard plan
@@ -126,7 +142,7 @@ jobs:
       - name: Unit tests (shard ${{ matrix.shard }})
         run: >-
           python tools/test_sharding/run.py --plan shard-plan/plan.json
-          --lane linux-${{ matrix.python-version }} --shard ${{ matrix.shard }} --workers 2
+          --lane linux-${{ matrix.python-version }} --shard ${{ matrix.shard }} --workers 4
           --attempt ${{ github.run_attempt }}
           --out results/result-linux-${{ matrix.python-version }}-${{ matrix.shard }}-attempt-${{ github.run_attempt }}.json
       - name: Upload shard result
@@ -142,7 +158,7 @@ jobs:
       # tools/test_sharding/quarantine.json carry owner + reason metadata; a
       # stale or metadata-less entry fails the plan.
       - name: Quarantined tests (serial)
-        if: ${{ !cancelled() && matrix.shard == 1 }}
+        if: ${{ !cancelled() && matrix.shard == 2 }}
         env:
           PYTHONPATH: tests
         run: >-
@@ -151,7 +167,7 @@ jobs:
           --attempt ${{ github.run_attempt }}
           --out results/result-quarantine-linux-${{ matrix.python-version }}-attempt-${{ github.run_attempt }}.json
       - name: Upload quarantine result
-        if: ${{ always() && matrix.shard == 1 }}
+        if: ${{ always() && matrix.shard == 2 }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: shard-result-quarantine-linux-${{ matrix.python-version }}-attempt-${{ github.run_attempt }}
@@ -255,10 +271,10 @@ jobs:
       # -- and it cancelled a different half on each of two consecutive heads.
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.12"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -268,7 +284,7 @@ jobs:
         with:
           bun-version: "1.3.14"
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
       - name: Install package
         run: python -m pip install -e .
       - name: Download shard plan
@@ -286,7 +302,7 @@ jobs:
           PYTHONPATH: tests
         run: >-
           python tools/test_sharding/run.py --plan shard-plan/plan-windows.json
-          --lane windows-3.12 --shard ${{ matrix.shard }} --workers 2
+          --lane windows-3.12 --shard ${{ matrix.shard }} --workers 4
           --attempt ${{ github.run_attempt }}
           --out results/result-windows-3.12-${{ matrix.shard }}-attempt-${{ github.run_attempt }}.json
       - name: Upload shard result
@@ -298,7 +314,7 @@ jobs:
       # Serial quarantine in its own process after the lane's last shard; see
       # the same step in the `test` job.
       - name: Quarantined tests (serial)
-        if: ${{ !cancelled() && matrix.shard == 3 }}
+        if: ${{ !cancelled() && matrix.shard == 5 }}
         env:
           PYTHONPATH: tests
         run: >-
@@ -307,7 +323,7 @@ jobs:
           --attempt ${{ github.run_attempt }}
           --out results/result-quarantine-windows-3.12-attempt-${{ github.run_attempt }}.json
       - name: Upload quarantine result
-        if: ${{ always() && matrix.shard == 3 }}
+        if: ${{ always() && matrix.shard == 5 }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: shard-result-quarantine-windows-3.12-attempt-${{ github.run_attempt }}
@@ -384,6 +400,86 @@ jobs:
         if: matrix.shard == 0
         shell: powershell
         run: ./tests/powershell/Test-OmhLatestRelease.ps1 -InjectRegression
+      - name: Windows installer omher helpers (PowerShell 7)
+        if: matrix.shard == 0
+        shell: pwsh
+        run: ./tests/powershell/Test-OmhOmher.ps1
+      - name: Windows installer omher mutation (PowerShell 7)
+        if: matrix.shard == 0
+        shell: pwsh
+        run: ./tests/powershell/Test-OmhOmher.ps1 -InjectRegression
+      - name: Windows installer omher helpers (Windows PowerShell 5.1)
+        if: matrix.shard == 0
+        shell: powershell
+        run: ./tests/powershell/Test-OmhOmher.ps1
+      - name: Windows installer omher mutation (Windows PowerShell 5.1)
+        if: matrix.shard == 0
+        shell: powershell
+        run: ./tests/powershell/Test-OmhOmher.ps1 -InjectRegression
+      - name: Windows installer Python selection (PowerShell 7)
+        if: matrix.shard == 0
+        shell: pwsh
+        run: ./tests/powershell/Test-OmhPythonSelection.ps1
+      - name: Windows installer Python selection mutation (PowerShell 7)
+        if: matrix.shard == 0
+        shell: pwsh
+        run: ./tests/powershell/Test-OmhPythonSelection.ps1 -InjectRegression
+      - name: Windows installer Python selection (Windows PowerShell 5.1)
+        if: matrix.shard == 0
+        shell: powershell
+        run: ./tests/powershell/Test-OmhPythonSelection.ps1
+      - name: Windows installer Python selection mutation (Windows PowerShell 5.1)
+        if: matrix.shard == 0
+        shell: powershell
+        run: ./tests/powershell/Test-OmhPythonSelection.ps1 -InjectRegression
+      - name: Windows installer Hermes lookup (PowerShell 7)
+        if: matrix.shard == 0
+        shell: pwsh
+        run: ./tests/powershell/Test-OmhHermesPython.ps1
+      - name: Windows installer Hermes lookup mutation (PowerShell 7)
+        if: matrix.shard == 0
+        shell: pwsh
+        run: ./tests/powershell/Test-OmhHermesPython.ps1 -InjectRegression
+      - name: Windows installer Hermes lookup (Windows PowerShell 5.1)
+        if: matrix.shard == 0
+        shell: powershell
+        run: ./tests/powershell/Test-OmhHermesPython.ps1
+      - name: Windows installer Hermes lookup mutation (Windows PowerShell 5.1)
+        if: matrix.shard == 0
+        shell: powershell
+        run: ./tests/powershell/Test-OmhHermesPython.ps1 -InjectRegression
+      - name: Windows installer --uninstall (PowerShell 7)
+        if: matrix.shard == 0
+        shell: pwsh
+        run: ./tests/powershell/Test-OmhUninstall.ps1
+      - name: Windows installer --uninstall mutation (PowerShell 7)
+        if: matrix.shard == 0
+        shell: pwsh
+        run: ./tests/powershell/Test-OmhUninstall.ps1 -InjectRegression
+      - name: Windows installer --uninstall (Windows PowerShell 5.1)
+        if: matrix.shard == 0
+        shell: powershell
+        run: ./tests/powershell/Test-OmhUninstall.ps1
+      - name: Windows installer --uninstall mutation (Windows PowerShell 5.1)
+        if: matrix.shard == 0
+        shell: powershell
+        run: ./tests/powershell/Test-OmhUninstall.ps1 -InjectRegression
+      - name: Windows short install wrapper (PowerShell 7)
+        if: matrix.shard == 0
+        shell: pwsh
+        run: ./tests/powershell/Test-OmhShortInstall.ps1
+      - name: Windows short install wrapper mutation (PowerShell 7)
+        if: matrix.shard == 0
+        shell: pwsh
+        run: ./tests/powershell/Test-OmhShortInstall.ps1 -InjectRegression
+      - name: Windows short install wrapper (Windows PowerShell 5.1)
+        if: matrix.shard == 0
+        shell: powershell
+        run: ./tests/powershell/Test-OmhShortInstall.ps1
+      - name: Windows short install wrapper mutation (Windows PowerShell 5.1)
+        if: matrix.shard == 0
+        shell: powershell
+        run: ./tests/powershell/Test-OmhShortInstall.ps1 -InjectRegression
       - name: Windows installer end-to-end
         if: matrix.shard == 0
         shell: pwsh
@@ -467,7 +563,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.12"
       - name: Require green shard jobs
@@ -528,7 +624,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         with:
           python-version: "3.12"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -537,7 +633,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.14"
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
       - name: Build and install exact npm and Bun artifacts
         shell: bash
         run: |

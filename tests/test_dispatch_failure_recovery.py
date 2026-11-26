@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import shlex
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -15,6 +14,7 @@ from _local_package import load_local_package
 load_local_package()
 
 from _cli_harness import run_cli  # noqa: E402
+from _verification_python import verification_python, verification_python_path  # noqa: E402
 
 from omh.coding.dispatch_failure_recovery import (  # noqa: E402
     CHOICE_HERMES,
@@ -321,8 +321,8 @@ class RepairCardTests(unittest.TestCase):
     def test_unknown_owner_gets_a_neutral_instruction(self) -> None:
         # Executor-neutral: no CLI is the implied default for an owner this
         # repo has not verified a login command for.
-        command = auth_repair_command("omo-runtime")
-        self.assertIn("omo-runtime", command)
+        command = auth_repair_command("pi-family-runtime")
+        self.assertIn("pi-family-runtime", command)
         self.assertNotIn("codex login", command)
         self.assertNotIn("claude", command)
 
@@ -432,10 +432,10 @@ class RecoveryInterviewPromptTests(unittest.TestCase):
 
     def test_choice_one_with_several_candidates_asks_which_owner(self) -> None:
         chosen, _ = self._ask(
-            ["1", "omo-runtime"],
-            retargets=[{"profile": "claude-code"}, {"profile": "omo-runtime"}],
+            ["1", "pi-family-runtime"],
+            retargets=[{"profile": "claude-code"}, {"profile": "pi-family-runtime"}],
         )
-        self.assertEqual(chosen, {"choice": CHOICE_RETARGET, "target_owner": "omo-runtime"})
+        self.assertEqual(chosen, {"choice": CHOICE_RETARGET, "target_owner": "pi-family-runtime"})
 
     def test_choice_two_selects_the_hermes_lane(self) -> None:
         chosen, _ = self._ask(["2"], retargets=[{"profile": "claude-code"}])
@@ -804,7 +804,7 @@ class DispatchRecoveryChoiceTests(unittest.TestCase):
             self.assertNotIn("failure_recovery", summary)
 
 
-_PY = shlex.quote(sys.executable)
+_PY = verification_python()
 _CHECK_FIX_COMMITTED = (
     f"{_PY} -c 'import subprocess,sys; "
     "sys.exit(subprocess.run([\"git\", \"cat-file\", \"-e\", \"HEAD:src/core/fix.txt\"]).returncode)'"
@@ -842,7 +842,7 @@ def _limit_then_real(argv, **kwargs):
     """Codex refuses on a usage limit; git and the declared checks really run."""
     if argv[0] == "git":
         return subprocess.run(argv, **kwargs)
-    if argv[0] == sys.executable:
+    if argv[0] in (sys.executable, verification_python_path()):
         return subprocess.run(argv, cwd=kwargs.get("cwd"), env=kwargs.get("env"), text=True,
                               capture_output=True, timeout=kwargs.get("timeout"))
     return _FakeCompleted(1, _LIMIT_FAILURE_TEXT)
@@ -851,7 +851,7 @@ def _limit_then_real(argv, **kwargs):
 def _limit_after(leftover):
     """Codex does `leftover(worktree)` -- half its work, a branch switch -- then hits the limit."""
     def runner(argv, **kwargs):
-        if argv[0] not in ("git", sys.executable):
+        if argv[0] not in ("git", sys.executable, verification_python_path()):
             leftover(Path(kwargs["cwd"]))
         return _limit_then_real(argv, **kwargs)
 
@@ -1175,8 +1175,9 @@ class HermesRecoverySettlementTests(unittest.TestCase):
 
         self.assertEqual(attempt["recovery_commit"]["status"], "committed")
         self.assertNotIn("verification_status", attempt)
+        # Nothing ran and failed, so it is not `failed` either (#2461).
         self.assertEqual(
-            (attempt["unit_state"], attempt["unit_state_reason"]), ("failed", "verification_not_observed")
+            (attempt["unit_state"], attempt["unit_state_reason"]), ("unverified", "verification_not_observed")
         )
 
     def test_a_child_that_did_not_complete_is_neither_committed_nor_verified(self) -> None:

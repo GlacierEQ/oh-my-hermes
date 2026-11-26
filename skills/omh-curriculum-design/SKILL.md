@@ -15,48 +15,18 @@ metadata:
 
 # Curriculum Design
 
-This is a Hermes-native `curriculum-design` workflow skill.
+Required: learners, learning goal, prerequisites, constraints. Output: curriculum_learner_outcome_brief/v1, curriculum_alignment_map/v1, curriculum_sequence_design/v1, curriculum_validation_disposition/v1.
 
 ## Why This Exists
 
 `curriculum-design` makes outcomes, sequence, assessment, and constraints reviewable before materials or LMS work.
 
-## Do Not Use When
-
-- The user wants an explanation of a supplied academic paper rather than a teachable sequence; use `omh-paper-learning`.
-- The user needs a deck, workbook, PDF, or other exported learning artifact; route packaging to `omh-materials-package` after the curriculum is accepted.
-- The user asks to create or publish an LMS course, enroll students, grade work, or change course settings; use `omh-apps` with explicit authorization and observed evidence.
-- The user needs only a short rewrite or one isolated worksheet prompt, not curriculum structure; use `omh-content-operator`.
-
-## Examples
-
-Good example:
-
-- Prompt: Design a six-week onboarding curriculum with learning objectives and practical assessments for new support agents.
-- Expected behavior: Prepare learner constraints, scope and sequence, learning objectives, assessments, and adaptation questions.
-- Why: The request needs a teachable sequence and assessment plan rather than an LMS course or exported material.
-
-Bad example:
-
-- Prompt: Explain the attached machine-learning paper for a beginner.
-- Expected behavior: Route to `paper-learning`, not `curriculum-design`.
-- Why: A supplied paper explanation is not a curriculum-design request.
-
-## Completion Checklist
-
-- The plan names goals, non-goals, assumptions, acceptance criteria, and verification shape.
-- Draft recommendations, accepted decisions, and executor handoffs are separate states.
-- Rejected options or unresolved tradeoffs are recorded before handoff.
-
-## Recovery Notes
-
-- If acceptance criteria or verification are missing, route back to clarification before handoff.
-- If assumptions materially affect the plan, keep them visible and avoid treating the plan as accepted.
+Contract: `references/full-contract.md` (examples, sibling boundaries, full artifact details). Procedure: `references/procedure.md`.
 
 ## Workflow Lane
 
-- Current lane: **Research and company ops** (`product-docs`, `source-finder`, `web-research`, `research`, `model-optimization`, `inference-serving`, `model-finetuning`, `research-brief`, `+26 more`) - research, signals, ops, and briefings.
-- If intent belongs to another lane, hand back to `oh-my-hermes` or name the adjacent workflow.
+- Current lane: **Research and company ops** - research, signals, ops, and briefings.
+- If intent belongs to another lane, hand back to `omh-routing` or name the adjacent workflow.
 - Shared product, routing, compatibility, and evidence rules: `skill_view(name='omh-routing', file_path='references/skill-common-rail.md')`.
 
 ## When to Use
@@ -82,28 +52,10 @@ Handoff policy:
 
 Keep domain framing, clarification, source/evidence synthesis, draft outputs, and next-work routing in Hermes. A prepared brief, review, reply, or plan is not an external action, approval, filing, send, publish, data mutation, implementation, review, CI, or merge claim. Prepare a connector, file, coding, or human-review handoff only when the user explicitly accepts that next step; report it only from observed evidence. Hermes designs an instructional plan; it does not create an LMS course, enroll learners, grade submissions, certify learning, publish materials, or claim learning outcomes occurred.
 
-Required inputs:
-
-- learners
-- learning goal
-- prerequisites
-- constraints
-
 Expert clarification questions:
 - `learners`
   - English: Which learner roles or ages and setting, baseline evidence, experience, motivations, language or culture, access needs, and relevant variability should shape the design?
   - Korean: 어떤 학습자 역할 또는 연령과 환경, 기초 수준 근거, 경험, 동기, 언어와 문화, 접근 요구, 관련 다양성이 설계에 반영되어야 하나요?
-
-Expected outputs:
-
-- curriculum_learner_outcome_brief/v1
-- curriculum_alignment_map/v1
-- curriculum_sequence_design/v1
-- curriculum_validation_disposition/v1
-
-Artifact expectations:
-
-- prepared curriculum design brief when a wrapper captures it
 
 Safety rules:
 
@@ -111,6 +63,19 @@ Safety rules:
 - Do not claim LMS mutation, enrollment, grading, certification, publication, or learning outcomes.
 
 Procedure: load `references/procedure.md`.
+
+## Completion Checklist
+
+- Every outcome states performance, conditions and criterion; each has assessment evidence and rubric criteria, and the alignment map lists orphan outcomes and orphan assessments.
+- The sequence shows diagnosis, modeling, guided practice, feedback and independent transfer, with the hours per week totalled against the stated schedule.
+- Each accessibility adaptation names the learner barrier and an equivalent demonstration path.
+- Validation is PASS, REVISE or BLOCKED per criterion; learner review and pilot stay prepared until observed.
+
+## Recovery Notes
+
+- If an outcome lacks acceptable assessment evidence, retain curriculum_learner_outcome_brief/v1, mark curriculum_alignment_map/v1 tentative, and hand back the orphan outcomes or assessment mismatches for revision.
+- If an access or technology barrier has no equivalent demonstration path, retain the aligned outcomes and assessments, mark curriculum_sequence_design/v1 unresolved, and hand back the barrier and required adaptation.
+- If learner review or pilot evidence is absent, return the alignment and sequence as unvalidated drafts, mark validation unresolved, and hand back curriculum_validation_disposition/v1 with required reviews and revalidation checks.
 
 ## Runtime Evidence
 
@@ -124,7 +89,7 @@ Record observed delegation results; otherwise return `not_available` or `not_obs
 Prepared OMH routing is not execution, review, CI, merge-readiness, or merge evidence.
 - Treat wrapper memory/context summaries as advisory local context, not proof of opaque Hermes memory reads or changes.
 Preserve workflow intent and stop conditions; verify before claiming completion.
-Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only; OMH's record terms (surface, lane, wrapper, handoff, evidence boundary, not_observed) stay in records and tool calls, never in the sentence the user reads unless they ask about one; and when a real unresolved user decision or a useful briefing discussion remains, offer one specific, content-linked question. Completed work needs no question; omit unrelated non-action footers and generic offers to continue.
+Reply in the user's own words and the host's own voice: its SOUL.md persona owns reply language, tone, speech level, and sentence endings, progress updates included (where it sets no language, use the one the user wrote in), and OMH shapes structure and content only. When the requested output is delivered, put any open points inside the result and end with no question or offer; only when the person asked to choose or decide and that choice is still theirs, end with one specific question about it, not a list, a generic offer, or a footer; the shared rail's Reply Language And Host Voice and Turn Ending sections hold the full rule.
 
 Use Hermes-native subagent/delegation features when available: native subagents -> Hermes delegation when available, otherwise sequential lanes.
 

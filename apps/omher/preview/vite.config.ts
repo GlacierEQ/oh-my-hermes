@@ -1,0 +1,90 @@
+// Vite build of the omher.app preview: the real app (../src at the pinned commit, see tools/build_omher_preview.sh)
+// with the in-page host instead of a bridge. Output: site/app-preview/ (hashed assets, relative base).
+//
+// The app needs a few small hooks to run on its own in a page, applied here as exact-once replacements so the
+// app's source and behaviour stay untouched (a missing anchor fails the build instead of shipping a still app):
+//   - plan timers tick every second instead of every 10 s, so running parts count up live;
+//   - a SESSIONS chat's mock agent says it is a preview instead of echoing "(mock …)";
+//   - the TERMINALS cards' in-page programs (0.2.12) print the CLI's banner and a shell prompt without "(mock)", in
+//     /Users/you like the rest of the staged folders;
+//   - the in-page mock hosts' staged ids and user names are neutral ("you"), so the public bundle names nobody.
+// (From 0.2.1 the app itself draws each part's vendor mark and lists GPT-6.1 for Codex; from 0.2.5 the Plans list
+// re-reads itself (runs/live.ts) and the story calls its refreshRuns, so those hooks are gone.)
+import { defineConfig, type Plugin } from "vite";
+import react from "@vitejs/plugin-react";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const OUT = process.env.OMHER_PREVIEW_OUT || resolve(here, "../../../site/app-preview");
+
+const HOOKS: Record<string, [string, string][]> = {
+  "src/elsewhere/useNow.ts": [["export function useNow(on: boolean, ms = 10_000): number {", "export function useNow(on: boolean, ms = 1000): number {"]],
+  "src/sessions/host.ts": [
+    [
+      "this.say(`(mock ${agentDef(this.agent).label}) You said: ${text}${pics}`, 360);",
+      'this.say(`This session is a preview, so ${agentDef(this.agent).label} did not run. Download omher to start a real one in your own folder.`, 360);',
+    ],
+    // the TERMINALS cards' screens: the CLI's own banner (no "(mock)"), in the staged /Users/you folders
+    [
+      "const banner = (agent: AgentId) => BANNER[agent] ?? `\\x1b[1m${agentDef(agent).program}\\x1b[0m \\x1b[2m(mock)\\x1b[0m`;",
+      'const banner = (agent: AgentId) => (BANNER[agent] ?? `\\x1b[1m${agentDef(agent).program}\\x1b[0m`).replace(" \\x1b[2m(mock)\\x1b[0m", "");',
+    ],
+    ['    return "/home/you";', '    return "/Users/you";'],
+    // the mock `/late` command's status line carried a real memory id; the public bundle gets a neutral one
+    ['text: "mem:demo-00000000 9d ago (+1)" }', 'text: "mem:you-00000000 9d ago (+1)" }'],
+  ],
+  // the in-page SSH peer host (Connect over SSH): a neutral user in its staged denial line and remote Python path
+  "src/peers/host.ts": [
+    ['line: "demo@denied: Permission denied (publickey,password)." }', 'line: "you@denied: Permission denied (publickey,password)." }'],
+    ['fail.line.replace("demo@denied", host)', 'fail.line.replace("you@denied", host)'],
+    ['python: "/home/demo/.hermes/tools/python-3.14.9/bin/python3",', 'python: "/home/you/.hermes/tools/python-3.14.9/bin/python3",'],
+  ],
+  // the Shell card's login shell: a plain prompt, no "(mock)" line
+  "src/terminal/host.ts": [
+    ['const MOCK_HOME = "/home/you";', 'const MOCK_HOME = "/Users/you";'],
+    ["return `\\x1b[32myou@mock\\x1b[0m", "return `\\x1b[32myou@macbook\\x1b[0m"],
+    ["setTimeout(() => onData(`\\x1b[2m(mock) ${name}login shell in ${at}\\x1b[0m\\r\\n${this.prompt(at)}`), 20);", "setTimeout(() => onData(this.prompt(at)), 20);"],
+  ],
+};
+
+function previewHooks(): Plugin {
+  const seen = new Set<string>();
+  return {
+    name: "omher-preview-hooks",
+    enforce: "pre",
+    transform(code, id) {
+      const rel = Object.keys(HOOKS).find((k) => id.split("?")[0].endsWith(k));
+      if (!rel) return null;
+      let out = code;
+      for (const [from, to] of HOOKS[rel]) {
+        const n = out.split(from).length - 1;
+        if (n !== 1) this.error(`preview hook: ${rel}: anchor found ${n}x: ${from.slice(0, 60)}`);
+        out = out.replace(from, to);
+      }
+      seen.add(rel);
+      return { code: out, map: null };
+    },
+    buildEnd(err) {
+      if (err) return;
+      const missing = Object.keys(HOOKS).filter((k) => !seen.has(k));
+      if (missing.length) this.error(`preview hook: never reached ${missing.join(", ")}`);
+    },
+  };
+}
+
+export default defineConfig({
+  root: here,
+  base: "./",
+  plugins: [previewHooks(), react()],
+  clearScreen: false,
+  server: { port: 5390, strictPort: true, fs: { allow: [resolve(here, "..")] } },
+  build: {
+    outDir: OUT,
+    emptyOutDir: true,
+    assetsInlineLimit: 8192,
+    chunkSizeWarningLimit: 900,
+    // only the app's own code: no source maps on the public site
+    sourcemap: false,
+  },
+});

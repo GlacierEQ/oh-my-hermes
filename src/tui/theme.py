@@ -14,6 +14,8 @@ are the terminal's default foreground, which is readable on whatever
 background the person chose. Every other role is measured against that background
 (`build_theme(skin, background)`: the colour the terminal reported, or the
 palette's status-bar background, the dark stand-in, when it reported none).
+While the living wallpaper shows (`wallpaper`), the background is the launch look's own
+(`LogoPalette.ground`, `look_ground`), set on the terminal with OSC 11, and the roles are measured against that.
 A role a person reads as text reaches WCAG's 4.5:1 (`TEXT_ROLES`); a role
 drawn only as a glyph or an edge (`dim`, the composer rule and prompt mark)
 reaches the 3:1 a graphical mark needs. Each starts from the palette's own
@@ -26,11 +28,14 @@ text colour (`banner_text`), since the dark it assumes may be a guess. `dim` is
 for decoration glyphs; words go on `muted` or `hint`.
 
 Hue is kept for what it says (owner's pick of 2026-10-22, the rail with kind
-colours), so the transcript's chrome is neutral grey: a call's arguments on
+colours), so the transcript's words are neutral grey: a call's arguments on
 `muted`, the dimmer duration and what it printed on `faint` (and `hint`), its
-glyphs and the composer's rules on `dim` and `rule`, each lifted from a fixed
-neutral grey (`NEUTRAL_GREYS`) toward white or black only as far as its floor
-takes. State is hue: `running`, a running call and everything that says a
+glyphs on `dim`, each lifted from a fixed neutral grey (`NEUTRAL_GREYS`) toward
+white or black only as far as its floor takes. The chrome around them is the
+launch look's (owner's pick of 2026-10-29, `with_launch_look`, the roles in
+`LOOK_ROLES`): the composer's rules and every frame drawn in `rule` take the
+look's card-edge colour, and a tool call's rail and the working row's spinner
+(`accent`) its label colour, each lifted to 3:1. State is hue: `running`, a running call and everything that says a
 turn or an agent is running, is the owner's approved blue (`RUNNING_BLUE`,
 lifted to 4.5:1), `ok` green and `error` red; nothing else is drawn in it. What only needs to stand out without a
 state (a key, a question's mark, a list bullet, a diff hunk) is bold in the
@@ -38,12 +43,16 @@ terminal's foreground (`user`) or grey (`muted`). The palette's own accent
 is the banner title's alone (`brand`). A call's name is
 drawn in its tool family's hue (`kinds`, in `KIND_FAMILIES` order, from
 `KIND_HUES`), kept clear of every state hue, and a `/name` that resolves to a
-command or skill takes the skill hue, bold (`slash`).
+command or skill takes the skill hue, bold (`slash`). A finished subagent's
+`@handle` takes a hue of its own (`agents`, from `AGENT_HUES`, `agent_style`),
+also clear of every state hue.
 
 Outcomes sit on bands (`ok_band` behind what the person allowed,
 `error_band` behind a denial or a failure): light tints of the palette's diff
-colours on a light background, its dark diff colours on a dark one, and
-none when no background was reported. What is drawn on a band takes
+colours on a light background, its dark diff colours on a dark one (on a
+dark scene look's ground, its word colours held to their hue and moved onto
+the ground, `DARK_SCENE_BAND_SHARE`), and none when no background was
+reported. What is drawn on a band takes
 `on_band(theme, band)`, the roles measured against that band, so its words
 reach 4.5:1 and its marks 3:1 on it.
 
@@ -56,11 +65,23 @@ ink on a dark one, never the other way. `dag_words` are the same steps lifted
 to 4.5:1, for the words a box draws in its state's hue (its title and status).
 
 The pager's footer sits on a bar of its own (`status`): the palette's
-status-bar background on a dark terminal or one that reported none, and on
-a light one a light tint of that colour (`LIGHT_STATUS_SHARE`), so the bar
+status-bar background on a dark terminal or one that reported none, the
+prompt band's colour on a dark scene look's ground (`with_launch_look`), and
+on a light one a light tint of that colour (`LIGHT_STATUS_SHARE`), so the bar
 belongs to a light screen instead of being a dark band across it. Its words
 are measured against that bar instead of the terminal's background. The
-info line under the composer and the sticky prompt over a running turn have
+menus (`menu`, `menu_current`: the completion menu, the pickers, choice
+prompts, the agent list, the delegation view and the bot board) have no bar
+and no fill (owner's pick of 2026-10-27, Claude Code's look): a row ends where
+its words do on every background, so a highlight is a pointer (`❯`) and the
+highlighted row's name bold in the skill hue (`menu_current`, the `slash`
+colour, so a command reads the same in the menu and in the composer), with
+every other row in the terminal's foreground (`menu`) and its details on
+`muted`. An
+approval's choices are the exception: the highlighted one is bold in its tone
+on a band of that tone (`pick_error`, `pick_ok`, `pick_warn`, `pick_muted`),
+since allowing and denying must not look alike at a glance. The
+info line under the composer has
 no bar: their words and marks are measured against the terminal's background
 like any transcript row.
 """
@@ -69,6 +90,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, fields, replace
 from functools import lru_cache
+import hashlib
 
 from ..skin_pack import (
     SkinTheme,
@@ -95,6 +117,18 @@ LIGHT_BAND_SHARE = 0.82
 LIGHT_WORD_BAND_SHARE = 0.62
 # A light background's status bar: the palette's status-bar colour moved this far toward the background.
 LIGHT_STATUS_SHARE = 0.85
+# On a dark scene look's ground (`with_launch_look`, `scene`): how far each diff and outcome band moves from the
+# palette's word colour toward the ground, in OKLCH lightness and chroma with the word's hue held. A plain RGB mix
+# greys a red out on aurora's teal and a green on violet's plum. At 0.8 every band clears 1.25:1 against every
+# scene ground (about the default look's own bands), and the palette's light ink 7:1 on it.
+DARK_SCENE_BAND_SHARE = 0.8
+# The OKLCH chroma under which a colour counts as grey for `_hue_held`: an exact grey such as #808080 comes out of
+# OKLab at about 1e-8, not 0, and scaling that noise would give it a random hue.
+ACHROMATIC_CHROMA = 1e-4
+# An approval's highlighted choice: its tone moved this far toward the background for the band behind it (on a dark
+# background, on a light one), so the band is the tone's tint and the tone itself, lifted, still reads on it. On a
+# light background 0.85 left an amber band at 1.08:1, too close to the background to see.
+PICK_BAND_SHARE = (0.72, 0.78)
 # The delegation view's edge gradient, top to bottom, for a palette that names none of these tokens.
 DAG_EDGE_STOPS = {"dag_edge_start": "#8B5CF6", "dag_edge_mid": "#6366F1", "dag_edge_end": "#3B82F6"}
 DAG_EDGE_STEPS = 9  # an odd count, so the middle stop is a step of its own
@@ -103,10 +137,10 @@ DAG_EDGE_STEPS = 9  # an odd count, so the middle stop is a step of its own
 TEXT_ROLES = (
     "running", "label", "ok", "warn", "error", "thinking", "heading", "code", "link", "quote",
     "syntax_keyword", "syntax_string", "syntax_number", "syntax_comment", "hint", "muted", "faint", "mode_accept",
-    "mode_plan", "brand", "slash",
+    "mode_plan", "brand", "slash", "background_word",
 )
 # The roles drawn only as a glyph or an edge: each reaches EDGE_CONTRAST.
-GLYPH_ROLES = ("dim", "rule", "prompt")
+GLYPH_ROLES = ("dim", "rule", "prompt", "accent")
 # The transcript's neutral greys, (on a dark background, on a light one): a call's arguments (`muted`), the dimmer
 # words under and beside it (`faint`, `hint`, thinking), and its glyphs and the composer's rules (`dim`, `rule`).
 NEUTRAL_GREYS = {"muted": ("#9198A1", "#59636E"), "faint": ("#7D8590", "#6E7781"), "glyph": ("#545D68", "#8C959F")}
@@ -121,6 +155,17 @@ KIND_HUES = {
     "skill": ("#D58CF0", "#9E58B8"), "shell": ("#E3B341", "#996C00"), "file": ("#F8A87E", "#AB6239"),
     "web": ("#C5DE70", "#687C00"), "dag": ("#F778BA", "#BF4588"),
 }
+# A subagent's handle (`@<node id>`) in its briefing (`transcript.AgentDoneBlock`), after Claude Code's coloured
+# `@teammate`: one of these hues (on a dark background, on a light one), picked by the node's place in its run's
+# definition order (`agent_style`), so the first seven nodes of a run differ and an agent keeps its colour on every
+# row, every redraw, in `/history` and after a resume; a handle with no such place by a stable hash. At OKLCH 60,
+# 95, 175, 210, 285, 315 and 345 degrees, each keeps 23 degrees or more from every skin's state hues (failed red 10.4
+# to 25.2, done green 128 to 147, running blue 253) and 29.5 or more from the next; built at one lightness and chroma
+# per side, so none stands out, and lifted to 4.5:1 as the kinds are.
+AGENT_HUES = (
+    ("#F6AB6B", "#9A5505"), ("#D6BD5C", "#7F6700"), ("#59D7B9", "#007E65"), ("#47D2E8", "#007A8F"),
+    ("#B6B3FF", "#635DAB"), ("#DBA6F3", "#835198"), ("#F59ECF", "#984979"),
+)
 # The aura a `dag-ulw` in the composer takes (`aura`, `aura_glint`): violet, magenta, pink and lavender (on a dark
 # background, on a light one), stepped over `AURA_STEPS` across the word and across each rule, and the same steps
 # mixed `AURA_GLINT_SHARE` of the way toward a near-white lavender (a deep violet on a light background) for the
@@ -149,8 +194,16 @@ TOOL_FAMILIES = {
 # block logo's colouring and the card's three colours, on a dark background and on a light one (the same hues at a
 # lower OKLCH lightness, rather than the dark set mixed toward black, which greys a tint out). They are OMH's own:
 # the skin's `banner_*` keys, which Hermes' own banner reads, stay as the skin file has them.
-LAUNCH_PRESETS = ("spectrum", "violet", "gold", "graphite")
+LAUNCH_PRESETS = ("spectrum", "violet", "gold", "graphite", "sakura", "moonlit", "aurora", "ember", "kanagawa-wave")
 DEFAULT_LAUNCH = LAUNCH_PRESETS[0]
+# The roles a launch look owns beyond the logo and the card (`with_launch_look`): the composer's rules and every frame
+# in `rule` (its card-edge colour), a tool call's rail and the working row's spinner (`accent`, its label colour), a
+# sent prompt's band (`with_prompt_band`) and a catch row (`with_catch_colours`). Body text, the
+# neutral greys, the state colours (`running`, `ok`, `warn`, `error`), the kind hues and the skin's own roles
+# (`brand`, `heading`, syntax, diff) keep the skin's hues, so a look never changes what a colour says. Only where a
+# band is drawn moves: on a dark scene look's ground the diff and outcome bands are the skin's diff hues set onto the
+# look (`DARK_SCENE_BAND_SHARE`), and the pager's footer bar (`status`) takes the prompt band's colour.
+LOOK_ROLES = ("rule", "accent", "prompt_band", "catch_mark", "catch_words")
 
 
 @dataclass(frozen=True)
@@ -166,37 +219,86 @@ class LogoPalette:
     greys: tuple[str, ...] = ()  # graphite: OH-MY-, per row
     whites: tuple[str, ...] = ()  # graphite: HERMES, per row
     spark: str = ""  # graphite: the two hyphens
+    ground: str = ""  # the terminal's background while the living wallpaper shows (`wallpaper`, set with OSC 11)
 
 
 LAUNCH_PALETTES: dict[str, tuple[LogoPalette, LogoPalette]] = {
     "spectrum": (
-        LogoPalette("#F778BA", "#F8A87E", "#4A4F66",
-                    sweep=tuple(KIND_HUES[kind][0] for kind in ("skill", "dag", "file", "shell", "web"))),
+        # Its edge, the composer's rules and the card's frames: a muted violet (owner, 2026-11-02), not grey. Its label,
+        # a tool call's rail and the working row's spinner: a soft violet (owner, 2026-11-21), no longer the orange.
+        LogoPalette("#F778BA", "#B79CFF", "#6E5A9E",
+                    sweep=tuple(KIND_HUES[kind][0] for kind in ("skill", "dag", "file", "shell", "web")),
+                    ground="#18162B"),
         # The kind hues' light column ends in an olive lime (#687C00); the sweep's own light stops keep each hue's
         # chroma instead, the lime at OKLCH 132 degrees.
-        LogoPalette("#B53C80", "#BF4306", "#8C93A8", sweep=("#974BB2", "#B53C80", "#BF4306", "#986600", "#4E8302")),
+        LogoPalette("#B53C80", "#6B3FD0", "#9A8BC4", sweep=("#974BB2", "#B53C80", "#BF4306", "#986600", "#4E8302"),
+                    ground="#F4F1FB"),
     ),
     "violet": (
         LogoPalette("#D9A8FF", "#D58CF0", "#6E5A85",
-                    faces=("#EAE3FF", "#E2C8FF", "#DAAEFA", "#DE93E8", "#E278CF", "#E35AAE")),
+                    faces=("#EAE3FF", "#E2C8FF", "#DAAEFA", "#DE93E8", "#E278CF", "#E35AAE"), ground="#211538"),
         LogoPalette("#7447C8", "#8A3FD1", "#9A8AB4",
-                    faces=("#7447C8", "#8843C0", "#9940B6", "#A93CA8", "#B73A98", "#C33887")),
+                    faces=("#7447C8", "#8843C0", "#9940B6", "#A93CA8", "#B73A98", "#C33887"), ground="#F2ECFC"),
     ),
     "gold": (
         LogoPalette("#F2C14E", "#E5B655", "#7B6540",
-                    faces=("#FFEEBB", "#F9DB8E", "#EFC972", "#E5B655", "#DBA334", "#C98A10")),
+                    faces=("#FFEEBB", "#F9DB8E", "#EFC972", "#E5B655", "#DBA334", "#C98A10"), ground="#221A08"),
         LogoPalette("#9A6700", "#925D00", "#A08A5C",
-                    faces=("#A77601", "#A06E05", "#996502", "#925D00", "#8B5505", "#844E04")),
+                    faces=("#A77601", "#A06E05", "#996502", "#925D00", "#8B5505", "#844E04"), ground="#FBF4DF"),
     ),
     "graphite": (
         LogoPalette("#F0F6FC", "#C2C8CE", "#3D444D",
                     greys=("#9198A1", "#878E97", "#7D8590", "#737B86", "#6A717C", "#636A74"),
-                    whites=("#F0F6FC", "#E3E9EF", "#D3D9DF", "#C2C8CE", "#B1B8BF", "#A2A9B0"), spark="#00CED1"),
+                    whites=("#F0F6FC", "#E3E9EF", "#D3D9DF", "#C2C8CE", "#B1B8BF", "#A2A9B0"), spark="#00CED1",
+                    ground="#1A1D22"),
         LogoPalette("#1F2328", "#464B50", "#8C959F",
                     greys=("#7C8186", "#767B80", "#70757A", "#6A6F74", "#65696F", "#5F6469"),
-                    whites=("#202429", "#2D3135", "#393E42", "#464B50", "#54595E", "#62676C"), spark="#008A8D"),
+                    whites=("#202429", "#2D3135", "#393E42", "#464B50", "#54595E", "#62676C"), spark="#008A8D",
+                    ground="#F0F2F4"),
+    ),
+    # Anime pastel: soft pink into sky blue and cream, at a high OKLCH lightness; the rails sky blue.
+    "sakura": (
+        LogoPalette("#FC9CBD", "#7AC8F5", "#734A5A", sweep=("#FF99BD", "#E5AEE8", "#86C5FA", "#91DBF2", "#F9E6BB"),
+                    ground="#35192D"),
+        LogoPalette("#C1587D", "#087AAF", "#C69EAC", sweep=("#C85E83", "#9F69A7", "#297AB6", "#2286A7", "#A38951"),
+                    ground="#FBE9F0"),
+    ),
+    # A moonlit night: pale moonlight yellow over silver into deep navy, the card's edge (and so the prompt band) navy.
+    "moonlit": (
+        LogoPalette("#D5DFEB", "#F2E6A8", "#2D3B62",
+                    faces=("#FFF3B5", "#D6E7F8", "#C0CBDF", "#9CAED5", "#7D93CD", "#677CC2"), ground="#0E1A40"),
+        LogoPalette("#535E6F", "#334889", "#8B98B8",
+                    faces=("#91772A", "#576574", "#4B5B77", "#3E517F", "#2E4282", "#26357B"), ground="#EAF0FB"),
+    ),
+    # Aurora: emerald and teal into violet across the columns; the rails teal, so no chrome reads as the done green.
+    "aurora": (
+        LogoPalette("#B696F7", "#50D7C3", "#0C5952", sweep=("#5EE38B", "#4FD9B4", "#53D1D0", "#77A4F6", "#AE84F2"),
+                    ground="#072E2C"),
+        LogoPalette("#7145B5", "#0E7A6D", "#73ABA3", sweep=("#108846", "#0C7E65", "#00787D", "#3860AC", "#7541B8"),
+                    ground="#E5F5F0"),
+    ),
+    # Ember: amber at the top through orange to crimson; the rails orange, between the warning amber and failure red.
+    "ember": (
+        LogoPalette("#FCC270", "#FF8F49", "#70322B",
+                    faces=("#FFCF82", "#FFA54B", "#FF7C34", "#F3562E", "#E23532", "#CC2538"), ground="#2B120C"),
+        LogoPalette("#B3260E", "#B54900", "#CB8D7D",
+                    faces=("#A96000", "#B44A00", "#B83300", "#B31609", "#A9001A", "#9A0027"), ground="#FCEDE5"),
+    ),
+    # Kanagawa Wave: indigo and spring teal sweeping into violet and wave red; rules chrome on sumi-ink and lotus white.
+    # Its Wave (dark) and Lotus (light) colours are rebelot/kanagawa.nvim's (MIT, Copyright (c) 2021 Tommaso Laurenzi).
+    "kanagawa-wave": (
+        LogoPalette("#7E9CD8", "#957FB8", "#54546D",
+                    sweep=("#7AA89F", "#7E9CD8", "#957FB8", "#E46876"), ground="#1F1F28"),
+        LogoPalette("#4D699B", "#624C83", "#716E61",
+                    sweep=("#4E736B", "#4D699B", "#624C83", "#C84053"), ground="#F2ECBC"),
     ),
 }
+# A sent prompt's band: the launch look's card-edge colour moved this far toward the background (on a dark one, on a
+# light one), so the band is that look's tint at about 1.2-1.5:1 against the background.
+PROMPT_BAND_SHARE = (0.6, 0.8)
+# How far the background-process row's `background` word moves from `label` toward the background (owner, 2026-10-28:
+# a little darker than the label); it is lifted back to TEXT_CONTRAST where that takes it below.
+BACKGROUND_WORD_SHARE = 0.18
 LOGO_BLOCK = "█"
 # How far a drop-shadow glyph (the logo's box-drawing characters) is pulled from its face colour toward the background.
 LOGO_SHADOW_SHARE = 0.55
@@ -232,8 +334,8 @@ class Theme:
     syntax_number: Style
     syntax_comment: Style
     status: Style
-    menu: Style
-    menu_current: Style
+    menu: Style  # a menu or picker row's name, unhighlighted: the terminal's foreground, no fill
+    menu_current: Style  # the highlighted row's pointer and name: bold in the skill hue (`slash`), no fill
     hint: Style
     muted: Style
     mode_accept: Style
@@ -246,13 +348,42 @@ class Theme:
     brand: Style  # the banner's title, bold: the palette's accent, which no other role uses
     kinds: tuple[Style, ...]  # a call's name, bold, in its tool family's hue, in `KIND_FAMILIES` order
     slash: Style  # a `/name` that resolves to a command or skill, bold, in the composer and your prompt's rows
+    background_word: Style  # the background-process row's `background` and spinner: bold, `label` a step dimmer
     aura: tuple[Style, ...] = ()  # a `dag-ulw` in the composer and the rules around it, bold, `AURA_STOPS` stepped
     aura_glint: tuple[Style, ...] = ()  # the same steps toward `AURA_GLINT`: the band that sweeps through them
+    agents: tuple[Style, ...] = ()  # a subagent's handle, bold, in one of `AGENT_HUES` (`agent_style`)
+    prompt_band: Style = Style()  # behind a prompt you sent, edge to edge (`with_prompt_band`); none until set
+    catch_mark: tuple[Style, ...] = ()  # a catch row's `✦ OMH`, cell by cell, bold, through the launch look's logo
+    catch_words: Style = Style()  # what a catch row says: the launch look's label colour (`with_catch_colours`);
+    # `build_theme` sets both from the default launch look, so no built theme leaves them unpainted
+    accent: Style = Style()  # a tool call's rail (but a failed or denied one's) and the working row's spinner: the
+    # launch look's label colour lifted to 3:1 (`with_launch_look`); `build_theme` paints it from the default look
+    look: str = DEFAULT_LAUNCH  # the launch look the look's roles (`LOOK_ROLES`) are from, kept by `on_band`
+    # An approval's highlighted choice, bold in its tone (deny `error`, an allow `ok`, always `warn`, the tell row
+    # `muted`) on a band of that tone mixed into the background (`PICK_BAND_SHARE`); no band when no background was
+    # reported. `build_theme` paints all four.
+    pick_error: Style = Style()
+    pick_ok: Style = Style()
+    pick_warn: Style = Style()
+    pick_muted: Style = Style()
 
 
 def aura_moves(theme: Theme) -> bool:
     """Whether the theme's aura has its gradient and band (`AURA_GLINT_MIN_CONTRAST`), or is the still bold look."""
     return bool(theme.aura) and theme.aura[0].fg is not None
+
+
+def agent_style(handle: str, theme: Theme, index: int | None = None) -> Style:
+    """A subagent's handle: bold, in a hue of `Theme.agents`. A dag node's `index`, its place in its run's definition
+    order, picks it, cycling only once every hue is used, so the nodes of one run differ (and neighbours always);
+    without one, a stable hash of `handle`, the same in every process (`hash` is salted per process). Bold in the
+    terminal's foreground with no hues."""
+    if not theme.agents:
+        return theme.user
+    if index is not None:
+        return theme.agents[index % len(theme.agents)]
+    digest = hashlib.blake2s(handle.encode("utf-8", "surrogatepass"), digest_size=8).digest()
+    return theme.agents[int.from_bytes(digest, "big") % len(theme.agents)]
 
 
 def tool_family(name: str) -> str:
@@ -273,17 +404,28 @@ def _channel(value: int) -> float:
     return srgb / 12.92 if srgb <= 0.03928 else ((srgb + 0.055) / 1.055) ** 2.4
 
 
+_CHANNELS = tuple(_channel(value) for value in range(256))  # every 8-bit channel's linear light, worked out once
+
+
 def contrast_ratio(first: str, second: str) -> float:
     """WCAG 2 contrast between two `#rrggbb` colours, 1.0 to 21.0; 1.0 when either is not a plain hex."""
     rgbs = [hex_to_rgb(first), hex_to_rgb(second)]
     if rgbs[0] is None or rgbs[1] is None:
         return 1.0
-    lighter, darker = sorted(
-        (0.2126 * _channel(r) + 0.7152 * _channel(g) + 0.0722 * _channel(b) for r, g, b in rgbs), reverse=True
-    )
+    return _ratio(_luminance(rgbs[0]), _luminance(rgbs[1]))
+
+
+def _luminance(rgb: tuple[int, int, int]) -> float:
+    r, g, b = rgb
+    return 0.2126 * _CHANNELS[r] + 0.7152 * _CHANNELS[g] + 0.0722 * _CHANNELS[b]
+
+
+def _ratio(first: float, second: float) -> float:
+    lighter, darker = (first, second) if first >= second else (second, first)
     return (lighter + 0.05) / (darker + 0.05)
 
 
+@lru_cache(maxsize=16384)
 def _mix(start: str, end: str, share: float) -> str:
     one, two = hex_to_rgb(start), hex_to_rgb(end)
     if one is None or two is None:
@@ -291,6 +433,41 @@ def _mix(start: str, end: str, share: float) -> str:
     return "#" + "".join(f"{round(a + (b - a) * share):02X}" for a, b in zip(one, two, strict=True))
 
 
+def _oklab(colour: str) -> tuple[float, float, float]:
+    rgb = hex_to_rgb(colour) or (0, 0, 0)
+    r, g, b = (_CHANNELS[value] for value in rgb)
+    l, m, s = ((0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b) ** (1 / 3),
+               (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b) ** (1 / 3),
+               (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b) ** (1 / 3))
+    return (0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+            1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+            0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s)
+
+
+def _from_oklab(lightness: float, a: float, b: float) -> str:
+    l, m, s = ((lightness + 0.3963377774 * a + 0.2158037573 * b) ** 3,
+               (lightness - 0.1055613458 * a - 0.0638541728 * b) ** 3,
+               (lightness - 0.0894841775 * a - 1.2914855480 * b) ** 3)
+    linear = (4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+              -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+              -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s)
+    encoded = (12.92 * v if v <= 0.0031308 else 1.055 * v ** (1 / 2.4) - 0.055 for v in
+               (min(max(value, 0.0), 1.0) for value in linear))
+    return "#" + "".join(f"{round(value * 255):02X}" for value in encoded)
+
+
+@lru_cache(maxsize=256)
+def _hue_held(colour: str, ground: str, share: float) -> str:
+    """`colour` moved `share` of the way to `ground` in OKLCH lightness and chroma, its own hue held, so a band of it
+    sits on `ground` and still reads as `colour`'s hue (`DARK_SCENE_BAND_SHARE`). A grey (chroma under
+    `ACHROMATIC_CHROMA`, rounding noise) has no hue to hold and stays grey."""
+    (light, a, b), (ground_light, ground_a, ground_b) = _oklab(colour), _oklab(ground)
+    chroma, ground_chroma = (a * a + b * b) ** 0.5, (ground_a * ground_a + ground_b * ground_b) ** 0.5
+    scale = (chroma + (ground_chroma - chroma) * share) / chroma if chroma >= ACHROMATIC_CHROMA else 0.0
+    return _from_oklab(light + (ground_light - light) * share, a * scale, b * scale)
+
+
+@lru_cache(maxsize=4096)
 def _lifted(colour: str, toward: str, background: str, minimum: float) -> str:
     """`colour` moved toward `toward` in twentieths until it reaches `minimum` against `background`, and on from
     `toward` to pure black or white, whichever reads better there, where `toward` itself falls short.
@@ -298,14 +475,27 @@ def _lifted(colour: str, toward: str, background: str, minimum: float) -> str:
     `toward` is the palette's ink on a dark background (`banner_text`), not white. On a mid grey just dark enough
     to take light text, a tinted ink such as crimson's #FFEDE6 reaches only 4.36:1 on #707070, while white reaches
     4.95:1. The better of black and white always reaches 4.58:1 or more, so no `minimum` up to that is out of reach.
+
+    Each step is `_mix` measured by `contrast_ratio`, on channels parsed once rather than per step: a launch logo
+    lifts some 600 glyph colours in one paint. Cached, as a theme and every later paint ask the same again.
     """
-    end = BLACK if is_light(background) else WHITE
-    for start, target in ((colour, toward), (toward, end)):
+    back = hex_to_rgb(background)
+    floor = None if back is None else _luminance(back)
+    for start, target in ((colour, toward), (toward, None)):
+        if target is None:  # asked only once `toward` falls short
+            target = BLACK if is_light(background) else WHITE
+        one, two = hex_to_rgb(start), hex_to_rgb(target)
+        if one is None or two is None:  # `_mix` gives `start` back at every step
+            if contrast_ratio(start, background) >= minimum:
+                return start
+            continue
         for step in range(_LIFT_STEPS + 1):
-            candidate = _mix(start, target, step / _LIFT_STEPS)
-            if contrast_ratio(candidate, background) >= minimum:
-                return candidate
-    return end
+            share = step / _LIFT_STEPS
+            rgb = (round(one[0] + (two[0] - one[0]) * share), round(one[1] + (two[1] - one[1]) * share),
+                   round(one[2] + (two[2] - one[2]) * share))
+            if (1.0 if floor is None else _ratio(_luminance(rgb), floor)) >= minimum:
+                return "#" + "".join(f"{value:02X}" for value in rgb)
+    return BLACK if is_light(background) else WHITE
 
 
 def _palette(skin: SkinTheme) -> dict[str, str]:
@@ -374,6 +564,12 @@ def build_theme(skin: SkinTheme, background: str | None = None) -> Theme:
     def on_bar(key: str, minimum: float = TEXT_CONTRAST) -> Style:
         return Style(fg=_lifted(c[key], status_ink, status_bg, minimum), bg=status_bg)
 
+    def pick(colour: str, toward: str) -> Style:
+        if not reported:
+            return Style(fg=_lifted(colour, toward, surface, TEXT_CONTRAST), bold=True)
+        band = _mix(colour, surface, PICK_BAND_SHARE[side])
+        return Style(fg=_lifted(colour, toward, band, TEXT_CONTRAST), bg=band, bold=True)
+
     if not reported:
         ok_band = error_band = Style()
     elif light:
@@ -391,7 +587,7 @@ def build_theme(skin: SkinTheme, background: str | None = None) -> Theme:
         diff_add_word = Style(fg=c["diff_added_word"], bg=c["diff_added"])
         diff_remove = Style(fg=c["banner_text"], bg=c["diff_removed"])
         diff_remove_word = Style(fg=c["diff_removed_word"], bg=c["diff_removed"])
-    return Theme(
+    theme = Theme(
         name=skin.short_name,
         text=Style(),
         dim=Style(fg=grey("glyph", EDGE_CONTRAST)),
@@ -402,7 +598,7 @@ def build_theme(skin: SkinTheme, background: str | None = None) -> Theme:
         error=Style(fg=read("ui_error")),
         tool=Style(bold=True),
         thinking=Style(fg=grey("faint", TEXT_CONTRAST), italic=True),
-        rule=Style(fg=grey("glyph", EDGE_CONTRAST)),
+        rule=Style(),  # the launch look's (`with_launch_look`, below)
         prompt=Style(fg=mark("prompt"), bold=True),
         user=Style(bold=True),
         heading=Style(fg=read("banner_title"), bold=True),
@@ -418,8 +614,8 @@ def build_theme(skin: SkinTheme, background: str | None = None) -> Theme:
         syntax_number=Style(fg=read("syntax_number")),
         syntax_comment=Style(fg=read("syntax_comment"), italic=True),
         status=on_bar("status_bar_text"),
-        menu=Style(fg=c["banner_text"], bg=c["completion_menu_bg"]),
-        menu_current=Style(fg=c["banner_text"], bg=c["completion_menu_current_bg"], bold=True),
+        menu=Style(),
+        menu_current=Style(fg=hue("skill"), bold=True),
         hint=Style(fg=grey("faint", TEXT_CONTRAST)),
         muted=Style(fg=grey("muted", TEXT_CONTRAST)),
         mode_accept=Style(fg=read("ui_warn")),
@@ -437,10 +633,19 @@ def build_theme(skin: SkinTheme, background: str | None = None) -> Theme:
         faint=Style(fg=grey("faint", TEXT_CONTRAST)),
         brand=Style(fg=read("ui_accent"), bold=True),
         kinds=tuple(Style(fg=hue(family), bold=True) for family in KIND_FAMILIES),
+        agents=tuple(Style(fg=_lifted(pair[side], ink, surface, TEXT_CONTRAST), bold=True) for pair in AGENT_HUES),
         slash=Style(fg=hue("skill"), bold=True),
+        background_word=Style(fg=_lifted(_mix(read("ui_label"), surface, BACKGROUND_WORD_SHARE), ink, surface,
+                                         TEXT_CONTRAST), bold=True),
         aura=tuple(Style(fg=colour, bold=True) for colour in aura_steps) if moving else (Style(bold=True),),
         aura_glint=tuple(Style(fg=colour, bold=True) for colour in glint_steps) if moving else (Style(bold=True),),
+        pick_error=pick(c["ui_error"], ink),
+        pick_ok=pick(c["ui_ok"], ink),
+        pick_warn=pick(c["ui_warn"], ink),
+        pick_muted=pick(NEUTRAL_GREYS["muted"][side], BLACK if light else WHITE),
     )
+    # The default launch look's roles; `with_launch_look` repaints them for the shown one.
+    return with_launch_look(theme, skin, background, DEFAULT_LAUNCH)
 
 
 def launch_palette(name: str, surface: str) -> LogoPalette:
@@ -448,6 +653,135 @@ def launch_palette(name: str, surface: str) -> LogoPalette:
     unknown name."""
     dark, light = LAUNCH_PALETTES.get(name, LAUNCH_PALETTES[DEFAULT_LAUNCH])
     return light if is_light(surface) else dark
+
+
+def look_ground(name: str, light: bool) -> str:
+    """The background launch look `name` paints the terminal while its wallpaper shows: its light ground on a light
+    terminal, else its dark one; the default look's for an unknown name. The theme is then measured against it."""
+    dark, pale = LAUNCH_PALETTES.get(name, LAUNCH_PALETTES[DEFAULT_LAUNCH])
+    return pale.ground if light else dark.ground
+
+
+# The mark a catch row opens with, drawn through the launch look's logo colours by the transcript (`Theme.catch_mark`).
+# It lives here, not in `panels`, so the approval slot (`prompts`) can draw it without importing `panels`.
+CATCH_MARK = "✦ OMH"
+# The cells of a catch row's mark (`CATCH_MARK`) the logo's colours are stepped across.
+CATCH_MARK_CELLS = 5
+
+
+def _logo_stops(palette: LogoPalette) -> list[str]:
+    """The colours a launch look's logo runs through, first to last: its sweep, its row faces, or graphite's white
+    HERMES into its coloured hyphens."""
+    if len(palette.sweep) > 1:
+        return list(palette.sweep)
+    if len(palette.faces) > 1:
+        return list(palette.faces)
+    return [palette.whites[0] if palette.whites else palette.label, palette.spark or palette.brand]
+
+
+def with_catch_colours(theme: Theme, skin: SkinTheme, background: str | None, look: str) -> Theme:
+    """`theme` with a catch row's colours from launch look `look` (owner's pick of 2026-10-28): the `✦ OMH` mark
+    stepped through the logo's colours (`CATCH_MARK_CELLS`), the words in the look's label colour, so the row reads
+    as OMH's own and changes with `/theme`."""
+    surface = surface_for(skin, background)
+    palette = launch_palette(look, surface)
+    stops = _logo_stops(palette)
+    mark = tuple(Style(fg=colour, bold=True) for colour in _gradient(stops, CATCH_MARK_CELLS))
+    ink = BLACK if is_light(surface) else _palette(skin)["banner_text"]
+    words = Style(fg=_lifted(palette.label, ink, surface, TEXT_CONTRAST))
+    return replace(theme, catch_mark=mark, catch_words=words)
+
+
+def with_launch_look(theme: Theme, skin: SkinTheme, background: str | None, look: str, scene: bool = False) -> Theme:
+    """`theme` with the roles launch look `look` owns (`LOOK_ROLES`, owner's pick of 2026-10-29), measured against
+    `background`: `rule` from its card-edge colour and `accent` from its label colour, each lifted to the 3:1 a glyph
+    needs, then a catch row's colours (`with_catch_colours`). A name OMH does not have is the
+    default look, as `launch_palette` reads it. The band behind a sent prompt is `with_prompt_band`'s.
+
+    `scene`: `background` is the ground of the look's living wallpaper (owner, 2026-11-04). On a dark one the diff
+    and outcome bands are the palette's word colours held to their hue and moved onto the ground
+    (`DARK_SCENE_BAND_SHARE`), with their words lifted to 4.5:1 there, and the pager's footer bar (`status`) is the
+    prompt band's colour, its words lifted to 4.5:1 on it. The light side already mixes both into the ground."""
+    c = _palette(skin)
+    surface = surface_for(skin, background)
+    ink = BLACK if is_light(surface) else c["banner_text"]
+    palette = launch_palette(look, surface)
+    looked = replace(theme, look=look if look in LAUNCH_PALETTES else DEFAULT_LAUNCH,
+                     rule=Style(fg=_lifted(palette.edge, ink, surface, EDGE_CONTRAST)),
+                     accent=Style(fg=_lifted(palette.label, ink, surface, EDGE_CONTRAST)))
+    if scene and surface == background and not is_light(surface):
+        added = _hue_held(c["diff_added_word"], surface, DARK_SCENE_BAND_SHARE)
+        removed = _hue_held(c["diff_removed_word"], surface, DARK_SCENE_BAND_SHARE)
+        bar = _mix(palette.edge, surface, PROMPT_BAND_SHARE[0])
+
+        def on(colour: str, band: str) -> str:
+            return _lifted(colour, c["banner_text"], band, TEXT_CONTRAST)
+
+        looked = replace(
+            looked, ok_band=Style(bg=added), error_band=Style(bg=removed),
+            diff_add=Style(fg=on(c["banner_text"], added), bg=added),
+            diff_add_word=Style(fg=on(c["diff_added_word"], added), bg=added),
+            diff_remove=Style(fg=on(c["banner_text"], removed), bg=removed),
+            diff_remove_word=Style(fg=on(c["diff_removed_word"], removed), bg=removed),
+            status=Style(fg=on(c["status_bar_text"], bar), bg=bar))
+    return with_catch_colours(looked, skin, background, look)
+
+
+# What `readable_on` lifts beyond `TEXT_ROLES` and `GLYPH_ROLES`: the other roles drawn as words (bold hues, a
+# catch row's words) and as marks, single and stepped. Styles with a background of their own (bands, the pager's bar,
+# an approval's choices) are measured against that band and keep their colours.
+WORD_ROLES = ("slash", "menu_current", "catch_words", "background_word")
+WORD_STEPS = ("kinds", "agents", "dag_words", "aura", "aura_glint")
+MARK_STEPS = ("dag_edges", "catch_mark")
+
+
+def readable_on(theme: Theme, skin: SkinTheme, *backgrounds: str) -> Theme:
+    """`theme` with every word and mark drawn on the terminal's own background reaching its floor against each of
+    `backgrounds` in turn, lifted toward the ink only as far as that takes; where they are all on one side, a lift
+    for a later one keeps the floors an earlier one reached (a light ink only gains against a darker background).
+
+    For the living wallpaper (`wallpaper`): the roles are measured against the look's ground, a catch row's mark
+    and the other stepped colours included (`build_theme` takes those from the logo as they are), and the rows
+    printed with them stay in the terminal after the wallpaper's background is put back, on the background the
+    terminal reported."""
+    for background in backgrounds:
+        ink = BLACK if is_light(background) else _palette(skin)["banner_text"]
+        changes: dict[str, object] = {}
+        for name in (*TEXT_ROLES, *WORD_ROLES):
+            changes[name] = _lift_ink(getattr(theme, name), ink, background, TEXT_CONTRAST)
+        for name in GLYPH_ROLES:
+            changes[name] = _lift_ink(getattr(theme, name), ink, background, EDGE_CONTRAST)
+        for name in WORD_STEPS:
+            changes[name] = tuple(_lift_ink(style, ink, background, TEXT_CONTRAST) for style in getattr(theme, name))
+        for name in MARK_STEPS:
+            changes[name] = tuple(_lift_ink(style, ink, background, EDGE_CONTRAST) for style in getattr(theme, name))
+        theme = replace(theme, **changes)
+    return theme
+
+
+def _lift_ink(style: Style, ink: str, background: str, minimum: float) -> Style:
+    """`style`'s foreground lifted to `minimum` against `background`; a style on a band of its own stays as it is."""
+    if style.fg is None or style.bg is not None:
+        return style
+    return replace(style, fg=_lifted(style.fg, ink, background, minimum))
+
+
+def blend(start: str, end: str, share: float) -> str:
+    """`#rrggbb` `start` moved `share` (0 to 1) of the way to `end`."""
+    return _mix(start, end, share)
+
+
+def with_prompt_band(theme: Theme, skin: SkinTheme, background: str | None, look: str) -> Theme:
+    """`theme` with the band behind a prompt you sent (`prompt_band`, owner's pick of 2026-10-27): launch look
+    `look`'s card-edge colour mixed most of the way into the background (`PROMPT_BAND_SHARE`), so each look tints it
+    its own way. None when the terminal reported no background, as with the outcome bands: a band guessed for a dark
+    screen would be a dark bar across a light one."""
+    surface = surface_for(skin, background)
+    if surface != background:
+        return replace(theme, prompt_band=Style())
+    side = 1 if is_light(surface) else 0
+    edge = launch_palette(look, surface).edge
+    return replace(theme, prompt_band=Style(bg=_mix(edge, surface, PROMPT_BAND_SHARE[side])))
 
 
 def _logo_hyphens(rows: list[str]) -> set[int]:
@@ -557,17 +891,17 @@ def launch_styles(skin: SkinTheme, background: str | None, palette: LogoPalette)
 
 @lru_cache(maxsize=32)
 def on_band(theme: Theme, band: Style) -> Theme:
-    """`theme`'s roles measured against `band`'s background, for the words and marks drawn on that band; still
-    without colour when `theme` is (`without_colour`)."""
+    """`theme`'s roles measured against `band`'s background, for the words and marks drawn on that band, in its
+    launch look (`theme.look`); still without colour when `theme` is (`without_colour`)."""
     skin = theme_for_name(theme.name) or default_theme()
-    built = build_theme(skin, band.bg)
+    built = with_launch_look(build_theme(skin, band.bg), skin, band.bg, theme.look)
     return without_colour(built) if theme.text.depth == NO_COLOR else built
 
 
 def without_colour(theme: Theme) -> Theme:
     """`theme` painted at the `NO_COLOR` depth (no-color.org): every style keeps its bold, dim, italic, underline and
-    reverse, and the menu's current row and the pager's footer bar (`status`), which only their background told
-    apart, are reversed."""
+    reverse, and the pager's footer bar (`status`), which only its background told apart, is reversed. A menu's
+    highlighted row keeps its pointer and its bold."""
 
     def plain(value: object) -> object:
         if isinstance(value, Style):
@@ -577,8 +911,7 @@ def without_colour(theme: Theme) -> Theme:
         return value
 
     painted = replace(theme, **{field.name: plain(getattr(theme, field.name)) for field in fields(theme)})
-    return replace(painted, menu_current=replace(painted.menu_current, reverse=True),
-                   status=replace(painted.status, reverse=True))
+    return replace(painted, status=replace(painted.status, reverse=True))
 
 
 def theme_named(value: str, background: str | None = None) -> Theme:

@@ -13,9 +13,9 @@ class ParseSlashTests(unittest.TestCase):
         self.assertEqual((invocation.command.name, invocation.command.route), ("quit", slash.LOCAL))
 
     def test_an_unknown_command_passes_through_with_its_argument(self) -> None:
-        invocation = slash.parse_slash("/reasoning  high --global ")
+        invocation = slash.parse_slash("/personality  terse --global ")
         self.assertIsNone(invocation.command)
-        self.assertEqual(invocation.text, "reasoning high --global")
+        self.assertEqual(invocation.text, "personality terse --global")
 
     def test_text_that_only_looks_like_a_command_is_not_one(self) -> None:
         for text in ("hello /new", "/", "//comment", "/usr/bin/env python", "  "):
@@ -43,10 +43,10 @@ class RouteTableTests(unittest.TestCase):
         names = [name for command in slash.COMMANDS for name in (command.name, *command.aliases)]
         self.assertEqual(len(names), len(set(names)))
 
-    def test_every_route_is_one_of_the_four_owned_kinds(self) -> None:
+    def test_every_route_is_one_of_the_five_owned_kinds(self) -> None:
         for command in slash.COMMANDS:
             with self.subTest(command=command.name):
-                self.assertIn(command.route, (slash.LOCAL, slash.HERMES, slash.DROPPED, slash.RENAMED))
+                self.assertIn(command.route, (slash.LOCAL, slash.HERMES, slash.DROPPED, slash.RENAMED, slash.CLASSIC))
                 # A renamed command names the Hermes command it runs, which goes to Hermes as typed.
                 self.assertEqual(bool(command.target), command.route == slash.RENAMED)
                 if command.target:
@@ -82,6 +82,46 @@ class RouteTableTests(unittest.TestCase):
     def test_the_network_widget_is_dropped(self) -> None:
         self.assertEqual(slash.parse_slash("/weather").command.route, slash.DROPPED)
 
+    def test_compact_is_claude_codes_name_for_hermes_compress(self) -> None:
+        invocation = slash.parse_slash("/compact here 2")
+        self.assertEqual((invocation.command.route, invocation.command.target), (slash.RENAMED, "compress"))
+        catalog = [("/compress", "Compress conversation context")]
+        offered = {c.name: c.summary for c in slash.completions("comp", catalog)}
+        self.assertEqual(list(offered), ["compact", "compress"])
+        self.assertIn("--preview", offered["compact"])
+
+    def test_what_hermes_shared_gateway_runs_in_a_tui_session_is_not_routed_away(self) -> None:
+        # Measured against Hermes bf0203a794's shared gateway: /topup is a read there (`_READ_COMMANDS`), so it goes
+        # to Hermes as typed; /config, /tools and the other verbs the gateway child answers are no commands of the
+        # TUI's.
+        for name in ("config", "tools", "plugins", "stop", "bg", "btw", "branch", "fork", "retry", "undo",
+                     "rollback", "reload", "reload-mcp", "compress"):
+            with self.subTest(name=name):
+                self.assertIsNone(slash.parse_slash(f"/{name}").command)
+
+    def test_topup_is_the_tuis_own_so_it_can_tell_a_shared_gateway_from_the_stdio_entry(self) -> None:
+        self.assertEqual(slash.parse_slash("/topup").command.route, slash.LOCAL)
+
+    def test_what_only_hermes_classic_cli_runs_goes_as_typed_but_is_not_offered(self) -> None:
+        catalog = [(f"/{name}", name) for name in ("handoff", "worktree", "snapshot", "import", "hatch", "palette")]
+        for name in ("handoff", "worktree", "snapshot", "snap", "import", "hatch", "generate-pet", "palette"):
+            with self.subTest(name=name):
+                self.assertEqual(slash.parse_slash(f"/{name}").command.route, slash.CLASSIC)
+        self.assertEqual([c.name for c in slash.completions("", catalog) if c.name in dict(catalog)], [])
+        self.assertEqual(slash.catalog_categories({"categories": [{"name": "Session", "pairs": catalog}]}), [])
+
+    def test_timestamps_are_the_tuis_own_and_the_statusbar_stays_dropped_pointing_at_show_cost(self) -> None:
+        # #3187: `/timestamps` sets the done lines' clock times (`display.timestamps`) for the run; the info line
+        # always shows, so `/statusbar` still means nothing here, and its notice names `display.show_cost`.
+        for name in ("timestamps", "ts"):
+            with self.subTest(name=name):
+                self.assertEqual(slash.parse_slash(f"/{name} on").command.route, slash.LOCAL)
+        statusbar = slash.parse_slash("/statusbar").command
+        self.assertEqual(statusbar.route, slash.DROPPED)
+        self.assertIn("`display.show_cost: true`", slash.dropped_notice(statusbar))
+        self.assertEqual(slash.dropped_notice(slash.parse_slash("/mouse").command),
+                         "/mouse is an Ink display setting; the OMH TUI has no equivalent.")
+
     def test_hermes_notice_names_the_hermes_door(self) -> None:
         notice = slash.hermes_notice(slash.parse_slash("/voice").command)
         self.assertIn("hermes --tui", notice)
@@ -114,17 +154,18 @@ class CompletionTests(unittest.TestCase):
 
     def test_names_starting_with_the_prefix_lead_and_names_only_containing_it_follow(self) -> None:
         names = [c.name for c in slash.completions("mo", slash.catalog_pairs(self.CATALOG))]
-        self.assertEqual(names, ["model", "moa", "omh-model"])
+        self.assertEqual(names[:3], ["model", "moa", "omh-model"])  # then names holding the letters in order only
 
     def test_a_prefix_in_any_case_offers_the_same_names(self) -> None:
         names = [c.name for c in slash.completions("MO", slash.catalog_pairs(self.CATALOG))]
-        self.assertEqual(names, ["model", "moa", "omh-model"])
+        self.assertEqual(names, [c.name for c in slash.completions("mo", slash.catalog_pairs(self.CATALOG))])
+        self.assertEqual(names[:3], ["model", "moa", "omh-model"])
 
     def test_part_of_a_skill_name_finds_the_skill(self) -> None:
         # Every OMH skill is `omh-*` or `ulw-*`, so a prefix alone never reaches one by its own word.
         catalog = [("/omh-codebase-uml", "Draw UML from the code"), ("/ulw-umbrella", "Umbrella"), ("/uml-sketch", "x")]
         names = [c.name for c in slash.completions("uml", catalog)]
-        self.assertEqual(names, ["uml-sketch", "omh-codebase-uml"])
+        self.assertEqual(names, ["uml-sketch", "omh-codebase-uml", "ulw-umbrella"])  # `ulw-umbrella` only in order
         self.assertEqual([c.name for c in slash.completions("", catalog)][-3:], ["omh-codebase-uml", "ulw-umbrella", "uml-sketch"])
 
     def test_catalog_commands_routed_elsewhere_are_not_offered_twice_or_at_all(self) -> None:
@@ -135,6 +176,55 @@ class CompletionTests(unittest.TestCase):
     def test_malformed_catalog_rows_are_skipped(self) -> None:
         self.assertEqual(slash.catalog_pairs({"pairs": "nope"}), [])
         self.assertEqual(len(slash.catalog_pairs(self.CATALOG)), 4)
+
+
+class SlashTokenAtTests(unittest.TestCase):
+    """The `/name` the menu completes: at the input's start or after whitespace, from its `/` to the caret."""
+
+    def test_a_slash_at_the_start_or_after_whitespace_is_a_token_typed_up_to_the_caret(self) -> None:
+        for text, caret, token in (
+            ("/as", 3, (0, 3, "as")),
+            ("asdf /", 6, (5, 6, "")),
+            ("asdf /as", 8, (5, 8, "as")),
+            ("asdf /as tail", 8, (5, 8, "as")),
+            ("asdf /asx tail", 8, (5, 9, "as")),  # typed up to the caret; the pick replaces the whole word
+            ("one\n/re", 7, (4, 7, "re")),
+            ("one\ttwo /", 9, (8, 9, "")),
+        ):
+            with self.subTest(text=text, caret=caret):
+                self.assertEqual(slash.slash_token_at(text, caret), token)
+
+    def test_a_path_like_or_doubled_slash_is_no_token(self) -> None:
+        for text in ("./", "x ./foo", "../x", "~/", "say ~/x", "a/b", "see http://", "//", "x //", "/usr/bin",
+                     "x /usr/", "asdf", "asdf /as "):
+            with self.subTest(text=text):
+                self.assertIsNone(slash.slash_token_at(text, len(text)))
+
+    def test_whitespace_between_the_slash_and_the_caret_ends_the_token(self) -> None:
+        self.assertIsNone(slash.slash_token_at("asdf /as more", 13))
+        self.assertIsNone(slash.slash_token_at("/as more", 8))
+
+
+class SkillCompletionTests(unittest.TestCase):
+    CATALOG = {
+        "pairs": [["/config", "Config"], ["/omh-codebase-uml", "UML"], ["/ulw-review", "Review"], ["/new", "Skill"]],
+        "categories": [{"name": "Configuration", "pairs": [["/config", "Config"]]}],
+    }
+
+    def test_the_skills_are_the_pairs_no_category_lists(self) -> None:
+        self.assertEqual(slash.catalog_skill_names(self.CATALOG), {"omh-codebase-uml", "ulw-review", "new"})
+        self.assertEqual(slash.catalog_skill_names({}), frozenset())
+
+    def test_only_skills_by_prefix_then_substring_and_never_a_tui_command_name(self) -> None:
+        pairs, skills = slash.catalog_pairs(self.CATALOG), slash.catalog_skill_names(self.CATALOG)
+
+        def names(prefix: str) -> list[str]:
+            return [completion.name for completion in slash.skill_completions(prefix, pairs, skills)]
+
+        self.assertEqual(names(""), ["omh-codebase-uml", "ulw-review"])  # /new is the TUI's own command
+        self.assertEqual(names("u"), ["ulw-review", "omh-codebase-uml"])
+        self.assertEqual(names("CON"), [])
+        self.assertEqual(names("urv"), [])  # u..r..v in order, but no scattered match
 
 
 class CatalogReaderTests(unittest.TestCase):

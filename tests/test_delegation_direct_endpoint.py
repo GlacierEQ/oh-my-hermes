@@ -87,6 +87,29 @@ class GuardTestCase(unittest.TestCase):
         environment = mock.patch.dict(os.environ, {"HERMES_MANAGED_DIR": str(self.managed_dir)})
         environment.start()
         self.addCleanup(environment.stop)
+        # A route may only name a provider the person configured; these tests
+        # route to the providers below, so record them as held. Each keeps the
+        # family the serving check resolves it to without a record (its own
+        # catalog name, else `unknown`), so that check reads them as before.
+        routing = self.omh_home / "routing"
+        routing.mkdir(parents=True)
+        (routing / "providers.json").write_text(
+            json.dumps({
+                "schema_version": "provider_entitlements/v1",
+                "providers": {
+                    **{name: name for name in ("anthropic", "openai", "openai-codex", "google", "openrouter")},
+                    **{
+                        name: "unknown"
+                        for name in (
+                            "azure-foundry", "bedrock", "custom", "custom:cli-proxy", "gateway",
+                            "google-genai", "moa", "my-vllm", "og", "vertex", "vertexai",
+                        )
+                    },
+                },
+                "subscription_clis": [],
+            }),
+            encoding="utf-8",
+        )
 
     def write_config(self, delegation: str | None = None, *, head: str = MODEL_BLOCK) -> bytes:
         text = head if delegation is None else f"{head}delegation:\n{delegation}"
@@ -129,6 +152,7 @@ class DirectEndpointTest(GuardTestCase):
         before = self.write_config(
             f"  base_url: {ENDPOINT}\n  api_key: {ENDPOINT_KEY}\n  api_mode: chat_completions\n"
         )
+        held = {p: p.read_bytes() for p in self.omh_home.rglob("*") if p.is_file()}
 
         result = self.set_route()
 
@@ -139,9 +163,13 @@ class DirectEndpointTest(GuardTestCase):
         self.assertIn("OMH does not change these keys", result["error"])
         self.assertFalse(delegation_route_restore_path(self.omh_home).exists())
         self.assertEqual(load_delegation_route_provenance(self.omh_home), [])
-        # A refusal records nothing; the writer's lock file is the only file.
-        left = sorted(str(p.relative_to(self.omh_home)) for p in self.omh_home.rglob("*") if p.is_file())
+        # A refusal records nothing; the writer's lock file is the only file
+        # it leaves, and the fixture's own record is untouched.
+        left = sorted(
+            str(p.relative_to(self.omh_home)) for p in self.omh_home.rglob("*") if p.is_file() and p not in held
+        )
         self.assertTrue(all(name.endswith(".lock") for name in left), left)
+        self.assertEqual({p: p.read_bytes() for p in held}, held)
         # The person's values are named by key only, never echoed.
         self.assertNotIn(ENDPOINT_KEY, json.dumps(result))
         self.assertNotIn("127.0.0.1", json.dumps(result))
@@ -558,7 +586,7 @@ class RouteWithoutProviderTest(GuardTestCase):
         # Hermes names every other URL `custom`; a family recorded for the
         # person's `custom` provider says nothing about this endpoint.
         routing = self.omh_home / "routing"
-        routing.mkdir(parents=True)
+        routing.mkdir(parents=True, exist_ok=True)
         (routing / "providers.json").write_text(
             json.dumps({
                 "schema_version": "provider_entitlements/v1",
@@ -574,8 +602,6 @@ class RouteWithoutProviderTest(GuardTestCase):
     def test_an_endpoint_the_scan_cannot_read_keeps_the_inherited_provider_check(self) -> None:
         session = "model:\n  default: gpt-5.6-sol\n  provider: openai-codex\n"
         for delegation in (
-            None,
-            "  max_iterations: 5\n",
             "  base_url: ${DELEGATION_BASE_URL}\n",
             f"  base_url: >\n    {ENDPOINT}\n",
             "  base_url: *endpoint\n",
@@ -585,7 +611,25 @@ class RouteWithoutProviderTest(GuardTestCase):
                 result = self.call(action="set", model="claude-fable-5-1")
                 self.assertEqual(result["status"], "error", result)
                 self.assertEqual(result["inherited_provider"], "openai-codex")
+                # A base_url is set, so no provider is pinned in its place.
+                self.assertNotIn("provider_pinned", result)
                 self.assertEqual(self.config.read_bytes(), before)
+
+    def test_with_no_endpoint_the_one_known_server_is_pinned_instead(self) -> None:
+        # The same inherited provider that cannot serve Fable, with no
+        # delegation.base_url: the one recorded provider whose family serves
+        # it (anthropic; openrouter is a relay, never pinned on its own) is
+        # written instead of a refusal.
+        session = "model:\n  default: gpt-5.6-sol\n  provider: openai-codex\n"
+        for delegation in (None, "  max_iterations: 5\n"):
+            with self.subTest(delegation=delegation):
+                self.write_config(delegation, head=session)
+                result = self.call(action="set", model="claude-fable-5-1")
+                self.assertEqual(result["status"], "routed", result)
+                self.assertEqual(
+                    result["provider_pinned"], {"inherited_provider": "openai-codex", "pinned_provider": "anthropic"}
+                )
+                self.assertEqual(read_delegation_route(self.home), {"model": "claude-fable-5-1", "provider": "anthropic"})
 
 
 class LocalEndpointBypassTest(GuardTestCase):

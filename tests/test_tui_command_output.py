@@ -14,13 +14,17 @@ from __future__ import annotations
 import unittest
 
 from _tui_gateway_replay import Scenario, spans
+from _tui_lines import line_text, lines_text
 from test_tui_app import NO_TERMIOS, AppTestCase, Step, startup_answers
 from test_tui_modes import PLAN_PROMPT, SID, answer, drawn, make_app, notices, type_text
 from omh.tui import gateway_contract as contract
 from omh.tui.app import App
 from omh.tui.gateway import Event, Response
 from omh.tui.keys import DOWN, ENTER, TAB, UP, Key
-from omh.tui.transcript import NOTICE_INFO, NOTICE_WARN, OUTPUT_PREVIEW_ROWS, CommandBlock, NoticeBlock, UserBlock
+from omh.tui.theme import DEFAULT_THEME as THEME
+from omh.tui.transcript import (
+    NOTICE_INFO, NOTICE_WARN, OUTPUT_MARKED, OUTPUT_PREVIEW_ROWS, CommandBlock, NoticeBlock, UserBlock, block_rows,
+)
 
 
 def send(app: App, text: str) -> None:
@@ -51,8 +55,9 @@ def run_skill(app: App, client: object, line: str = SKILL_LINE, turn: dict = SKI
 
 
 def prompt_rows(app: App) -> list[str]:
-    """The `┃ ❯` rows printed so far, scrollback included: each echo's (`┃ ❯ /name`) and each prompt's first row,
-    both on the prompt's rail; the composer's own `❯` row has none (#2223 review 7)."""
+    """The `┃ ❯` rows printed so far (the rail's bar and space, then the mark), scrollback included: each echo's
+    (`┃ ❯ /name`) and each prompt's first row, both on the prompt's rail; the composer's own `❯` row has none
+    (#2223 review 7)."""
     app._render()
     return [row.rstrip() for row in app.terminal.screen.history() if row.startswith("┃ ❯ ")]  # type: ignore[attr-defined]
 
@@ -75,6 +80,69 @@ class CommandEchoTests(unittest.TestCase):
         screen = drawn(app)
         self.assertIn("┃ ❯ /usage", screen)
         self.assertIn("┃   ⎿  Session cost: $0.01", screen)
+
+    def test_the_title_reply_draws_its_templates_bold_and_keeps_the_title_as_written(self) -> None:
+        # Found live: `/title Alpha Work` printed `Session title set: **Alpha Work**`: Hermes' `gateway.title.set_to`
+        # template marks the title for a chat.
+        for title in ("Alpha Work", "fix __init__ import of *.py"):
+            app, client = make_app()
+            send(app, f"/title {title}")
+            answer(app, client, {"output": f"✏️ Session title set: **{title}**"})
+            self.assertIn(f"┃   ⎿  ✏️ Session title set: {title}", drawn(app))
+            (row,) = [row for row in block_rows(last(app), 80, THEME) if "title set" in line_text(row)]
+            self.assertEqual([span.text for span in row if span.style.bold], [title])
+        app, client = make_app()
+        send(app, "/title")
+        answer(app, client, {"output": "📌 Session: `abc_1`\nTitle: **beta notes**"})
+        self.assertEqual(drawn(app)[1:3], ["┃   ⎿  📌 Session: abc_1", "┃      Title: beta notes"])
+
+    def test_a_title_reply_of_no_marked_shape_stays_as_written(self) -> None:
+        # Review 2 of #2389: the slash worker's `cli.title.set` (en.yaml:2533) has no marks, and a title refused as in
+        # use (hermes_state_titles.py:163) quotes it, so neither may lose a `**` or a backtick.
+        # Review 3: the worker's `cli.title.current` (en.yaml:2528) is "Title: {title}", and a title may be `**draft**`.
+        for output in ("Session title set: **x** and `y`", "Title 'use `uv` sync' is already in use by session abc",
+                       "Session ID: abc\nTitle: **draft**"):
+            app, client = make_app()
+            send(app, "/title x")
+            answer(app, client, {"output": output})
+            self.assertIn(f"┃   ⎿  {output.splitlines()[0]}", drawn(app))
+            self.assertIn(output.splitlines()[-1], lines_text(block_rows(last(app), 100, THEME))[-1])
+            self.assertFalse(any(span.style.bold for row in block_rows(last(app), 100, THEME) for span in row))
+        app, client = make_app()
+        send(app, "/title")
+        answer(app, client, {"output": "📌 Session: `abc`\nNo title set. Usage: `/title My Session Name`"})
+        rows = block_rows(last(app), 100, THEME)
+        self.assertEqual(lines_text(rows)[1:], ["┃   ⎿  📌 Session: abc", "┃      No title set. Usage: /title My Session Name"])
+        self.assertEqual([span.text for row in rows for span in row if span.style == THEME.code],
+                         ["abc", "/title My Session Name"])
+
+    def test_any_other_hermes_reply_is_data_and_stays_as_written(self) -> None:
+        # Review of #2389: drawing every reply as Markdown ate `__init__`, `*.py`, `2*3*4` and a Windows path's `\\`.
+        replies = (
+            ("/gitst", " M src/__init__.py\n M tests/__init__.py\n?? docs/*.md"),  # a quick command's `git status`
+            ("/context", "[You #1] rename my_var to __my_var__ in src/*.py and tests/*.py\n[Hermes #2] Done: 2*3*4 files"),
+            ("/status", "Path: C:\\Users\\me\\.hermes\\sessions\\abc.jsonl"),
+            ("/tools", 'ignore: ["*.pyc", "*.log"] and [You #1](draft)'),
+        )
+        for command, output in replies:
+            app, client = make_app()
+            send(app, command)
+            if command == "/gitst":
+                app._on_response(Response(1, None, {"code": 4018, "message": "not a slash.exec command"}))
+                answer(app, client, {"type": "exec", "output": output})
+            else:
+                answer(app, client, {"output": output})
+            self.assertEqual(last(app).parts, [(output, NOTICE_INFO)])
+            rows = lines_text(block_rows(last(app), 120, THEME))[1:]
+            self.assertEqual([row[7:] for row in rows], output.split("\n"), command)
+            self.assertFalse(any(span.style.bold for row in block_rows(last(app), 120, THEME) for span in row))
+
+    def test_only_the_title_reply_is_read_for_marks_not_omhs_own_words_under_its_echo(self) -> None:
+        mine, reply = "✏️ Session title set: **as** written", "✏️ Session title set: **Alpha**"
+        block = CommandBlock("/title Alpha", [(mine, NOTICE_INFO), (reply, OUTPUT_MARKED)])
+        rows = block_rows(block, 80, THEME)
+        self.assertEqual(lines_text(rows)[1:], [f"┃   ⎿  {mine}", "┃      ✏️ Session title set: Alpha"])
+        self.assertEqual([span.text for row in rows for span in row if span.style.bold], ["Alpha"])
 
     def test_long_output_stays_in_the_transcript_and_no_pager_opens(self) -> None:
         app, client = make_app(rows=24, cols=80)
@@ -262,15 +330,18 @@ class SkillCommandRowTests(unittest.TestCase):
         app, client = make_app(rows=40)
         run_skill(app, client)
         app._on_event(Event("message.start", SID, {}))
-        run_skill(app, client)  # the busy mode is queue: the prompt waits behind the turn
-        self.assertEqual(len(client.named("prompt.submit")), 1)
+        send(app, SKILL_LINE)  # the command waits behind the turn, whatever the busy mode
+        self.assertEqual(len(client.named("command.dispatch")), 1)
         self.assertEqual([line.shown for line in app.queued], [SKILL_LINE])
         app._on_event(Event("message.complete", SID, {"text": "done"}))
+        answer(app, client, error=SKILL_REFUSAL)
+        answer(app, client, SKILL_TURN)
         self.assertEqual(len(client.named("command.dispatch")), 2)
         self.assertEqual(len(client.named("prompt.submit")), 2)
+        self.assertTrue(client.named("prompt.submit")[1]["queued"])  # the queue ran it: Hermes holds it as one
         first, drained = prompt_rows(app)
         self.assertEqual(first, f"┃ ❯ {SKILL_LINE}")
-        self.assertTrue(drained.startswith(f"┃ ❯ {SKILL_LINE}") and drained.endswith("from queue"), drained)
+        self.assertEqual(drained, f"┃ ❯ {SKILL_LINE}")  # the queue sent it: a prompt as any, with no tag
 
     def test_what_the_dispatch_says_goes_under_the_prompt_row_and_repeats_no_echo(self) -> None:
         notice = "⚡ Loading 2 stacked skills: dag-ulw, review"
@@ -288,42 +359,47 @@ class SkillCommandRowTests(unittest.TestCase):
         app.turn_pending = True
         app._on_event(Event("message.start", SID, {}))
         app._on_event(Event("tool.start", SID, {"tool_id": "t1", "name": "terminal", "context": "make test"}))
-        run_skill(app, client, "/dag-ulw /review fix it", stacked)  # the busy mode is queue
-        self.assertEqual(client.named("prompt.submit"), [])
+        send(app, "/dag-ulw /review fix it")  # the command waits for the turn's end, whatever the busy mode
+        self.assertEqual(client.calls, [])
         self.assertEqual([line.shown for line in app.queued], ["/dag-ulw /review fix it"])
         group = app.transcript.blocks[-1]
         self.assertFalse(group.done)  # nothing closed the running call
         self.assertEqual(group.tools[0].status, "running")
         self.assertFalse([block for block in app.transcript.blocks if isinstance(block, (CommandBlock, NoticeBlock))])
-        self.assertEqual([line.notice for line in app.queued], [notice])  # it waits with its prompt, not in this turn
         app._on_event(Event("tool.complete", SID, {"tool_id": "t1", "name": "terminal", "result": {"output": "ok"}}))
         app._on_event(Event("message.complete", SID, {"text": "done"}))
+        answer(app, client, error=SKILL_REFUSAL)
+        answer(app, client, stacked)  # its notice is said with its prompt, not in the turn before
         self.assertEqual(len(client.named("prompt.submit")), 1)
         self.assertEqual(notices(app), [notice])
         row, notice_block = app.transcript.blocks[-2:]  # the drained row, then what the dispatch said, under it
         self.assertEqual((type(row), row.text, row.from_queue), (UserBlock, "/dag-ulw /review fix it", True))
         self.assertEqual((type(notice_block), notice_block.text), (NoticeBlock, notice))
         (shown,) = prompt_rows(app)
-        self.assertTrue(shown.startswith("┃ ❯ /dag-ulw /review fix it") and shown.endswith("from queue"), shown)
+        self.assertEqual(shown, "┃ ❯ /dag-ulw /review fix it")  # whole, and with no tag
 
-    def test_two_skill_commands_of_one_line_answered_out_of_order_are_two_rows(self) -> None:
-        # Hermes runs slash.exec and command.dispatch on its RPC pool, so the second dispatch can answer first.
+    def test_two_skill_commands_sent_during_a_turn_run_one_after_the_other_as_two_rows(self) -> None:
+        # Hermes runs slash.exec and command.dispatch on its RPC pool, so two sent at once can answer out of order;
+        # queued behind the turn, the second runs only once the first's turn has ended.
         app, client = make_app(rows=40)
         app.turn_pending = True
         app._on_event(Event("message.start", SID, {}))
         app._on_event(Event("tool.start", SID, {"tool_id": "t1", "name": "terminal", "context": "make test"}))
         send(app, SKILL_LINE)
         send(app, SKILL_LINE)
-        app._on_response(Response(1, None, SKILL_REFUSAL))
-        app._on_response(Response(2, None, SKILL_REFUSAL))
-        self.assertEqual([method for method, _params in client.calls[2:]], ["command.dispatch"] * 2)
-        app._on_response(Response(4, SKILL_TURN, None))  # the second submission's dispatch
-        app._on_response(Response(3, SKILL_TURN, None))
-        self.assertFalse([block for block in app.transcript.blocks if isinstance(block, CommandBlock)])
+        self.assertEqual(client.calls, [])
         app._on_event(Event("tool.complete", SID, {"tool_id": "t1", "name": "terminal", "result": {"output": "ok"}}))
-        end_turn(app)  # the first queued prompt's turn
-        end_turn(app)  # the second's
+        app._on_event(Event("message.complete", SID, {"text": "done"}))
+        answer(app, client, error=SKILL_REFUSAL)
+        answer(app, client, SKILL_TURN)
+        self.assertEqual(len(client.named("prompt.submit")), 1)
+        self.assertEqual([line.shown for line in app.queued], [SKILL_LINE])  # waits for the first one's turn
+        end_turn(app)
+        answer(app, client, error=SKILL_REFUSAL)
+        answer(app, client, SKILL_TURN)
+        end_turn(app)
         self.assertEqual(len(client.named("prompt.submit")), 2)
+        self.assertEqual(len(client.named("slash.exec")), 2)
         self.assertFalse([block for block in app.transcript.blocks if isinstance(block, CommandBlock)])
         self.assertEqual(len(prompt_rows(app)), 2)
 

@@ -1,9 +1,14 @@
-"""Clicks on the agent list, and when the OMH TUI asks the terminal for mouse reports at all: only while the list is open.
+"""Clicks on the agent list, and, with `OMH_TUI_MOUSE=0`, when the OMH TUI asks the terminal for mouse reports at all:
+only while the list is open, or a pager, which takes a drag too (`tests/test_tui_clean_copy.py`).
 
-Neither the agent view under the info line nor the count on it is clickable
-while the list is closed (the owner's decision of 2026-10-14): during a turn
-the wheel scrolls and a drag selects, and Down opens the list from the
-keyboard, on the view's own rows.
+These cases run with `OMH_TUI_MOUSE=0` (`make_app`'s default), the behaviour
+of the owner's decision of 2026-10-14, which the switch keeps byte for byte:
+neither the agent view under the info line nor the count on it is clickable
+while the list is closed, during a turn the wheel scrolls and a drag selects
+natively, and Down opens the list from the keyboard, on the view's own rows.
+Without the switch the main screen takes the mouse (the owner's decision of
+2026-11-05, `tests/test_tui_main_mouse.py`), and a click on a list row still
+opens that agent's log there.
 
 Where a click lands is never taken from the app. Each case reads the VT
 screen the scripted terminal painted (`drawn`), finds the row and the cells
@@ -25,7 +30,7 @@ from pathlib import Path
 import unittest
 
 from _tui_gateway_replay import Scenario
-from test_tui_agent_list import INTERRUPTED_PROMPT, delegating_scenario, focused, info_left, more_agents, under_the_frame
+from test_tui_agent_list import INTERRUPTED_PROMPT, REFUSED_VIEW, delegating_scenario, focused, info_left, more_agents, under_the_frame
 from test_tui_agent_view import STARTS, agent_app, relay
 from test_tui_app import LIVE_ID, NO_TERMIOS, AppTestCase, FakePoller, ScriptedTerminal, Step, info_index
 from test_tui_modes import SID, RecordingClient, composer_index, drawn, make_app, type_text
@@ -60,7 +65,6 @@ from omh.tui.keys import (
     KeyDecoder,
     Mouse,
 )
-from omh.tui.modes import IDLE_HINT
 from omh.tui.pager import ALT_SCREEN_OFF
 from omh.tui.screen import ERASE_BELOW
 from omh.tui.session_picker import SessionPicker, SessionRow
@@ -68,6 +72,7 @@ from omh.tui.session_picker import SessionPicker, SessionRow
 MOUSE_ON = terminal_module.MOUSE_REPORTING_ON
 MOUSE_OFF = terminal_module.MOUSE_REPORTING_OFF
 CTRL_L = Key(CHAR, "l", ctrl=True)
+NATIVE_MOUSE = {"OMH_TUI_MOUSE": "0"}  # the main screen leaves the mouse to the terminal, as `make_app` does
 
 
 def settled(app: App) -> App:
@@ -137,9 +142,10 @@ SECOND_ROW = "read the diff for risks"  # the second agent's row in the list
 
 
 class MouseStateTests(unittest.TestCase):
-    def test_reports_are_on_only_while_the_agent_list_is_open(self) -> None:
+    def test_reports_are_on_only_while_the_agent_list_or_a_pager_is_open(self) -> None:
         now = [100.0]
         app, client = make_app(clock=lambda: now[0])
+        app._open_agent = app._open_agent_log  # type: ignore[method-assign]  # Enter opens the log, the session view's fallback
         settled(app)
         steps: list[tuple[str, bool]] = []
 
@@ -183,7 +189,7 @@ class MouseStateTests(unittest.TestCase):
                 ("an approval open", False),
                 ("the approval denied, the turn still running", False),
                 ("the list focused", True),
-                ("an agent's log open", False),
+                ("an agent's log open", True),  # a pager: the alternate screen has no scrollback to take
                 ("back in the list", True),
                 ("back on the view, the turn still running", False),
                 ("the turn over, the finished agents still shown", False),
@@ -192,7 +198,7 @@ class MouseStateTests(unittest.TestCase):
                 ("the next turn, the roster empty", False),
             ],
         )
-        self.assertEqual(mouse_calls(app), [True, False, True, False, True, False])
+        self.assertEqual(mouse_calls(app), [True, False, True, False])
         self.assertEqual(client.answers, [("srq-1", {"result": {"choice": "deny"}})])
 
     def test_the_switch_is_written_only_when_the_state_changes(self) -> None:
@@ -221,13 +227,16 @@ class MouseStateTests(unittest.TestCase):
         app._on_input(Key(DOWN))
         self.assertTrue(reporting(app))
 
-    def test_a_pager_that_is_no_agents_log_turns_them_off_too(self) -> None:
+    def test_a_pager_that_is_no_agents_log_keeps_them_on_with_a_drag(self) -> None:
         app, _client = listing()
         self.assertTrue(reporting(app))
+        self.assertFalse(app.terminal.mouse_drag)  # type: ignore[attr-defined]  # the list takes clicks only
         app._open_pager("history", [])
-        self.assertFalse(reporting(app))
+        self.assertTrue(reporting(app))
+        self.assertTrue(app.terminal.mouse_drag)  # type: ignore[attr-defined]
         app._leave_pager()
         self.assertTrue(reporting(app))  # the list is still open under it
+        self.assertFalse(app.terminal.mouse_drag)  # type: ignore[attr-defined]
 
     def test_a_question_answered_with_text_turns_them_off(self) -> None:
         app, _client = listing()
@@ -323,7 +332,7 @@ class MouseStateTests(unittest.TestCase):
     def test_shutdown_from_an_open_log_leaves_them_off(self) -> None:
         app, _client = listing()
         app._on_input(Key(ENTER))
-        self.assertFalse(reporting(app))
+        self.assertTrue(reporting(app))  # the log is a pager, which takes a drag
         app._shutdown()
         self.assertEqual(mouse_calls(app), [True, False])
         self.assertIn(ALT_SCREEN_OFF, "".join(app.terminal.writes))  # type: ignore[attr-defined]
@@ -346,7 +355,8 @@ class FailingShutdownTests(unittest.TestCase):
     def leaving(self) -> tuple[App, RecordingClient, HungUpTerminal]:
         terminal = HungUpTerminal()
         client = RecordingClient()
-        app = App(terminal, client, {}, poller=FakePoller(), clock=lambda: 0.0)  # type: ignore[arg-type]
+        app = App(terminal, client, NATIVE_MOUSE, poller=FakePoller(), clock=lambda: 0.0)  # type: ignore[arg-type]
+        app._open_agent = app._open_agent_log  # type: ignore[method-assign]  # Enter opens the log, the session view's fallback
         app.sid = SID
         app.turn_pending = True
         relay(app, STARTS)
@@ -393,7 +403,7 @@ class FailingShutdownTests(unittest.TestCase):
     def test_last_lines_that_fail_to_render_still_leave_the_region_erased(self) -> None:
         app, _client, terminal = self.leaving()
 
-        def broken(cols: int, theme: object) -> list:
+        def broken(cols: int, theme: object, final: bool = False) -> list:
             raise ValueError("a block that cannot render")
 
         app.transcript.take_stable_lines = broken  # type: ignore[method-assign]
@@ -596,8 +606,10 @@ class IgnoredReportTests(unittest.TestCase):
                 before = state(app, client)
                 click(app, x, y)
                 self.assertEqual(state(app, client), before)
-                if into is not resizing:
+                if into in (view, approval):
                     self.assertFalse(app.terminal.mouse_reporting)  # type: ignore[attr-defined]
+                elif into is not resizing:  # a pager's reports: a click there selects, and opens nothing
+                    self.assertTrue(app.terminal.mouse_drag)  # type: ignore[attr-defined]
 
     def test_while_a_question_is_open_a_click_opens_nothing_before_any_frame_redraws_the_cells(self) -> None:
         # The question opens and the click comes in the same read: `clickable` still holds the last frame's cells.
@@ -680,14 +692,16 @@ class UnknownRowTests(unittest.TestCase):
         click(app, 10, 24)
         self.assertEqual(app.log_agent, SECOND)
 
-    def test_a_redraw_behind_an_open_pager_does_not_claim_the_top_row(self) -> None:
-        # The clear went to the alternate screen; the main screen's cursor is wherever the old frame left it.
+    def test_a_redraw_behind_an_open_pager_runs_once_it_closes_so_its_rows_are_certain(self) -> None:
+        # #2352: the redraw waits for the pager to close and then starts on the main screen's top row, so the region
+        # knows where its rows are (before, the clear went to the alternate screen and the place was unknown).
         app, _client = agent_app()
         app._on_input(Key(CHAR, "?"))
         app._full_redraw()
         app._on_input(Key(CHAR, "q"))
-        drawn(app)
-        self.assertIsNone(app.region.last_row(24))
+        screen = drawn(app)
+        last = max(row for row, line in enumerate(screen) if line.strip())
+        self.assertEqual(app.region.last_row(24), last)
         self.assertFalse(app.terminal.mouse_reporting)  # type: ignore[attr-defined]
 
 
@@ -775,7 +789,7 @@ class LateReportLoopTests(unittest.TestCase):
                     y, x = row_of(app, SECOND_ROW), 10
                     step_through(app, now, [(0.0, f"\x1b[<0;{x};{y}M".encode("ascii"))])  # the press opens the log
                     self.assertEqual(app.log_agent, SECOND)
-                    self.assertFalse(app.terminal.mouse_reporting)  # type: ignore[attr-defined]  # the log's frame
+                    self.assertTrue(app.terminal.mouse_drag)  # type: ignore[attr-defined]  # the log's frame: a pager
                     late = f"\x1b[<{code};{x};{y}{'m' if code == 0 else 'M'}".encode("ascii")
                     step_through(app, now, paused(late[:1], pause, late[1:]))
                     self.assertEqual(app.composer.text, "")
@@ -823,6 +837,7 @@ class SlotArmFromArrivalTests(unittest.TestCase):
     SUDO = ServerRequest("srq-1", "sudo", {"command": "apt install x"})
     DENY = ("srq-1", {"result": {"choice": "deny"}})
     ONCE = ("srq-1", {"result": {"choice": "once"}})
+    SESSION = ("srq-1", {"result": {"choice": "session"}})
     QUIET = [(READ_TIMEOUT_SECONDS, b"")]
     INSIDE = (0.10, 0.30, 0.39, 0.45)  # first bytes inside the delay; the ESC at 0.45 is held as a report's
     PAST = REPORTING_SLOT_ARM_SECONDS + 0.05
@@ -854,13 +869,14 @@ class SlotArmFromArrivalTests(unittest.TestCase):
         for at in self.INSIDE:
             with self.subTest(at=at):
                 self.assertEqual(self.press(self.APPROVAL, at, b"\x1b", b"[13u"), [])
-        self.assertEqual(self.press(self.APPROVAL, self.PAST, b"\x1b[13u"), [self.DENY])
+        self.assertEqual(self.press(self.APPROVAL, self.PAST, b"\x1b[13u"), [self.ONCE])  # Enter on allow once
 
     def test_a_right_arrow_split_after_its_escape_is_timed_from_the_escape(self) -> None:
         for at in self.INSIDE:
             with self.subTest(at=at):
-                self.assertEqual(self.press(self.APPROVAL, at, b"\x1b", b"[C", then=b"\r"), [self.DENY])
-        self.assertEqual(self.press(self.APPROVAL, self.PAST, b"\x1b[C", then=b"\r"), [self.ONCE])
+                # The early Right moved nothing: the Enter answers allow once, where the approval opened.
+                self.assertEqual(self.press(self.APPROVAL, at, b"\x1b", b"[C", then=b"\r"), [self.ONCE])
+        self.assertEqual(self.press(self.APPROVAL, self.PAST, b"\x1b[C", then=b"\r"), [self.SESSION])
 
     def test_the_composers_enter_on_a_question_answered_with_text_is_timed_the_same_way(self) -> None:
         self.assertEqual(self.press(self.SUDO, 0.45, b"\x1b", b"[13u"), [])
@@ -869,7 +885,7 @@ class SlotArmFromArrivalTests(unittest.TestCase):
     def test_a_key_whose_first_byte_came_before_the_slot_opened_is_early_however_late_it_is_decided(self) -> None:
         # A Right arrow split twice by jitter around the opening: its ESC 10 ms before, its `[` and its `C` each
         # 0.27 to 0.29 s later, inside the 0.3 s wait. It is decided 0.55 s after the opening, past the delay,
-        # and still answers nothing; the untouched approval then denies.
+        # and still answers nothing and moves nothing; the untouched approval's Enter then allows once.
         now = [100.0]
         app, client = listing(clock=lambda: now[0])
         self.assertTrue(reporting(app))
@@ -881,7 +897,7 @@ class SlotArmFromArrivalTests(unittest.TestCase):
         self.assertAlmostEqual(now[0] - app.slot_opened_at, 0.55)
         self.assertEqual(client.answers, [])
         step_through(app, now, [*self.QUIET * 40, (0.0, b"\r"), *self.QUIET])
-        self.assertEqual(client.answers, [self.DENY])
+        self.assertEqual(client.answers, [self.ONCE])
 
     def esc_after_an_off(self, off_before: float | None, at: float) -> list:
         """An Esc `at` s after an approval opened, reports having gone off `off_before` s before it (None: never on)."""
@@ -974,7 +990,7 @@ class ExitDrainTests(unittest.TestCase):
 
     def leaving(self, terminal: DrainTerminal, *, with_reports: bool = True) -> tuple[App, RecordingClient]:
         client = RecordingClient()
-        app = App(terminal, client, {}, poller=FakePoller(), clock=lambda: terminal.now[0])  # type: ignore[arg-type]
+        app = App(terminal, client, NATIVE_MOUSE, poller=FakePoller(), clock=lambda: terminal.now[0])  # type: ignore[arg-type]
         app.sid = SID
         app.turn_pending = True
         if with_reports:
@@ -1185,18 +1201,27 @@ class DocumentedMouseTests(unittest.TestCase):
                 self.assertNotIn("escape-time", text)
 
     def test_the_way_to_select_anyway_is_named_for_each_terminal_no_more_surely_than_it_is_known(self) -> None:
+        # Measured 2026-11-05 from each terminal's docs or source: Terminal.app tests Fn (its Option-drag selects a
+        # rectangle), iTerm2 Option, VS Code on macOS nothing unless its setting is on, the rest Shift.
         text = self.prose("docs/INSTALLATION.md")
         self.assertIn(
-            "hold Fn while dragging in Terminal.app (or turn off View → Allow Mouse Reporting), Option in iTerm2, "
-            "Shift in most other terminals",
+            "Shift while dragging in xterm, kitty, WezTerm, Ghostty, Alacritty, foot, GNOME Terminal, Konsole, "
+            "Windows Terminal and Otty (its default; Settings → Controls → Mouse → Bypass Mouse Reporting chooses "
+            "another), Option in iTerm2, Fn in Terminal.app (or turn off View → Allow Mouse Reporting, ⌘R); VS Code's "
+            "terminal on macOS has none unless `terminal.integrated.macOptionClickForcesSelection` is on.",
             text,
         )
         self.assertNotIn("Option-drag in Terminal.app", text)
 
     def test_the_boundary_says_what_each_click_does_and_when_a_report_can_still_type(self) -> None:
         text = self.prose("docs/OMH-TUI-BOUNDARY.md")
-        self.assertIn("A plain left click on an agent opens its log, one on the list's `main` row leaves the list, and "
-                      "every other report does nothing.", text)
+        self.assertIn("A plain left click on an agent opens its log, one on the list's `main` row leaves the list.", text)
+        self.assertIn("is on only while the agent list or the `/theme` picker takes clicks (clicks and the wheel, "
+                      "without 1002) and in a pager", text)
+        self.assertIn("is on wherever the TUI can tell which screen row a report lands on", text)
+        self.assertIn("with `OMH_TUI_MOUSE=0` it is on only while the agent list or the `/theme` picker takes clicks",
+                      text)
+        self.assertIn("modes 1000, 1002 and 1006, never 1003", text)
         self.assertIn("One that starts later and is split right after its first or second byte is read as keys.", text)
         for name in ("docs/OMH-TUI-BOUNDARY.md", "AGENTS.md"):
             with self.subTest(name=name):
@@ -1207,7 +1232,8 @@ class DocumentedMouseTests(unittest.TestCase):
 @unittest.skipIf(NO_TERMIOS, "the OMH TUI needs termios")
 class MouseReplayTests(AppTestCase):
     def scenario(self) -> Scenario:
-        return delegating_scenario(("subagent.tail", {"result": {"subagent_id": SECOND, "available": False}}))
+        return delegating_scenario(("subagent.tail", {"result": {"subagent_id": SECOND, "available": False}}),
+                                   REFUSED_VIEW)
 
     def test_in_the_real_loop_reports_wait_for_the_list_and_a_click_on_its_row_opens_that_agent(self) -> None:
         run = self.prepare(self.scenario())
@@ -1237,7 +1263,7 @@ class MouseReplayTests(AppTestCase):
             Step(b"\x1b", when=lambda: on() and listed(), capture="back", label="the list again"),
             Step(b"\x1b", when=lambda: not listed() and not on(), label="the view again"),
             # The agent view stays under the info line after the turn: `idle` reads the screen's last row.
-            Step(b"\x04", when=lambda: "Interrupted." in terminal.history() and terminal.shows(IDLE_HINT)(),
+            Step(b"\x04", when=lambda: "Interrupted." in terminal.history() and terminal.idle(),
                  capture="over", label="the end"),
         )
         self.run_main(run)
@@ -1251,12 +1277,12 @@ class MouseReplayTests(AppTestCase):
         # Wheel, motion, a right press, a release and two near misses (the two rows under the region): still the
         # list, on the first agent, and nothing typed.
         ignored = captures["ignored"]
-        self.assertIn("▸ ", ignored[y - 2])
+        self.assertIn("❯ ", ignored[y - 2])
         self.assertEqual(captures["log"][0], "read the diff for risks")
         self.assertEqual(run.calls("subagent.tail")[0]["params"], {"session_id": LIVE_ID, "subagent_id": SECOND})
-        # Off during the turn with the view shown, on with the list, off for the log, on back in the list, off once
-        # the list is left.
-        self.assertEqual(terminal.mouse_calls, [True, False, True, False])
+        # Off during the turn with the view shown, on with the list, still on for the log (a pager, with a drag) and
+        # back in the list, off once the list is left.
+        self.assertEqual(terminal.mouse_calls, [True, False])
         self.assertFalse(terminal.mouse_reporting)
         self.assertEqual(len(run.calls("session.interrupt")), 1)
 

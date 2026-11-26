@@ -80,10 +80,10 @@ def _unshipped_skill_mentions(files, unshipped: dict[str, str]) -> list[str]:
 # fails naming the override once one of them ships portably.
 _OVERRIDES_AROUND_UNSHIPPED_SKILLS = {
     "ulw-loop::do_not_use_when": ("automation-blueprint",),
+    "ulw-plan::quality_bar": ("dag-ulw",),
     "ulw-work::quality_bar": ("maestro",),
     "ulw-qa::quality_bar": ("todo-checklist",),
     "omh-source-finder::use_when": ("research-department",),
-    "omh-research-brief::description": ("research-department",),
     "omh-model-finetuning::why_this_exists": ("model-optimization", "workflow-learning"),
     "omh-spend-gate::why_this_exists": ("browser-operator",),
     "omh-memory-new::description": ("memory-sync",),
@@ -180,6 +180,22 @@ class AgentSkillsProjectionTests(unittest.TestCase):
         for name in ("ulw-maestro", "omh-routing", "omh-doctor", "unknown-future-skill"):
             self.assertNotIn(name, names)
             self.assertEqual(skill_portability(name), PORTABILITY_HERMES_ONLY)
+
+    def test_hermes_only_is_exactly_skills_absent_from_the_committed_pack(self):
+        # docs/AGENT-SKILLS.md states this rule instead of listing names, which
+        # went stale; the two committed trees and the producer must agree.
+        from omh.skills.catalog_portable import PORTABILITY_HERMES_ONLY, skill_portability
+        root = Path(__file__).resolve().parents[1]
+        hermes = {p.name for p in (root / "skills").iterdir() if (p / "SKILL.md").is_file()}
+        pack = {p.name for p in (root / "agent-skills").iterdir() if (p / "SKILL.md").is_file()}
+        self.assertLessEqual(pack, hermes)
+        for name in sorted(hermes):
+            with self.subTest(skill=name):
+                self.assertEqual(skill_portability(name) == PORTABILITY_HERMES_ONLY, name not in pack)
+        doc = (root / "docs/AGENT-SKILLS.md").read_text(encoding="utf-8")
+        section = doc.split("### Hermes-only boundary\n", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("`skill_portability()` in `src/skills/catalog_portable.py`", section)
+        self.assertNotIn("| --- |", section)
 
     def test_portable_files_name_no_skill_the_portable_projection_does_not_ship(self):
         """A portable host is never told to load a skill it does not have.
@@ -407,7 +423,10 @@ class AgentSkillsProjectionTests(unittest.TestCase):
         from dataclasses import fields
         from omh.skills.catalog import installable_skill_definitions, omh_skill_display_name
         from omh.skills.catalog_types import SkillDefinition
-        from omh.skills.render import agent_skill_template, loadable_skill_mentions
+        from dataclasses import replace
+        from omh.skills.render import (
+            agent_frontmatter_description, agent_skill_detail_templates, agent_skill_template, translate_sibling_mentions,
+        )
         from omh.skills.catalog_portable import portable_skill_names
 
         sections = {field.name for field in fields(SkillDefinition)} - {"portable_overrides"}
@@ -424,14 +443,26 @@ class AgentSkillsProjectionTests(unittest.TestCase):
             if name not in portable:
                 problems.append(f"{name} (overrides a skill with no Agent Skills projection)")
                 continue
-            body = agent_skill_template(definition).content
-            # A Do Not Use When line renders its siblings under their loadable
-            # labels (`loadable_skill_mentions`), so that is the line to find.
+            # A body over the read cap keeps its quality bar in references/details.md.
+            body = agent_skill_template(definition).content + "".join(
+                detail.content for detail in agent_skill_detail_templates([definition])
+            )
+            # Every rendered line names its siblings under loadable labels
+            # (`translate_sibling_mentions`), so that is the line to find.
+            # A description override reaches the listing only as its situation clause
+            # (`agent_frontmatter_description`), so that projection is the line to find.
+            rendered = {
+                section: (
+                    [json.dumps(agent_frontmatter_description(replace(definition, description=lines[0])), ensure_ascii=False)]
+                    if section == "description" else lines
+                )
+                for section, lines in definition.portable_overrides.items()
+            }
             problems.extend(
                 f"{name}::{section} (replacement line absent from the portable body)"
-                for section, lines in definition.portable_overrides.items()
+                for section, lines in rendered.items()
                 if any(
-                    (loadable_skill_mentions(line) if section == "do_not_use_when" else line) not in body
+                    translate_sibling_mentions(line, owner=definition.name) not in body
                     for line in lines
                 )
             )
@@ -517,8 +548,16 @@ class AgentSkillsProjectionTests(unittest.TestCase):
             install_agent_skills(target, mirror=mirror)
             manifest = json.loads((target / MANIFEST_NAME).read_text())
             self.assertEqual(manifest["target_dirs"], [str(target), str(mirror)])
-            self.assertEqual((target / MANIFEST_NAME).read_bytes(), (mirror / MANIFEST_NAME).read_bytes())
+            # One receipt per root, same target_dirs; the mirror lists the Claude copy's bytes.
+            self.assertEqual(json.loads((mirror / MANIFEST_NAME).read_text())["target_dirs"], manifest["target_dirs"])
             self.assertFalse((mirror / "ulw-work/SKILL.md").is_symlink())
+            from omh.install.agent_skills_projection import claude_skill_files
+
+            # Skill files hold non-ASCII text; without an explicit encoding Windows decodes them as cp1252 and fails.
+            self.assertEqual(
+                (mirror / "ulw-work/SKILL.md").read_bytes(), claude_skill_files()["ulw-work/SKILL.md"].encode("utf-8")
+            )
+            # The portable descriptions already fit Claude Code's listing, so the copies match today.
             self.assertEqual((target / "ulw-work/SKILL.md").read_bytes(), (mirror / "ulw-work/SKILL.md").read_bytes())
             (mirror / "ulw-work/SKILL.md").write_bytes(b"local mirror edit")
             status = agent_skills_status(target, mirror=mirror)
@@ -597,7 +636,7 @@ class AgentSkillsProjectionTests(unittest.TestCase):
         from contextlib import chdir
         import subprocess
         from _cli_harness import run_cli
-        from omh.install.agent_skills_projection import MANIFEST_NAME, agent_skill_files, install_agent_skills
+        from omh.install.agent_skills_projection import MANIFEST_NAME, claude_skill_files, install_agent_skills
         from omh.converter import discover_skill_files
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp).resolve()
@@ -611,10 +650,10 @@ class AgentSkillsProjectionTests(unittest.TestCase):
                 self.assertEqual(status, 0, error)
                 self.assertEqual(json.loads(output)["target_dirs"], [str(target), str(mirror)])
                 self.assertEqual(json.loads(output)["projection"], "fresh")
-                manifest = json.loads((target / MANIFEST_NAME).read_text())
+                manifest = json.loads((mirror / MANIFEST_NAME).read_text())
                 self.assertEqual(manifest["schema_version"], "omh_agent_skills_projection/v1")
-                self.assertEqual((target / MANIFEST_NAME).read_bytes(), (mirror / MANIFEST_NAME).read_bytes())
-                for relative, content in agent_skill_files().items():
+                self.assertEqual(json.loads((target / MANIFEST_NAME).read_text())["target_dirs"], manifest["target_dirs"])
+                for relative, content in claude_skill_files().items():
                     self.assertEqual((mirror / relative).read_bytes(), content.encode("utf-8"))
                     self.assertFalse((mirror / relative).is_symlink())
                     self.assertEqual(manifest["files"][relative], hashlib.sha256(content.encode("utf-8")).hexdigest())
@@ -630,7 +669,7 @@ class AgentSkillsProjectionTests(unittest.TestCase):
                 self.assertEqual(json.loads(output)["projection"], "fresh")
                 self.assertEqual(json.loads(output)["drift"], "clean")
                 (mirror / MANIFEST_NAME).unlink()
-                self.assertEqual(json.loads(run_cli(command + ["--status"])[1])["projection"], "missing")
+                self.assertEqual(json.loads(run_cli(command + ["--status"])[1])["projection"], "fresh")
                 self.assertEqual(run_cli(command)[0], 0)
             # Neither generated copy may contaminate an implicit Hermes import.
             self.assertEqual(discover_skill_files(repo), [])
@@ -701,7 +740,46 @@ class AgentSkillsProjectionTests(unittest.TestCase):
             self.assertEqual(status["projection"], "stale")
             self.assertEqual(status["drift"], "clean")
             (mirror / MANIFEST_NAME).unlink()
-            self.assertEqual(agent_skills_status(target, mirror=mirror)["projection"], "missing")
+            self.assertEqual(agent_skills_status(target, mirror=mirror)["projection"], "stale")
+
+    def test_status_reports_primary_when_mirror_manifest_absent(self):
+        from unittest.mock import patch
+        from omh.install.agent_skills_projection import install_agent_skills, agent_skills_status, MANIFEST_NAME
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            target, mirror = home / ".agents/skills", home / ".claude/skills"
+            with patch.object(Path, "home", return_value=home):
+                empty = agent_skills_status(target, mirror=mirror)
+                self.assertEqual((empty["primary"], empty["mirror"], empty["projection"]),
+                                 ("missing", "missing", "missing"))
+                install_agent_skills(target)
+                status = agent_skills_status(target, mirror=mirror)
+                self.assertEqual((status["primary"], status["mirror"], status["projection"]),
+                                 ("fresh", "missing", "fresh"))
+                self.assertIn("mirror copy", status["warnings"][0])
+                self.assertIn("omh install --target agents --scope user", status["warnings"][0])
+                self.assertFalse(mirror.exists())
+                self.assertEqual(agent_skills_status(target)["mirror"], "none")
+                path = target / MANIFEST_NAME
+                manifest = json.loads(path.read_text())
+                manifest["catalog_revision"] = "old-revision"
+                path.write_text(json.dumps(manifest))
+                status = agent_skills_status(target, mirror=mirror)
+                self.assertEqual((status["primary"], status["mirror"], status["projection"]),
+                                 ("stale", "missing", "stale"))
+
+    def test_status_stale_mirror_still_stale(self):
+        from omh.install.agent_skills_projection import install_agent_skills, agent_skills_status, MANIFEST_NAME
+        with tempfile.TemporaryDirectory() as tmp:
+            target, mirror = Path(tmp) / ".agents/skills", Path(tmp) / ".claude/skills"
+            install_agent_skills(target, mirror=mirror)
+            path = mirror / MANIFEST_NAME
+            manifest = json.loads(path.read_text())
+            manifest["catalog_revision"] = "old-revision"
+            path.write_text(json.dumps(manifest))
+            status = agent_skills_status(target, mirror=mirror)
+            self.assertEqual((status["primary"], status["mirror"], status["projection"]),
+                             ("fresh", "stale", "stale"))
 
     def test_manifest_traversal_and_symlink_destinations_fail_before_writes(self):
         from omh.install.agent_skills_projection import install_agent_skills, MANIFEST_NAME
@@ -867,10 +945,12 @@ class AgentSkillsProjectionTests(unittest.TestCase):
                 self.assertEqual(run_cli(command)[0], 0)
                 self.assertEqual({p.name for p in (repo / ".agents/skills").iterdir() if p.is_dir()}, set(portable_skill_names()))
                 self.assertFalse((nested / ".agents").exists())
-                self.assertEqual((repo / ".agents/skills" / MANIFEST_NAME).read_bytes(), (repo / ".claude/skills" / MANIFEST_NAME).read_bytes())
+                self.assertEqual(json.loads((repo / ".agents/skills" / MANIFEST_NAME).read_bytes())["target_dirs"],
+                                 json.loads((repo / ".claude/skills" / MANIFEST_NAME).read_bytes())["target_dirs"])
                 user = ["install", "--target", "agents", "--scope", "user", "--json"]
                 self.assertEqual(run_cli(user)[0], 0)
-                self.assertEqual((home / ".agents/skills" / MANIFEST_NAME).read_bytes(), (home / ".claude/skills" / MANIFEST_NAME).read_bytes())
+                self.assertEqual(json.loads((home / ".agents/skills" / MANIFEST_NAME).read_bytes())["target_dirs"],
+                                 json.loads((home / ".claude/skills" / MANIFEST_NAME).read_bytes())["target_dirs"])
                 self.assertFalse((home / ".hermes").exists())
                 self.assertFalse((home / ".omh").exists())
             with chdir(home):

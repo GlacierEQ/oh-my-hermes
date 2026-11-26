@@ -144,7 +144,7 @@ class RespawnTests(unittest.TestCase):
         self.assertIn(RESPAWN_NOTICE.format(reason="The Hermes gateway exited (code 1)", session=STORED, attempt=1,
                                             limit=RESPAWN_LIMIT, window=RESPAWN_WINDOW_SECONDS), said)
         self.assertIn(f"The Hermes gateway exited (code 1): starting it again and resuming session {STORED} (1 of 3 in 60 s); "
-                      "what you type waits until it is back, and ctrl+c leaves.", said)
+                      "you can keep typing, Enter waits until it is back, and ctrl+c leaves.", said)
         self.assertEqual(said[-1], RESPAWNED_NOTICE.format(session=STORED))
         # It reads the session's settings and command list again, as a session that opens does.
         self.assertEqual([method for method, _params in new.calls], ["config.get", "commands.catalog"])
@@ -223,7 +223,7 @@ class LostCallTests(unittest.TestCase):
         app, old, _spawner, now = crashing(busy=True, cols=120)
         type_text(app, "steer me")
         app._on_input(Key(ENTER, ctrl=True))
-        self.assertEqual(app.client.named("session.steer"), [{"session_id": SID, "text": "steer me"}])  # type: ignore[attr-defined]
+        self.assertEqual(app.client.named("session.redirect"), [{"session_id": SID, "text": "steer me"}])  # type: ignore[attr-defined]
         crash(app, old)
         self.assertEqual(app.composer.text, "steer me")  # never sent again: Hermes may have taken it
         self.assertEqual([call.method for call in app.pending.values()], ["config.get", "commands.catalog"])
@@ -259,7 +259,7 @@ class LostCallTests(unittest.TestCase):
                 if streaming:
                     app._on_event(Event("message.start", SID, {}))
                     app._on_event(Event("message.delta", SID, {"text": "still streaming"}))
-                type_text(app, "/usage")
+                type_text(app, "/btw what now")  # a command that runs during a turn too
                 app._on_input(Key(ENTER))
                 transcript = app.transcript
                 (echo,) = [block for block in transcript.blocks + transcript._held if isinstance(block, CommandBlock)]
@@ -295,7 +295,7 @@ class TellFieldAcrossARespawnTests(unittest.TestCase):
                 self.assertIsNone(app.tell_draft)
                 self.assertEqual(app.composer.text, f"my draft\n{typed}" if typed else "my draft")
                 self.assertEqual(TELL_LOST_NOTICE in notices(app), bool(typed))
-                self.assertEqual(app.client.named("session.steer"), [])  # type: ignore[attr-defined]  # never sent
+                self.assertEqual(app.client.named("session.redirect"), [])  # type: ignore[attr-defined]  # never sent
 
 
 class AgentsAcrossARespawnTests(unittest.TestCase):
@@ -320,7 +320,7 @@ class AgentsAcrossARespawnTests(unittest.TestCase):
                          {FIRST: COMPLETED, SECOND: INTERRUPTED})  # the gateway that ran it is gone
         self.assertIsNone(app.agent_steer)
         view = [line_text(line) for line in app._agent_view(120, 30)]
-        self.assertTrue(view[1].startswith("  ○ Run the shell command one"), view)
+        self.assertTrue(view[1].startswith("  ✓ Run the shell command one"), view)
         self.assertTrue(view[2].startswith("  ▪ Run the shell command two"), view)
         self.assertFalse([row for row in view if "│" in row], "no HUD agents block header beside them")
 
@@ -364,6 +364,40 @@ class CapTests(unittest.TestCase):
         self.assertEqual(app.exit_code, 1)
         self.assertEqual(len(spawner.made), RESPAWN_LIMIT)
         self.assertIn(f"hermes --tui --resume {STORED}", app.farewell)
+
+    def test_under_omh_the_tui_leaves_past_the_cap_naming_omh_resume(self) -> None:
+        from omh.tui.launch import SESSION_FILE_ENV
+
+        app, client, _spawner, now = crashing(environ={**ENVIRON, SESSION_FILE_ENV: "/private/omh-tui-x/session"})
+        for _ in range(RESPAWN_LIMIT + 1):
+            crash(app, client)
+            client = app.client  # type: ignore[assignment]
+            now[0] += 10.0
+        self.assertEqual(app.exit_code, 1)
+        self.assertTrue(app.farewell.endswith(f"Resume the session: omh --resume {STORED}"), app.farewell)
+        self.assertNotIn("hermes --tui", app.farewell)
+
+    def test_under_omh_the_farewell_carries_the_whole_id_and_a_named_profile(self) -> None:
+        from omh.tui.launch import SESSION_FILE_ENV
+
+        long_id = "local-" + "b3c800dd" * 8  # Hermes' newer stored ids: 70 characters, never shortened
+        for profile, expected in (("", f"omh --resume {long_id}"), ("default", f"omh --resume {long_id}"),
+                                  ("work", f"omh -p work --resume {long_id}")):
+            with self.subTest(profile=profile):
+                app, client, _spawner, _now = crashing(environ={**ENVIRON, SESSION_FILE_ENV: "/private/omh-tui-x/session"})
+                app.stored_id, app.launch_profile = long_id, profile
+                crash(app, client, code=0)  # a normal exit is never respawned: the TUI leaves at once
+                self.assertTrue(app.farewell.endswith(f"Resume the session: {expected}"), app.farewell)
+
+    def test_under_omh_a_profile_or_id_that_cannot_be_typed_back_names_hermes_instead(self) -> None:
+        from omh.tui.launch import SESSION_FILE_ENV
+
+        for stored, profile in ((STORED, "Bad Name"), ("sess alpha", "")):
+            with self.subTest(stored=stored, profile=profile):
+                app, client, _spawner, _now = crashing(environ={**ENVIRON, SESSION_FILE_ENV: "/private/omh-tui-x/session"})
+                app.stored_id, app.launch_profile = stored, profile
+                crash(app, client, code=0)  # a normal exit is never respawned: the TUI leaves at once
+                self.assertIn("Resume the session in Hermes' own terminal: hermes --tui", app.farewell)
 
     def test_the_window_slides(self) -> None:
         app, client, spawner, now = crashing()
@@ -492,7 +526,7 @@ class LoopTests(unittest.TestCase):
 
         first.resume = {"session_id": SID, "stored_session_id": STORED, "info": {}}
         environ = {**ENVIRON, "HERMES_TUI_RESUME": STORED}
-        code = _run(first, environ, _Sink(), lambda: terminal, poller, spawner)  # type: ignore[arg-type]
+        code = _run(first, environ, _Sink(), lambda: terminal, poller, spawner, contain_faults=False)  # type: ignore[arg-type]
         self.assertEqual(code, 0)
         (new,) = spawner.made
         self.assertEqual(new.closed, 1)  # reaped by `_run`; the first one is the caller's to close
@@ -513,7 +547,7 @@ class SignalDuringRespawnTests(unittest.TestCase):
 
         environ = {**ENVIRON, "HERMES_TUI_RESUME": STORED}
         with self.assertRaises(SystemExit):
-            _run(first, environ, _Sink(), lambda: terminal, poller, Spawner(new))  # type: ignore[arg-type]
+            _run(first, environ, _Sink(), lambda: terminal, poller, Spawner(new), contain_faults=False)  # type: ignore[arg-type]
         self.assertEqual(terminal.exited, 1)  # the terminal was handed back first
         return first
 

@@ -109,9 +109,10 @@ NATIVE_GATE_CLAUSES = {
     "command-operator": (
         COMMAND_CONFIRMATION,
         COMMAND_NATIVE_NOTE,
-        "Destructive, credential, network, filesystem mutation, install, deploy, and production commands are "
-        "confirmed in chat before the run, or marked missing and not run; a native approval note is recorded beside that "
-        "confirmation, never in place of it.",
+        "Irreversible or externally visible commands (data deletion or overwrite, force-push, database drop, "
+        "credentialed or networked mutation, install, deploy, production change, external send) "
+        "are confirmed in chat before the run, or marked missing and not run; a native approval note is recorded "
+        "beside that confirmation, never in place of it.",
         "On Hermes, a cron job, a one-shot `-q` run, or a webhook run denies a flagged command by default",
         COMMAND_UNATTENDED,
     ),
@@ -235,7 +236,17 @@ class FeatureSurfaceOverrideTests(unittest.TestCase):
 
 class NativeGateClauseTests(unittest.TestCase):
     def test_each_operator_body_states_its_gate(self) -> None:
-        templates = {template.name: template.content for template in builtin_skill_templates()}
+        from omh.skills.packaging import builtin_skill_reference_templates
+
+        full_contracts = {
+            ref.skill_name: ref.content
+            for ref in builtin_skill_reference_templates()
+            if ref.relative_path == "references/full-contract.md"
+        }
+        templates = {
+            template.name: template.content + "\n" + full_contracts.get(template.name, "")
+            for template in builtin_skill_templates()
+        }
         for name, clauses in NATIVE_GATE_CLAUSES.items():
             for clause in clauses:
                 with self.subTest(skill=name, clause=clause[:60]):

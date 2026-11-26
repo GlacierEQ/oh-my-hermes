@@ -42,7 +42,7 @@ and then that header, then the plan header.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import timezone
 import json
@@ -51,21 +51,31 @@ from pathlib import Path
 import sqlite3
 import threading
 import time
+import traceback
 from typing import Any
 import unicodedata
 from urllib.parse import quote
 
 from ..plugin_bundle.omh.hud_text import elapsed_text, todo_unchanged_text
 from ..version import __version__
+from .background import BackgroundProcess, read_processes, still_running
 from .escapes import strip_escapes
 from .style import NO_COLOR, TRUECOLOR, Line, Span, Style
+from .theme import CATCH_MARK as CATCH_MARK  # re-exported: app and tests read the mark from here
 from .theme import Theme
-from .width import cell_width, clusters, truncate, truncate_line
+from .width import cell_width, cluster_width, clusters, line_width, truncate, truncate_line
 from ..plugin_bundle.omh.iso_datetime import strict_fromisoformat
 
 HUD_POLL_MIN_SECONDS = 2.0
 HUD_POLL_MAX_SECONDS = 8.0
 TOKEN_WATCH_CAP = 64  # the roster's own cap: one query never names more child sessions than the agent view holds
+# A session's background-process ownership facts read off state.db on the poller thread (`HudPoller.poll_once`):
+LINEAGE_READS = 5  # reads that may ask again while the earlier segments are `unverified`
+ROUTE_READS = 5  # reads that may ask again while no row of the session is there to name its route
+PARENT_CACHE = 256  # spawning sessions decided per session; one past this is not asked and not this session's
+PARENT_READS = 5  # reads that may ask again about a spawning session state.db could not decide (`delegated_from`)
+DELEGATION_DEPTH = 8  # delegation links followed from a spawning session back to this one
+FAILURE_CHARS = 200  # a failed read's `error` in the snapshot: class, where it raised, and its repr, cut to this
 
 # The fields that drift on every poll without anything having happened: the
 # widget's VOLATILE_KEYS. A payload differing only here is still delivered (so
@@ -105,7 +115,7 @@ ROUTE_PREFIX = "category:"
 MAESTRO_EXECUTOR_SHORT_NAMES = {
     "codex": "codex",
     "claude_code": "claude",
-    "omo_runtime": "omo",
+    "pi_family_runtime": "pi",
     "hermes_local": "hermes",
 }
 STATE_ABBREVIATIONS = {
@@ -126,13 +136,19 @@ _SAFE_PUNCTUATION = frozenset(" .:/_·|+()[]!-',;?\"#%&=@~")
 
 @dataclass(frozen=True)
 class HudSnapshot:
-    """One delivery: whose payload, the payload (None = empty panel), when it was read, and the watched subagents'
-    output tokens the same read took (child session id to count; `read_output_tokens`)."""
+    """One delivery: whose payload, the payload (None = empty panel), when it was read, the watched subagents'
+    output tokens the same read took (child session id to count; `read_output_tokens`), the session's background
+    processes still running (`background.still_running`), oldest first, and how many `HudPoller.refresh` calls came
+    before the read started (a read is newer than a refresh only when this is at least what that call returned)."""
 
     session_id: str
     payload: Mapping[str, Any] | None
     received_at: float
     output_tokens: Mapping[str, int] = field(default_factory=dict)
+    processes: tuple[BackgroundProcess, ...] = ()
+    refreshes: int = 0
+    earlier: tuple[str, ...] = ()  # the conversation's earlier segments the read verified (`earlier_segments`)
+    failed: bool = False  # a read that raised (`HudPoller._read_failed`): its processes are the last ones read
 
 
 HudReader = Callable[..., Mapping[str, Any]]
@@ -170,6 +186,17 @@ class HudPoller:
     last named. A count that moved is a change like any other, so the poll
     stays at two seconds while subagents are writing and backs off once they
     stop. With no session watched there is no query.
+
+    Each read also takes the session's background processes from Hermes'
+    `processes.json` (`background.read_processes`) and keeps every one it has
+    seen while it still runs, so a row another interpreter's rewrite dropped
+    stays until its process ends. A process starting or ending is a change.
+    The first read of a session also reads which earlier segments of its
+    conversation rotating compaction left (`earlier_segments`): their
+    processes are this session's too, and when the session switched from is
+    one of them, what was kept for it is kept on. Reads go on asking which
+    route keys Hermes recorded for those ids (`recorded_routes`) until one
+    is found, for a messaging session's processes.
     """
 
     def __init__(
@@ -194,6 +221,18 @@ class HudPoller:
         self._generation = 0
         self._pending: HudSnapshot | None = None
         self._watched: tuple[str, ...] = ()
+        self._processes: dict[str, BackgroundProcess] = {}
+        self._earlier: tuple[str, ...] | None = None  # None: not settled yet for this session
+        self._earlier_reads = 0
+        self._routes: tuple[str, ...] | None = None  # the route keys Hermes recorded for those ids; None: ask
+        self._route_reads = 0
+        self._parents: dict[str, bool] = {}  # spawning session id -> whether this session delegated to it (decided)
+        self._parent_asks: dict[str, int] = {}  # spawning session id -> reads that could not decide it yet
+        self._parents_for: tuple[str, ...] = ()  # the session's ids the "not delegated" answers were decided against
+        self._left: tuple[str, dict[str, BackgroundProcess]] = ("", {})  # the session switched from, its processes
+        # `refresh` calls, and the most a read that started after them has accounted for: that read is kept as new.
+        self._refreshes = 0
+        self._refreshed = 0
         self._last_full = ""
         self._last_structural = ""
         self._interval = HUD_POLL_MIN_SECONDS
@@ -218,8 +257,12 @@ class HudPoller:
         with self._lock:
             if stored_id == self._session:
                 return
+            self._left = (self._session, self._processes)  # kept on if the first read finds it an earlier segment
             self._session = stored_id
             self._generation += 1
+            self._processes = {}
+            self._earlier, self._earlier_reads, self._routes, self._route_reads = None, 0, None, 0
+            self._parents, self._parent_asks, self._parents_for = {}, {}, ()
             self._last_full = ""
             self._last_structural = ""
             self._interval = HUD_POLL_MIN_SECONDS
@@ -243,11 +286,21 @@ class HudPoller:
         if new:
             self._wake.set()
 
-    def refresh(self) -> None:
-        """Read again now rather than at the next poll, and start the back-off over (Hermes' plan just changed)."""
+    def refresh(self) -> int:
+        """Read again now rather than at the next poll, and start the back-off over (Hermes' plan just changed, or a
+        turn ended). The first read that starts after this call is kept even when nothing in it changed, so the UI
+        sees what runs once a turn is over (`App._take_background`); a read already under way is not that read.
+        Returns the count a snapshot's `refreshes` reaches once it comes from such a read."""
         with self._lock:
             self._interval = HUD_POLL_MIN_SECONDS
+            self._refreshes += 1
+            count = self._refreshes
+            # A turn may have recorded the route (`_record_gateway_session_peer`) or delegated: ask again.
+            self._routes, self._route_reads = None, 0
+            self._parents = {parent: True for parent, owned in self._parents.items() if owned}
+            self._parent_asks = {}
         self._wake.set()
+        return count
 
     def take(self) -> HudSnapshot | None:
         """The newest snapshot not yet taken, or None. Never blocks on a read."""
@@ -258,21 +311,71 @@ class HudPoller:
     def poll_once(self) -> float:
         """Read once for the current session and return the seconds to wait before the next read."""
         with self._lock:
-            session, generation, watched = self._session, self._generation, self._watched
+            session, generation, watched, tracked = self._session, self._generation, self._watched, self._processes
+            refreshes, earlier, (left, carried), routes = self._refreshes, self._earlier, self._left, self._routes
+            earlier_reads, route_reads, parents = self._earlier_reads, self._route_reads, dict(self._parents)
+            asks, parents_for = dict(self._parent_asks), self._parents_for
         if not session:
             return HUD_POLL_MAX_SECONDS
         payload = self._read(session)
         # The home this read resolved, so the tokens come from the state.db the payload describes.
-        tokens = read_output_tokens(payload.get("hermes_home"), watched)
-        full = _fingerprint([payload, tokens])
-        structural = _fingerprint([_without_volatile(payload), tokens])
+        home = payload.get("hermes_home")
+        tokens = read_output_tokens(home, watched)
+        process_home = home if isinstance(home, str) else self._hermes_home
+        settled_earlier: tuple[str, ...] | None = earlier
+        if earlier is None:  # until Hermes' links verify every earlier segment, or `LINEAGE_READS` reads asked
+            earlier, resolved = earlier_segments(process_home, session)
+            earlier_reads += 1
+            if left in earlier:
+                tracked, left, carried = {**carried, **tracked}, "", {}
+            if resolved or earlier_reads >= LINEAGE_READS:
+                settled_earlier, left, carried = earlier, "", {}
+        settled_routes: tuple[str, ...] | None = routes
+        if routes is None:  # until a row of the session is there, or `ROUTE_READS` reads asked; again after a turn
+            routes, found = recorded_routes(process_home, (session, *earlier))
+            route_reads += 1
+            if found or route_reads >= ROUTE_READS:
+                settled_routes = routes
+        owners = (session, *earlier)
+        if owners != parents_for:  # "not delegated" was decided against other ids (an unverified lineage, a rotation)
+            parents, asks, parents_for = {parent: True for parent, owned in parents.items() if owned}, {}, owners
+
+        def parent_owned(parent: str) -> bool:
+            if parent in parents:
+                return parents[parent]
+            if len(parents) + len(asks) >= PARENT_CACHE:
+                return False
+            answer = delegated_from(process_home, parent, owners)
+            if answer is None:  # state.db could not say (a row not there yet, a read that failed): ask again
+                asks[parent] = asks.get(parent, 0) + 1
+                if asks[parent] < PARENT_READS:
+                    return False
+                answer = False
+            asks.pop(parent, None)
+            parents[parent] = answer
+            return answer
+
+        processes = still_running(tracked, read_processes(process_home, session, earlier, routes, parent_owned))
+        running = sorted(processes.values(), key=lambda process: (process.started_at, process.proc_id))
+        shown = [[process.proc_id, process.notify, process.watched] for process in running]
+        full = _fingerprint([payload, tokens, shown])
+        structural = _fingerprint([_without_volatile(payload), tokens, shown])
         with self._lock:
             if generation != self._generation:
                 return HUD_POLL_MIN_SECONDS
-            fresh = full != self._last_full
+            self._processes, self._earlier, self._left = processes, settled_earlier, (left, carried)
+            self._earlier_reads = earlier_reads
+            self._parents_for = parents_for
+            if refreshes == self._refreshes:
+                self._routes, self._route_reads = settled_routes, route_reads
+                self._parents, self._parent_asks = parents, asks
+            else:  # a refresh since this read began: the route and the sessions found not delegated are asked again
+                self._parents, self._parent_asks = {parent: True for parent, owned in parents.items() if owned}, {}
+            fresh = full != self._last_full or refreshes != self._refreshed
+            self._refreshed = refreshes
             if fresh:
                 self._last_full = full
-                self._pending = HudSnapshot(session, payload, self._clock(), tokens)
+                self._pending = HudSnapshot(session, payload, self._clock(), tokens, tuple(running), refreshes, earlier)
             if structural != self._last_structural:
                 self._last_structural = structural
                 self._interval = HUD_POLL_MIN_SECONDS
@@ -305,8 +408,132 @@ class HudPoller:
             # Cleared before the read, so a `set_session` landing during it
             # cuts the following wait short instead of being lost.
             self._wake.clear()
-            interval = self.poll_once()
+            try:
+                interval = self.poll_once()
+            except Exception as error:  # noqa: BLE001 - classified in tests/test_broad_exception_policy.py
+                interval = self._read_failed(error)
             self._wake.wait(interval)
+
+    def _read_failed(self, error: BaseException) -> float:
+        """A read that raised past the readers' own guards (or the wake it ends with): the panel says so, naming the
+        class, where it raised and its repr (`failure_text`), so a failure that repeats is diagnosable from the screen;
+        the snapshot is `failed`, so the background row takes nothing from it (`App._take_background`: no end, no
+        quiet stamp, no session change). It calls no callback: the UI loop takes it at its next step, so nothing
+        here can raise out of the thread. The next read comes after the longest interval, and the one after it is
+        delivered whatever it reads."""
+        with self._lock:
+            session = self._session
+            if session:
+                running = tuple(sorted(self._processes.values(), key=lambda process: (process.started_at,
+                                                                                     process.proc_id)))
+                self._pending = HudSnapshot(session, {"error": failure_text(error)}, self._clock(), {}, running, 0,
+                                            self._earlier or (), failed=True)
+                self._last_full = self._last_structural = ""
+            self._interval = HUD_POLL_MAX_SECONDS
+        return HUD_POLL_MAX_SECONDS
+
+
+def failure_text(error: BaseException) -> str:
+    """`<class> at <function>:<line>: <repr>`, cut to `FAILURE_CHARS`: the innermost frame the exception passed."""
+    frames = traceback.extract_tb(error.__traceback__)
+    where = f" at {frames[-1].name}:{frames[-1].lineno}" if frames else ""
+    return truncate(f"{type(error).__name__}{where}: {error!r}", FAILURE_CHARS)
+
+def earlier_segments(hermes_home: object, session_id: str) -> tuple[tuple[str, ...], bool]:
+    """The earlier segments of `session_id`'s conversation, nearest first, as far as Hermes' compaction links verify
+    them (`live_session.compaction_ancestors`, read-only), and whether the walk resolved: an `unverified` answer
+    (a state.db that could not be read, a row not there yet) lists only the segments it verified, and may list more
+    when asked again. None, resolved, for no home. A rotation is the only way one session continues another, so a
+    session switched to that does not name the one left is another conversation."""
+    from ..plugin_bundle.omh.live_session import compaction_ancestors
+
+    if not isinstance(hermes_home, str) or not hermes_home or not session_id:
+        return (), True
+    try:
+        answer = compaction_ancestors(hermes_home, session_id)
+    except (OSError, ValueError):
+        return (), False
+    found = answer.get("ancestors")
+    segments = tuple(item for item in found if isinstance(item, str)) if isinstance(found, list) else ()
+    return segments, answer.get("status") == "resolved"
+
+
+def _state_db(hermes_home: object) -> sqlite3.Connection | None:
+    """`<hermes_home>/state.db` opened as the HUD reader opens it (`mode=ro`, a quarter-second busy wait, the path
+    quoted); None for no home, no file, or one that cannot be opened."""
+    if not isinstance(hermes_home, str) or not hermes_home:
+        return None
+    try:
+        state_db = Path(hermes_home) / "state.db"
+        if not state_db.is_file():
+            return None
+    except (OSError, ValueError):
+        return None
+    try:
+        return sqlite3.connect(f"file:{quote(str(state_db))}?mode=ro", uri=True, timeout=0.25)
+    except sqlite3.Error:
+        return None
+
+
+def delegated_from(hermes_home: object, session_id: str, owners: Collection[str]) -> bool | None:
+    """Whether `session_id` is a subagent session one of `owners` delegated to, directly or through other subagents
+    (at most `DELEGATION_DEPTH` links), read-only off state.db; None when state.db cannot say yet (no file, a row not
+    there yet, a read that failed), which the caller asks again. A link is a row whose `_delegate_from` names its
+    own `parent_session_id` (`tools/delegate_tool.py`, which stamps it once on the child): taken from the first
+    segment of the row's conversation when the child was itself rotated (`compaction_ancestors`), so a parallel
+    continuation of one of `owners` counts as theirs, as `conversation_segments` counts it. A branch or a reset is
+    another conversation and is no link."""
+    from ..plugin_bundle.omh.live_session import compaction_ancestors
+
+    if session_id in owners:
+        return True
+    connection = _state_db(hermes_home)
+    if connection is None:
+        return None
+    try:
+        current = session_id
+        for _ in range(DELEGATION_DEPTH):
+            found = compaction_ancestors(str(hermes_home), current).get("ancestors")
+            first = found[-1] if isinstance(found, list) and found and isinstance(found[-1], str) else current
+            if first in owners:
+                return True
+            row = connection.execute(
+                "SELECT parent_session_id, model_config FROM sessions WHERE id = ?", (first,)
+            ).fetchone()
+            if row is None:
+                return None
+            if not isinstance(row[0], str) or not row[0] or not isinstance(row[1], str):
+                return False
+            config = json.loads(row[1])
+            if not isinstance(config, dict) or config.get("_delegate_from") != row[0]:
+                return False
+            current = row[0]
+            if current in owners:  # the last link read is tested too
+                return True
+        return False
+    except (sqlite3.Error, OSError, ValueError, RecursionError):
+        return None
+    finally:
+        connection.close()
+
+
+def recorded_routes(hermes_home: object, session_ids: Sequence[str]) -> tuple[tuple[str, ...], bool]:
+    """The route keys Hermes recorded on `session_ids`' rows of the state.db under `hermes_home`
+    (`sessions.session_key`: a messaging chat's `agent:<namespace>:<platform>:…`, a local session's route), read-only,
+    and whether any of those rows is there (one with no key settles the question until a turn ends). No ids, no
+    home, no file, and any SQLite failure read as none, with no row seen."""
+    connection = _state_db(hermes_home) if session_ids else None
+    if connection is None:
+        return (), False
+    try:
+        rows = connection.execute(
+            f"SELECT session_key FROM sessions WHERE id IN ({','.join('?' for _ in session_ids)})", tuple(session_ids)
+        ).fetchall()
+    except sqlite3.Error:
+        return (), False
+    finally:
+        connection.close()
+    return tuple(sorted({row[0] for row in rows if isinstance(row[0], str) and row[0]})), bool(rows)
 
 
 def read_output_tokens(hermes_home: object, session_ids: Sequence[str]) -> dict[str, int]:
@@ -599,10 +826,13 @@ def _initial_window(plan: _Plan) -> tuple[int, int]:
 
 
 def _shrink_window(plan: _Plan, start: int, end: int) -> tuple[int, int]:
-    """One item fewer, taken from the side farther from the item the panel exists to show."""
+    """One item fewer: a done item ahead of the one the panel exists to show first (it joins the `✓ N done` row),
+    then from the side farther from that item."""
     active = next((index for index, item in enumerate(plan.items) if item.get("state") == "active"), -1)
     focus = active if active >= 0 else max(_first_remaining(plan), 0)
     focus = min(max(focus, start), end - 1)
+    if start < focus and plan.items[start].get("state") == "done":
+        return start + 1, end
     if end - 1 - focus >= focus - start:
         return start, end - 1
     return start + 1, end
@@ -687,8 +917,10 @@ def _plan_item(
     state = item.get("state")
     marker = PLAN_MARKERS.get(str(state), "[ ]")
     waiting = Span(f" ({'skipped' if state == 'done' else 'waiting'}: {reason})", theme.warn) if reason else None
+    if state == "done":  # done is quiet: its words muted, only the check in the done hue
+        return _line(Span(f"{indent}[", theme.muted), Span("✓", theme.ok), Span(f"] {text}", theme.muted), waiting)
     if state != "active":
-        return _line(Span(f"{indent}{marker} {text}", theme.muted if state == "done" else theme.text), waiting)
+        return _line(Span(f"{indent}{marker} {text}", theme.text), waiting)
     style = _bold(theme.ok if plan.live else theme.warn)
     if plan.live and motion:
         return _line(Span(f"{indent}{marker} ", style), *_shimmer(text, frame, theme), waiting)
@@ -700,6 +932,31 @@ def _plan_item(
 
 def _fold(count: int, side: str, theme: Theme) -> Line:
     return _line(Span(f"... ({count} {side} task{'' if count == 1 else 's'})", theme.muted))
+
+
+def _done_fold(count: int, theme: Theme) -> Line:
+    """The done items above the window, folded into one quiet row."""
+    return _line(Span("✓", theme.ok), Span(f" {count} done", theme.muted))
+
+
+def _current_item(plan: _Plan) -> Mapping[str, Any] | None:
+    """The item the plan is on: the active one, else the first not done."""
+    active = next((item for item in plan.items if item.get("state") == "active"), None)
+    return active or next((item for item in plan.items if item.get("state") != "done"), None)
+
+
+def _with_hint(head: Line, tail: Line, hint: str, columns: int, theme: Theme) -> Line:
+    """`head`, then `tail` cut to what is left, then `hint` dim on the right edge; the hint goes first when the
+    row is narrow, then `tail`."""
+    hint_cells = cell_width(hint) + 2 if hint else 0
+    room = columns - line_width(head) - hint_cells
+    if hint and room < min(line_width(tail), 12):
+        hint_cells, room = 0, columns - line_width(head)
+    kept = truncate_line(tail, room) if room > 0 and tail else ()
+    row = (*head, *kept)
+    if not hint_cells:
+        return row
+    return (*row, Span(" " * max(columns - line_width(row) - cell_width(hint), 2)), Span(hint, theme.faint))
 
 
 def plan_state(payload: Any) -> str:
@@ -736,15 +993,72 @@ def plan_text(payload: Any) -> str:
     return "\n".join(rows)
 
 
+# ── catch rows ─────────────────────────────────────────────────────────────
+
+# One emoji per catch kind (`catch_log.CATCH_KINDS`), between the mark and the sentence. Each is a default-emoji
+# code point (no U+FE0F) two cells wide. A kind not listed here is not printed.
+CATCH_EMOJI = {"repeat_loop": "🔁", "truncated_read": "📖", "plan_continued": "📋", "unarmed_wait": "⏰"}
+
+
+def _catch_sentence(entry: Mapping[str, Any]) -> str:
+    """What OMH did, worded from the entry's kind and numbers; "" for a kind or number this cannot word."""
+    kind = entry.get("kind")
+    numbers = {key: value for key, value in entry.items() if isinstance(value, int) and not isinstance(value, bool)}
+    if kind == "repeat_loop" and numbers.get("laps", 0) > 0 and numbers.get("period", 0) > 0:
+        if numbers["period"] == 1:
+            return f"stopped a loop of {numbers['laps']} identical calls"
+        return f"stopped a loop of {numbers['period']} calls repeated {numbers['laps']} times"
+    if kind == "truncated_read" and numbers.get("offset", 0) > 0:
+        return f"pointed the re-read at line {numbers['offset']}"
+    if kind == "plan_continued" and numbers.get("open_items", 0) > 0:
+        count = numbers["open_items"]
+        return f"kept going, plan has {count} open item{'' if count == 1 else 's'}"
+    if kind == "unarmed_wait":
+        return "flagged a wait with nothing armed to wake it"
+    return ""
+
+
+def catch_lines(payload: Any) -> list[tuple[int, str]] | None:
+    """The payload's catches as `(seq, line)`, oldest first: `🔁 stopped a loop of 3 identical calls`, the mark
+    (`CATCH_MARK`) drawn before it apart. An entry this cannot word keeps its `seq` with the line "", so a reader
+    still counts it as seen; one without a usable `seq` is left out. None for a payload that is not a readable HUD
+    (an error, or not metadata-only): it says nothing about which catches exist, so a reader must not set a mark on it.
+    """
+    if not _valid(payload):
+        return None
+    catches = payload.get("catches")
+    rows: list[tuple[int, str]] = []
+    for entry in catches if isinstance(catches, list) else []:
+        seq = entry.get("seq") if isinstance(entry, Mapping) else None
+        if not isinstance(seq, int) or isinstance(seq, bool) or seq < 0:
+            continue
+        emoji = CATCH_EMOJI.get(str(entry.get("kind")))
+        sentence = _catch_sentence(entry) if emoji else ""
+        rows.append((seq, f"{emoji} {sentence}" if sentence else ""))
+    return rows
+
+
 def _plan_lines(
-    plan: _Plan, start: int, end: int, collapsed: bool, columns: int, now: float, theme: Theme, motion: bool = True
+    plan: _Plan, start: int, end: int, collapsed: bool, columns: int, now: float, theme: Theme, motion: bool = True,
+    fold_key: str = "", folded: bool = False,
 ) -> list[Line]:
-    lines = [_plan_header(plan, now, theme)]
-    if plan.status == "all_done" or collapsed:
-        return lines
+    """The plan: its header, then its items in the window. Collapsed (`folded` by the person, or shed for room) it is
+    the header alone, naming the item it is on. With `fold_key` the header says on its right edge what that key
+    does now: `fold` while expanded, `expand` while the person folded it, and nothing while it is collapsed for
+    room, where the key could not expand it."""
+    header = _plan_header(plan, now, theme)
+    if plan.status == "all_done":
+        return [header]
+    if collapsed:
+        current = _current_item(plan)
+        tail: Line = (Span(" ▸ ", theme.dim), Span(_safe_text(current.get("text")), theme.text)) if current else ()
+        return [_with_hint(header, tail, f"{fold_key} expand" if fold_key and folded else "", columns, theme)]
+    lines = [_with_hint(header, (), f"{fold_key} fold" if fold_key else "", columns, theme)]
     frame = _frame(now)
     budget = max(16, columns - 10)
-    if start > 0:
+    if start > 0 and all(item.get("state") == "done" for item in plan.items[:start]):
+        lines.append(_done_fold(start, theme))
+    elif start > 0:
         lines.append(_fold(start, "earlier", theme))
     for phase, items in _groups(plan.items[start:end]):
         if phase:
@@ -937,7 +1251,13 @@ def _route_identity(row: Mapping[str, Any]) -> tuple[str, str]:
     category = _safe_text(row.get("category"))
     if origin == "exhausted_to_inherit" and route_category:
         category = route_category
-    if category == "inherit":
+    label = _safe_text(row.get("route_label"))
+    if label:
+        # Hermes' delegation backend ran this child on the user's option: a model that equals the parent's is not
+        # inheritance there, and the option is named beside whatever lane the model maps to.
+        lane = "" if category == "inherit" else category
+        text = f"{ROUTE_PREFIX}{lane}@{label}{f'({detail})' if detail else ''}"
+    elif category == "inherit":
         text = f"inherit{f'({model})' if model else ''}"
     elif category:
         text = f"{ROUTE_PREFIX}{category}{f'({detail})' if detail else ''}"
@@ -1198,11 +1518,12 @@ def dag_line(row: Sequence[Any], levels: int, theme: Theme, depth: str = TRUECOL
 
 
 def dag_page_lines(
-    payload: Any, width: int, theme: Theme, depth: str = TRUECOLOR, focus: Any = None
+    payload: Any, width: int, theme: Theme, depth: str = TRUECOLOR, focus: Any = None, aura: int | None = None,
 ) -> tuple[list[Line], Any] | None:
     """The delegation graph in this payload as `/dag` draws it: boxes with Dependencies and Node details and no
     height limit, at `focus` (a `delegation_view.Focus`); its lines and the view, whose `boxes` the pager moves
-    through. None when the payload holds no active graph."""
+    through. None when the payload holds no active graph. `aura` is the phase a running node's box stands at in the
+    dag-ulw aura (`_aura_box`); None (the aura does not move here) draws every box in its state's colour."""
     from ..plugin_bundle.omh.delegation_view import render_delegation_view
 
     graph = _delegation_graph(payload) if isinstance(payload, Mapping) else None
@@ -1210,12 +1531,53 @@ def dag_page_lines(
         return None
     view = render_delegation_view(graph, width=max(8, width), layout="box", focus=focus)
     lines = [dag_line(row, view.levels, theme, depth) for row in view.lines]
+    if aura is not None and view.layout == "box":
+        running = {str(node.get("id")) for node in _rows(graph.get("nodes")) if node.get("state") == "running"}
+        tops: dict[int, list[tuple[str, int]]] = {}
+        for node_id, top, bottom in view.boxes:
+            tops.setdefault(top, []).append((node_id, bottom))
+        for top, row in tops.items():
+            # The top border of each box on this row, left to right, is the box's first cell and its width.
+            borders, at = [], 0
+            for segment in view.lines[top]:
+                if segment.role.startswith("node"):
+                    borders.append((at, cell_width(segment.text)))
+                at += cell_width(segment.text)
+            for (node_id, bottom), (left, size) in zip(row, borders):
+                if node_id in running:
+                    for line in range(top, bottom + 1):
+                        lines[line] = _aura_box(view.lines[line], view.levels, theme, depth, left, size,
+                                                line in (top, bottom), aura)
     topology = graph.get("dag_topology")
     if isinstance(topology, Mapping):  # a dag-ulw run: its critical path and bottlenecks close the page
         from .dag_block import topology_lines
 
         lines += [(), *topology_lines(topology, width, theme)]
     return lines, view
+
+
+def _aura_box(
+    row: Sequence[Any], levels: int, theme: Theme, depth: str, left: int, size: int, rule: bool, phase: int,
+) -> Line:
+    """One line of a running node's box in `/dag` with its border and title in the dag-ulw aura at `phase`: the
+    gradient stepped across the box's `size` cells from `left`, the band moving through (`aura.aura_style`). A `rule`
+    line (the box's top or bottom border) is border all through; on the others, the side borders and the title."""
+    from .aura import aura_style
+
+    spans: list[Span] = []
+    at = 0
+    for segment in row:
+        style = dag_style(segment.role, theme, segment.level, levels, depth)
+        for cluster in clusters(segment.text):  # one style a glyph, never one inside it
+            offset = at - left
+            inside = 0 <= offset < size and (rule or offset in (0, size - 1) or segment.role.startswith("node-title"))
+            painted = aura_style(theme.aura, theme.aura_glint, offset, size, phase) if inside else style
+            if spans and spans[-1].style == painted:
+                spans[-1] = Span(spans[-1].text + cluster, painted)
+            else:
+                spans.append(Span(cluster, painted))
+            at += cluster_width(cluster)
+    return _line(*spans)
 
 
 # A lane in one of these states has finished: `delegation_graph.SETTLED_STATES` (the bundle module the panel does
@@ -1226,16 +1588,19 @@ SETTLED_NODE_STATES = frozenset({"done", "failed", "interrupted", "unknown"})
 def dag_run_summary(graph: Mapping[str, Any]) -> str:
     """`DAG · export feature · done 5/6 · 1 failed` once every lane of `graph` has settled; "" while one has not.
 
-    A finished run holds no rows under the composer: its tree collapses to
-    this one line, until the graph lingers out of the HUD
-    (`delegation_graph.GRAPH_LINGER_SECONDS`) as the whole block did. The
-    counts are the lanes' recorded states; lanes the reader left out
+    A finished run's delegation block is this one line, until the graph
+    lingers out of the HUD (`delegation_graph.GRAPH_LINGER_SECONDS`) as the
+    whole block did; the agent view under the composer draws nothing for it
+    once its turn ends (`agent_view._run_gone`). The counts are the lanes'
+    recorded states; lanes the reader left out
     (`hidden_nodes`) leave the run unread, so it stays a tree, and so does a
     dag-ulw run that is not over (`dag_open`: a node whose child went quiet
     is still out, though its lane reads settled). `/dag` still draws the
     whole graph.
     """
-    lanes = [node for node in _rows(graph.get("nodes")) if node.get("kind") != "root"]
+    # An `outside_dag` lane (a ledger child the run did not bind) is no lane of the run: it neither counts toward
+    # the run's tally nor keeps a finished run's tree open.
+    lanes = [node for node in _rows(graph.get("nodes")) if node.get("kind") != "root" and node.get("outside_dag") is not True]
     if not lanes or _count(graph.get("hidden_nodes")) or graph.get("dag_open") or any(
         node.get("state") not in SETTLED_NODE_STATES for node in lanes
     ):
@@ -1247,6 +1612,14 @@ def dag_run_summary(graph: Mapping[str, Any]) -> str:
     unchecked = sum(1 for node in lanes if node.get("handoff_checked") is False)
     if unchecked:
         said.append(f"{unchecked} handoff not checked")
+    # A dag-ulw run's goal verdict (`dag_run.goal_verdict`): a done run is not verified unless it says so.
+    verdict = _safe_text(graph.get("dag_verdict"))
+    if verdict:
+        said.append(verdict)
+    # A run with goal criteria: how many its verify node marked met (`dag_run.criteria_count`).
+    criteria = _safe_text(graph.get("dag_criteria"))
+    if criteria:
+        said.append(criteria)
     return " · ".join(["DAG", _safe_text(graph.get("name")) or "delegation", *said])
 
 
@@ -1335,6 +1708,37 @@ def _height(layout: _Layout, plan: _Plan | None, agents: _Agents | None) -> int:
         if layout.rows_shown and _hidden_rows(agents, layout.rows_shown):
             height += 1
     return height
+
+
+def _fit(plan: _Plan | None, agents: _Agents | None, dag_on: bool, natural: int, max_rows: int,
+         folded: bool) -> _Layout:
+    """The rows each block gets within `max_rows`, the least valuable shed first; `folded` starts the plan collapsed
+    (the person folded it)."""
+    start, end = _initial_window(plan) if plan is not None and plan.status == "established" else (0, 0)
+    layout = _Layout(
+        plan_on=plan is not None,
+        plan_start=start,
+        plan_end=end,
+        plan_collapsed=folded,
+        agents_on=agents is not None,
+        rows_shown=agents.wanted if agents is not None else 0,
+        dag_on=dag_on,
+        dag_budget=natural,
+    )
+    while _height(layout, plan, agents) > max_rows and _shed(layout, plan, agents):
+        pass
+    return layout
+
+
+def plan_room_collapsed(payload: Any, max_rows: int) -> bool:
+    """Whether the plan drawn alone (as the app's slot draws it, with no agents or delegation tree) is its header
+    alone in `max_rows` for want of rows, whatever the person's fold: there its fold key can change nothing."""
+    if max_rows <= 0 or not isinstance(payload, Mapping) or payload.get("error"):
+        return False
+    plan = _plan_view(payload) if payload.get("privacy") == "metadata_only" else None
+    if plan is None or plan.status != "established":
+        return False
+    return _fit(plan, None, False, 0, max_rows, False).plan_collapsed
 
 
 def _shed(layout: _Layout, plan: _Plan | None, agents: _Agents | None) -> bool:
@@ -1440,6 +1844,8 @@ def panel_lines(
     agents_inset: int = 0,
     motion: bool = True,
     color_depth: str = TRUECOLOR,
+    plan_folded: bool = False,
+    fold_key: str = "",
 ) -> list[Line]:
     """The panel rows for one HUD payload: never more than `max_rows`, none wider than `width` cells.
 
@@ -1456,7 +1862,9 @@ def panel_lines(
     as the delegation tree's `DAG_INDENT` does). Without `motion` (reduced
     motion) the spinner holds its first frame and the plan does not wave.
     `color_depth` is the depth the delegation graph is painted at
-    (`style.color_depth`).
+    (`style.color_depth`). `plan_folded` draws the plan as its header alone
+    (the person folded it), and `fold_key` names the key that folds and
+    expands it on the header's right edge.
     """
     if max_rows <= 0 or width <= 0 or not isinstance(payload, Mapping):
         return []
@@ -1470,19 +1878,10 @@ def panel_lines(
     dag = _delegation_graph(payload) if show_graph else None
     # A finished run is its one summary line (`dag_run_summary`), else its tree at full height.
     natural = (1 if dag_run_summary(dag) else len(_dag_view(dag, columns, None).lines)) if dag is not None else 0
-    start, end = _initial_window(plan) if plan is not None and plan.status == "established" else (0, 0)
-    layout = _Layout(
-        plan_on=plan is not None,
-        plan_start=start,
-        plan_end=end,
-        plan_collapsed=False,
-        agents_on=agents is not None,
-        rows_shown=agents.wanted if agents is not None else 0,
-        dag_on=dag is not None and natural > 0,
-        dag_budget=natural,
-    )
-    while _height(layout, plan, agents) > max_rows and _shed(layout, plan, agents):
-        pass
+    dag_on = dag is not None and natural > 0
+    layout = _fit(plan, agents, dag_on, natural, max_rows, plan_folded)
+    # Expanding a plan the rows would collapse anyway shows nothing more: its header offers no `expand` there.
+    expandable = plan_folded and not _fit(plan, agents, dag_on, natural, max_rows, False).plan_collapsed
     extra = max(0.0, now - received_at) if received_at is not None and _finite(now) and _finite(received_at) else 0.0
     lines: list[Line] = []
     if agents is not None and layout.agents_on:
@@ -1493,6 +1892,7 @@ def panel_lines(
         lines += _dag_lines(dag, layout.dag_budget, columns, theme, color_depth)
     if plan is not None and layout.plan_on:
         lines += _plan_lines(
-            plan, layout.plan_start, layout.plan_end, layout.plan_collapsed, columns, now, theme, motion
+            plan, layout.plan_start, layout.plan_end, layout.plan_collapsed, columns, now, theme, motion, fold_key,
+            expandable,
         )
     return [truncate_line(line, width) for line in lines[:max_rows]]

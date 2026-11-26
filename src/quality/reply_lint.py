@@ -21,6 +21,12 @@ This module reads reply text and reports where it departs from those rules:
   and offers no question.
 - ``decision_without_question``: the closing paragraph names an approval or a
   decision the user owns and offers no question.
+- ``ai_writing_tell``: a high-precision machine-writing habit the human-voice
+  pass (``omh-routing/references/human-voice.md``) removes: chatbot residue
+  (praise openers, "hope this helps" closers, offers to expand), a staged
+  "it's not just X, it's Y" contrast, or a run of em/en dashes. Text inside
+  code, inline code and quoted (``>``) lines is not the reply's own voice and
+  is skipped.
 
 It is pure: no model, no network, no file write. A term the user's own
 message names is explained on request, not leaked, so it is carved out. A
@@ -39,8 +45,9 @@ REPLY_LINT_SCHEMA_VERSION = "reply_lint/v1"
 
 REPLY_LINT_CLAIM_BOUNDARY = (
     "This lint reads reply text only. A clean result shows that the text carries no "
-    "OMH record term, no quoted awareness line, and no closing that declares what will "
-    "not be done or leaves a decision without a question. It does not show that the reply "
+    "OMH record term, no quoted awareness line, no closing that declares what will "
+    "not be done or leaves a decision without a question, and none of the listed "
+    "machine-writing shapes. It does not show that the reply "
     "was correct, complete, or in the host's own voice, and it is not execution, review, "
     "CI, or merge evidence."
 )
@@ -50,6 +57,7 @@ FINDING_KINDS: tuple[str, ...] = (
     "awareness_line_quoted",
     "refusal_closer",
     "decision_without_question",
+    "ai_writing_tell",
 )
 
 # The rail's record vocabulary, spelled as it reaches a reply. Underscore
@@ -107,6 +115,8 @@ _RECORD_ID_TERMS: tuple[str, ...] = (
     "ultrabrain",
     "visual-engineering",
     "simple-work",
+    "google-search",
+    "x-search",
     "unspecified-high",
     "unspecified-low",
     "done_unverified",
@@ -120,7 +130,10 @@ _RECORD_ID_TERMS: tuple[str, ...] = (
     "repair_in_flight",
 )
 _ORDINARY_CATEGORY_IDS: frozenset[str] = frozenset(
-    {"architect", "artistry", "capable", "deep", "deep-work", "quick", "writing"}
+    {
+        "architect", "artistry", "capable", "deep", "deep-work", "forensics", "quick", "review",
+        "swarm", "synthesize", "writing",
+    }
 )
 
 # OMH schema ids, as exact literals. Scope rule: every `omh_`-prefixed id the
@@ -138,6 +151,7 @@ _SCHEMA_ID_TERMS: tuple[str, ...] = (
     "omh_awareness/v1",
     "omh_awareness_delivery/v1",
     "omh_buzz_probe/v1",
+    "omh_capability_family_off/v1",
     "omh_capability_gap_roadmap/v1",
     "omh_capability_impact_report/v1",
     "omh_capability_inspect/v1",
@@ -145,6 +159,7 @@ _SCHEMA_ID_TERMS: tuple[str, ...] = (
     "omh_capability_manifest/v1",
     "omh_capability_summary/v1",
     "omh_catalog_question_hint/v1",
+    "omh_catch_log/v1",
     "omh_code_mode_guidance/v1",
     "omh_context_brief/v1",
     "omh_context_brief_error/v1",
@@ -153,6 +168,7 @@ _SCHEMA_ID_TERMS: tuple[str, ...] = (
     "omh_dag/v1",
     "omh_dag_result/v1",
     "omh_degradation/v1",
+    "omh_desktop_dag/v1",
     "omh_desktop_hud/v1",
     "omh_dispatch_outcome/v1",
     "omh_document_plan_result/v1",
@@ -167,6 +183,8 @@ _SCHEMA_ID_TERMS: tuple[str, ...] = (
     "omh_hook_manifest/v1",
     "omh_hud/v1",
     "omh_hud_fanout_cache/v1",
+    "omh_identity_context/v1",
+    "omh_identity_profiles/v1",
     "omh_inflight_marker/v1",
     "omh_interact_result/v1",
     "omh_jev_ask_record/v1",
@@ -216,6 +234,9 @@ _SCHEMA_ID_TERMS: tuple[str, ...] = (
     "omh_plugin_host_observation/v1",
     "omh_plugin_host_observation_error/v1",
     "omh_plugin_session_end/v1",
+    "omh_pr_delivery_grant/v1",
+    "omh_pr_delivery_grant_status/v1",
+    "omh_pr_delivery_opened_pr/v1",
     "omh_progress_event/v1",
     "omh_progress_report/v1",
     "omh_recommend_result/v1",
@@ -276,12 +297,22 @@ _AWARENESS_TAGS: tuple[str, ...] = (
     "[OMH Awareness]",
     "[OMH board readback]",
     "[OMH board]",
+    "[OMH Capability Off]",
     "[OMH Code-Mode Discipline]",
+    "[OMH Console Choices]",
     "[OMH Context Budget]",
     "[OMH continuation claim]",
+    "[OMH dag]",
+    "[OMH Debugging Method]",
     "[OMH Degraded]",
     "[OMH delegation]",
+    "[OMH failed wait]",
+    "[OMH group chat]",
+    "[OMH Identity Catalog]",
+    "[OMH Identity Warning]",
+    "[OMH Plan Follow-on]",
     "[OMH plan todo]",
+    "[OMH PR delivery]",
     "[OMH Repeat Guard]",
     "[OMH Role Warning]",
     "[OMH Route Hint]",
@@ -293,7 +324,7 @@ _AWARENESS_TAGS: tuple[str, ...] = (
 
 # Heads built at runtime around a value (`[OMH Role: reviewer]`): the fixed
 # prefix is the literal, and the value runs to the closing bracket.
-_AWARENESS_TAG_PREFIXES: tuple[str, ...] = ("[OMH Role:",)
+_AWARENESS_TAG_PREFIXES: tuple[str, ...] = ("[OMH Identity:", "[OMH Role:")
 
 _AWARENESS_LINE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     tuple((tag, re.compile(re.escape(tag) + r"(?![\(\[:])")) for tag in _AWARENESS_TAGS)
@@ -338,6 +369,46 @@ _DECISION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"결정해 주"),
     re.compile(r"선택이 필요"),
 )
+
+# Machine-writing habits the human-voice pass removes, kept to shapes a careful
+# writer almost never produces on purpose, so a hit is worth a person's look.
+# Weak-alone habits from that reference (one hedge, one bold, one dash, a
+# forced triad) are deliberately absent: they need judgement, not a regex.
+# English is case-insensitive; Korean forms tolerate the polite and plain
+# endings the owner's replies used.
+_AI_WRITING_TELL_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("great question", re.compile(r"\b(?:great|excellent|good) question\b[!.,]", re.IGNORECASE)),
+    ("you're absolutely right", re.compile(r"\byou(?:'re| are) absolutely right\b", re.IGNORECASE)),
+    ("I hope this helps", re.compile(r"\bI hope (?:this|that) helps\b", re.IGNORECASE)),
+    (
+        "let me know if you'd like",
+        re.compile(r"\blet me know if you(?:'d| would) like\b", re.IGNORECASE),
+    ),
+    ("feel free to ask", re.compile(r"\bfeel free to (?:ask|reach out)\b", re.IGNORECASE)),
+    ("let's dive in", re.compile(r"\blet'?s dive (?:in|into)\b", re.IGNORECASE)),
+    (
+        "it's not just X, it's Y",
+        re.compile(
+            r"\b(?:it|this|that)(?:'s| is) not (?:just|only|merely|simply) (?:about )?[^.;:!?\n]{1,80}[,;] "
+            r"(?:it|this|that)(?:'s| is)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    ("좋은 질문", re.compile(r"좋은 질문(?:이에요|입니다|이야|이네요)")),
+    ("정확한 지적", re.compile(r"정확한 지적(?:이에요|입니다|이야|이네요)")),
+    ("도움이 되었으면", re.compile(r"도움이 (?:되었으면|되셨으면|됐으면|되길|되시길|되기를)")),
+    ("언제든 물어보세요", re.compile(r"언제든(?:지)? (?:편하게 )?(?:물어|질문해|말씀해)")),
+    ("단순히 X가 아니라", re.compile(r"단순히 [^.!?\n]{1,40}(?:이|가) 아니라")),
+)
+
+# Three or more em/en dashes in the reply's own prose is a run; one or two is a
+# writer's habit and stays out.
+_DASH_RUN_MIN = 3
+_DASH_RE = re.compile(r"[\u2014\u2013]")
+
+_FENCE_RE = re.compile(r"(?ms)^\s*(```|~~~).*?^\s*\1[^\n]*$")
+_INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+_QUOTE_LINE_RE = re.compile(r"(?m)^\s*>.*$")
 
 _QUESTION_MARKS = ("?", "？")
 _KOREAN_QUESTION_ENDINGS = ("까요", "습니까", "할까", "볼까", "드릴까", "될까", "나요", "가요")
@@ -401,6 +472,9 @@ def build_reply_lint(reply: str, *, user_text: str = "") -> dict[str, Any]:
     for label, pattern in _AWARENESS_LINE_PATTERNS:
         for match in pattern.finditer(text):
             findings.append(_finding("awareness_line_quoted", label, text, lines, match.start()))
+
+    for label, offset in _ai_writing_tells(text, asked):
+        findings.append(_finding("ai_writing_tell", label, text, lines, offset))
 
     closing = closing_paragraph(text)
     has_question = closing_has_question(closing)
@@ -509,6 +583,33 @@ def _record_term_matches(text: str) -> list[tuple[str, re.Match[str]]]:
         accepted.append((term, match))
     accepted.sort(key=lambda item: item[1].start())
     return accepted
+
+
+def _own_prose(text: str) -> str:
+    """The reply with code and quoted lines blanked, offsets preserved."""
+
+    def blank(match: re.Match[str]) -> str:
+        return re.sub(r"[^\n]", " ", match.group(0))
+
+    masked = _FENCE_RE.sub(blank, text)
+    masked = _INLINE_CODE_RE.sub(blank, masked)
+    return _QUOTE_LINE_RE.sub(blank, masked)
+
+
+def _ai_writing_tells(text: str, user_text: str) -> list[tuple[str, int]]:
+    prose = _own_prose(text)
+    asked = user_text.lower()
+    hits: list[tuple[str, int]] = []
+    for label, pattern in _AI_WRITING_TELL_PATTERNS:
+        for match in pattern.finditer(prose):
+            # A phrase the user's own message quotes is being discussed, not used.
+            if asked and match.group(0).lower() in asked:
+                continue
+            hits.append((label, match.start()))
+    dashes = list(_DASH_RE.finditer(prose))
+    if len(dashes) >= _DASH_RUN_MIN:
+        hits.append((f"dash run ({len(dashes)})", dashes[0].start()))
+    return hits
 
 
 def _user_named(term: str, match: re.Match[str], user_text: str) -> bool:

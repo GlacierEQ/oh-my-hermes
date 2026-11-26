@@ -1,6 +1,6 @@
 ---
 name: "omh-design-orchestration"
-description: "[omh] Entire product design problem to delegate: prepare a bounded design direction, existing-lane composition, and executor-neutral handoff. Use when the user says: design-orchestration, design orchestration, design ownership, handle this product design, take on the design, デザインを任せる, デザイン全体を任せ, プロダクトデザインを任せ."
+description: "[omh] Entire product design problem to delegate: prepare a bounded…"
 license: MIT
 metadata:
   hermes:
@@ -37,7 +37,7 @@ Good example:
 Bad example:
 
 - Prompt: design-orchestration already rendered and visually passed the new page.
-- Expected behavior: Keep rendering and visual PASS not_observed; route the required capture and verdict work to visual-qa.
+- Expected behavior: Keep rendering and visual PASS not_observed; route the required capture and verdict work to `omh-visual-qa`.
 - Why: A prepared orchestration contract cannot create implementation or rendered evidence.
 
 ## Completion Checklist
@@ -71,6 +71,8 @@ Quality bar:
 - Make the design job, context boundary, direction, downstream lane ownership, and visual evidence requirements readable before handoff.
 - Reject generic default drift by naming hierarchy, palette, typography, layout, signature element, and avoid patterns deliberately — the direction vocabulary and anti-slop patterns live in the frontend skill's `omh-frontend/references/taste-foundations.md`; prepared directions inherit its named bar (technically clean but flat fails).
 - Require the selected executor and fresh visual evidence separately before any implementation or quality completion claim.
+- The options in `design_direction_set/v1` are shown as rendered images; an option described only in words is not yet an option.
+- Running to the end without asking is for runs nobody can answer (scheduled, batch) or when the user handed the choice over.
 
 Required inputs:
 
@@ -85,7 +87,7 @@ Expected outputs:
 - design_direction_set/v1 when the direction is still open
 - design intent and opaque context-reference boundary
 - prepared direction vocabulary
-- downstream composition: design-quality-gate, frontend, accessibility-audit, visual-qa
+- downstream composition: `omh-design-quality-gate`, `omh-frontend`, `omh-accessibility-audit`, `omh-visual-qa`
 - executor-neutral handoff with executor_selection_required
 - visual evidence requirements with visual_verdict not_observed
 
@@ -99,7 +101,7 @@ Artifact expectations:
 
 Safety rules:
 
-- Preserve the existing direct owners: design-quality-gate for premium multi-format quality, frontend for web implementation/design-system work, accessibility-audit for semantic access review, and visual-qa for fresh rendered verdicts.
+- Preserve the existing direct owners: `omh-design-quality-gate` for premium multi-format quality, `omh-frontend` for web implementation/design-system work, `omh-accessibility-audit` for semantic access review, and `omh-visual-qa` for fresh rendered verdicts.
 - Do not use a prepared direction to claim code, screenshots, browser QA, accessibility PASS, review, CI, deployment, or merge.
 - Keep free-form briefs in Hermes conversation context; persist only closed vocabulary and opaque reference metadata in the deterministic artifact.
 - Do not call Claude Design, Figma, Open Design, an image provider, browser, network service, daemon, or executor from OMH core.

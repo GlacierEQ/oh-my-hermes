@@ -53,6 +53,8 @@ _OPERATIONS = {
     "list": ("", "assignee status tenant include_archived limit", "tasks count limit truncated next_limit promoted"),
     "attachments": ("", "task_id", "ok task_id attachments"),
 }
+# Operations whose task is not an existing one: a top-level `task_id` is refused on them and required on the rest.
+_NO_TASK_ID = ("create", "link", "list")
 _TYPES = {"parents": "array", "skills": "array", "created_cards": "array", "tasks": "array", "metadata": "object",
           "limit": "integer", "priority": "integer", "max_runtime_seconds": "integer",
           "include_archived": "boolean", "goal_mode": "boolean", "goal_max_turns": "integer"}
@@ -293,7 +295,7 @@ def _arguments(operation: str, payload: dict[str, object], request_id: str, boar
     if "board" in args and args["board"] != board:
         raise ValueError("foreign_board")
     args["board"] = board
-    if operation not in ("create", "link", "list"):
+    if operation not in _NO_TASK_ID:
         task_id = _reference(payload.get("task_id"))
         if "task_id" in args and args["task_id"] != task_id:
             raise ValueError("foreign_task")
@@ -563,6 +565,21 @@ class AgentBoard:
             entry.requires_reconciliation = True
             entry.reason = "awaiting_correlated_result"
             return True
+
+    def would_begin(self, request_id: str, *, host: HostIdentity, tool_name: str,
+                    arguments: Mapping[str, object]) -> bool:
+        """Whether `begin` would reserve this call now, changing nothing: read before a person is asked, so a call
+        `begin` would refuse is refused at once instead of after their yes, and nothing is reserved for a call they
+        may still turn down."""
+        with self._lock:
+            entry = self._requests.get(request_id)
+            return bool(
+                entry is not None and entry.state == "prepared" and entry.call_ref is None
+                and entry.scope_ref == host.scope_ref
+                and (entry.expected is None or entry.expected == self.observation_ref)
+                and not self._needs_reconciliation(entry) and self._matches(entry, tool_name, arguments)
+                and not any(other.call_ref == host.call_ref for other in self._requests.values())
+            )
 
     def _needs_reconciliation(self, entry: _Request) -> bool:
         if entry.operation in {"show", "attachments", "research"}:

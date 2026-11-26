@@ -37,6 +37,49 @@ globally installed `ruff` needed):
 uv run --group lint ruff check src tests
 ```
 
+### Performance bench
+
+`tools/benchmarks/tui_perf.py` measures the TUI and the plugin hooks offline:
+a fake byte-counting terminal, the tests' recording client and replay gateway,
+temp homes, no live gateway. Cases: steady, keystroke and busy frames by
+transcript size, full redraw, streaming per chunk, keystroke by composer
+length, idle and busy wake-ups and bytes, plugin hook latency, and launch to
+first frame.
+
+```sh
+uv run python -P tools/benchmarks/tui_perf.py [--json] [--case frame]
+uv run python -P tools/benchmarks/tui_perf.py --compare ../other-checkout
+```
+
+`--compare TREE` runs the same script against TREE (base) and this checkout
+(head), alternating rounds on one machine through the repo-root `omh/` shim
+(`PYTHONPATH=<tree>:<tree>/tests`), and flags a time metric only beyond
+`--tolerance` percent. Compare numbers taken back to back, never across
+sessions. `tests/test_tui_perf_bench.py` runs every case at a tiny size so the
+output schema cannot rot; it asserts counts only, never wall-clock time.
+
+## Private Identifier Guard
+
+The repo is public, so private names (internal hosts, codenames, people,
+customers) must never appear in a tracked file. CI runs
+`tools/qa/identifier_guard.py` on every pull request and main push. It checks
+each tracked text file against `tools/qa/identifier-denylist.sha256`, which
+holds only sha256 hashes of lowercased names. File paths are checked too. A hit
+prints `path:line` and the hash; a path that itself holds a name prints as
+`<redacted path #n>` (entry n of `git ls-files`). A missing or empty committed
+denylist exits 2 and fails the job, even with a local list.
+
+- Add a name: `uv run python tools/qa/identifier_guard.py --hash "name"`, then
+  append the printed line to the denylist. Names are one to three words; the
+  space, hyphen and joined spellings all match one entry.
+- Do not add a name that legitimately appears in the repo today; the guard
+  would fail on the next run.
+- Local check: `uv run python tools/qa/identifier_guard.py` (all tracked files)
+  or `--staged`. As a pre-commit hook, put
+  `uv run python tools/qa/identifier_guard.py --staged` in `.git/hooks/pre-commit`.
+- Names you cannot even hash into the shared list can go, one per line, in the
+  gitignored `tools/qa/identifier-denylist.local.txt`; they are hashed at runtime.
+
 ## Contribution Rules
 
 - Keep Hermes as the runtime boundary.
@@ -188,7 +231,5 @@ job names change with the shard count, and the aggregate is already red
 whenever any of them is.
 
 The >=25% slowest-job speedup from issue #1294 is a target, not a result. It
-is **NOT YET OBSERVED**, and the measurement procedure that would settle it,
-including the metric, the 10-run corpora, exclusions, and the retry and flaky
-comparison, lives in
-[CI Test Sharding Rollout](docs/CI-TEST-SHARDING.md).
+is **NOT YET OBSERVED**; the unrun measurement plan that would settle it is in
+[CI test sharding](docs/CI-TEST-SHARDING.md).

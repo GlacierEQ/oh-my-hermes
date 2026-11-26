@@ -75,6 +75,7 @@ MODEL_ROUTE_PROVENANCES: Final[tuple[str, ...]] = (
     "request_named_model_unavailable",
     "recommendation_chain_head",
     "category_chain_head",
+    "identity_chain_head",
     "role_chain_head",
     "role_unchained",
     "executor_default",
@@ -140,8 +141,9 @@ CODING_MODEL_ROUTE_CLAIM_BOUNDARY: Final[str] = (
 # ids this catalog has never heard of, so requested models always pass
 # through unvalidated — the catalog is a default candidate list, not an
 # allowlist. The Opus 5.5 and Fable-tier rows are concrete ids on purpose:
-# the owner-ordered Claude chain (Opus 5.5 -> Fable 5.1, owner decision
-# 2026-10-13, reversing the 2026-09-06 Fable -> Opus order) needs both
+# the owner-ordered Claude chain (Opus 5.5 -> Fable 5.2, owner decision
+# 2026-10-13 for Fable 5.1, reversing the 2026-09-06 Fable -> Opus order;
+# Fable 5.2 took the Fable slot on 2026-11-10) needs both
 # generations named exactly, which neither alias can do -- `opus` is whatever
 # Opus the client recommends, and `fable` cannot pin the tier. The `opus`
 # alias stays as the chain's always-resolving tail. The `haiku` and
@@ -149,10 +151,13 @@ CODING_MODEL_ROUTE_CLAIM_BOUNDARY: Final[str] = (
 # Anthropic API from Claude Code v2.1.293 and Haiku 4.5 on Claude Platform on
 # AWS, Bedrock, Google Cloud, and Foundry (code.claude.com/docs/en/model-config,
 # read 2026-10-13), so the same row runs different generations on different
-# machines. Claude Mythos 5.1 stays listed here as a recognized candidate for
-# a user who names it: it is the same model as Fable 5.1 served only to
-# Project Glasswing-approved organizations, so an unapproved account gets a
-# provider rejection and no shipped chain recommends it.
+# machines. Claude Mythos 5.1 and 5.2 stay listed here as recognized
+# candidates for a user who names them: each is the same model as its Fable
+# sibling served only to organizations Anthropic has verified, so an
+# unapproved account gets a provider rejection and no shipped chain
+# recommends them. The Fable 5.1 row stays after it left every shipped chain
+# (2026-11-10), as the retired GPT rows above do: it is this catalog's
+# authority over the effort of an explicit `--model claude-fable-5-1`.
 MODEL_CATALOG_KIND: Final[str] = "built_in_defaults"
 
 # Closed vocabulary for a route's catalog basis. `local_inventory` marks a
@@ -167,31 +172,54 @@ MODEL_CATALOG_KINDS: Final[tuple[str, ...]] = (
     # (`~/.omh/routing/category-maestro.json`); such routes also carry the
     # config's fingerprint so a frozen record names its exact basis.
     "operator_category_config",
+    # A validated `omh_identity_profiles/v1` identity supplied the chain
+    # (`~/.omh/routing/identities.json`); such routes also carry
+    # `identity_id`/`identity_fingerprint` so the frozen record names the
+    # exact profile and document it resolved from.
+    "user_identity_config",
 )
 
 EXECUTOR_MODEL_OPTIONS: Final[dict[str, tuple[dict[str, object], ...]]] = {
     "codex": (
         {
-            # GPT-6 Astra (2026-09-03): the documented ladder starts at `low`
-            # (`none` is HTTP 400, `minimal` migrates to `low`); the exact
-            # contract lives in `model_contracts.py`. Listed first because it
-            # heads the frontier chains below; the codex rows behind it stay
-            # the fall-through so an account the staged rollout has not
-            # reached keeps resolving to the GPT ecosystem.
-            "model_id": "gpt-6-astra",
-            "label": "GPT-6 Astra (frontier reasoning; staged rollout)",
+            # GPT-6.2 Astra (2026-11-17) takes every chain slot GPT-6 Astra
+            # held (owner decision, 2026-11-18). The documented ladder starts
+            # at `low` (the API rejects `none`, `minimal` migrates to `low`);
+            # the exact contract lives in `model_contracts.py`. The efforts
+            # are the Codex client catalog's ladder from the contract's
+            # `surface_efforts`, without the Codex-only `ultra`. Listed first
+            # because it heads the frontier chains below.
+            "model_id": "gpt-6.2-astra",
+            "label": "GPT-6.2 Astra (frontier reasoning)",
             "tier": "frontier",
             "recommended_roles": ("brain", "review", "design_visual"),
             "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
         },
         {
-            # GPT-6.1 Sol (2026-09-29) takes every chain slot GPT-6 Sol held
-            # (owner decision, 2026-10-01). The efforts are the Codex client
-            # catalog's ladder from the exact contract's `surface_efforts`:
-            # no `none`, and the Codex-only `ultra` rung left out. The label
-            # claims no default.
+            # GPT-6.2 Sol (2026-11-17) takes every chain slot GPT-6.1 Sol held
+            # (owner decision, 2026-11-18), on the same ladder terms as the
+            # row above. The label claims no default.
+            "model_id": "gpt-6.2-sol",
+            "label": "GPT-6.2 Sol (coding workhorse)",
+            "tier": "frontier",
+            "recommended_roles": ("brain", "implementation", "docs", "review", "research", "design_visual"),
+            "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+        },
+        # GPT-6 Astra and GPT-6.1 Sol left every shipped chain on 2026-11-18
+        # (superseded by the two rows above). Both rows stay for the reason
+        # the GPT-6 Sol and GPT-5.6 rows below stay: each is this catalog's
+        # authority over the effort of an explicit `--model` override. Their
+        # ladders are unchanged.
+        {
+            "model_id": "gpt-6-astra",
+            "label": "GPT-6 Astra (previous Astra generation)",
+            "tier": "frontier",
+            "recommended_roles": ("brain", "review", "design_visual"),
+            "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+        },
+        {
             "model_id": "gpt-6.1-sol",
-            "label": "GPT-6.1 Sol (coding workhorse)",
+            "label": "GPT-6.1 Sol (previous Sol generation)",
             "tier": "frontier",
             "recommended_roles": ("brain", "implementation", "docs", "review", "research", "design_visual"),
             "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
@@ -202,7 +230,7 @@ EXECUTOR_MODEL_OPTIONS: Final[dict[str, tuple[dict[str, object], ...]]] = {
             # below stay: it is this catalog's authority over the effort of
             # an explicit `--model gpt-6-sol`. Its ladder is unchanged.
             "model_id": "gpt-6-sol",
-            "label": "GPT-6 Sol (previous Sol generation)",
+            "label": "GPT-6 Sol (older Sol generation)",
             "tier": "frontier",
             "recommended_roles": ("brain", "implementation", "docs", "review", "research", "design_visual"),
             "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
@@ -242,8 +270,26 @@ EXECUTOR_MODEL_OPTIONS: Final[dict[str, tuple[dict[str, object], ...]]] = {
             "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
         },
         {
+            # Claude Fable 5.2 (2026-11-09) takes the Fable 5.1 row's place in
+            # the chain (owner decision, 2026-11-10). The Claude Code client
+            # needs v2.1.290 or newer for this id (observed, model contract
+            # `surface_notes.claude_code`). Ladder from the exact contract.
+            "model_id": "claude-fable-5-2",
+            "label": "Claude Fable 5.2 (most capable widely released tier)",
+            "tier": "frontier",
+            "recommended_roles": ("brain", "review", "design_visual"),
+            "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+        },
+        {
+            "model_id": "claude-mythos-5-2",
+            "label": "Claude Mythos 5.2 (Fable 5.2 weights, verified organizations only)",
+            "tier": "frontier",
+            "recommended_roles": ("brain", "review", "design_visual"),
+            "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
+        },
+        {
             "model_id": "claude-fable-5-1",
-            "label": "Claude Fable 5.1 (most capable widely released tier)",
+            "label": "Claude Fable 5.1 (previous Fable generation)",
             "tier": "frontier",
             "recommended_roles": ("brain", "review", "design_visual"),
             "reasoning_efforts": ("low", "medium", "high", "xhigh", "max"),
@@ -283,10 +329,10 @@ EXECUTOR_MODEL_OPTIONS: Final[dict[str, tuple[dict[str, object], ...]]] = {
 #
 # Routing is expressed as semantic CATEGORIES -- what kind of thinking a unit
 # needs -- and a role or scale is resolved by naming the categories that serve
-# it. This is the rule the omo config already uses, and adopting it here means a
-# user with an omo config and a user without one go through the SAME rule
+# it. This is the rule the pi-family runtime config already uses, and adopting it
+# here means a user with that config and a user without one go through the SAME rule
 # engine; only the category->model table differs. Previously the built-ins were
-# a hand-written per-role table that had to be kept in sync with omo's semantics
+# a hand-written per-role table that had to be kept in sync with that config's semantics
 # by hand, and drifted from them.
 #
 # The local-inventory module imports these three names rather than restating
@@ -309,6 +355,15 @@ MODEL_CATEGORIES: Final[tuple[str, ...]] = (
     "capable",
     "simple-work",
     "deep-work",
+    # The six routing-recipe categories (owner recipe, 2026-10-28), appended
+    # after deep-work by the same rule. They are opt-in: no role or scale
+    # names them, so a unit reaches one only by declaring it.
+    "google-search",
+    "x-search",
+    "review",
+    "swarm",
+    "forensics",
+    "synthesize",
 )
 
 _CATEGORY_ALIASES: Final[dict[str, str]] = {
@@ -330,7 +385,7 @@ _ULW_CATEGORY_RE: Final[re.Pattern[str]] = re.compile(
 
 
 def canonical_model_category(value: object) -> str:
-    """Normalize one explicit OMO/ULW category or return an empty sentinel."""
+    """Normalize one explicit ULW model category or return an empty sentinel."""
     normalized = str(value or "").strip().casefold().replace("_", "-")
     if normalized.startswith("/ulw-"):
         normalized = normalized[5:]
@@ -352,18 +407,14 @@ def category_from_text(message: str) -> str:
 # category. Review deliberately reuses the high-capability categories --
 # reviewer-vs-author separation is advisory handoff text, not a catalog property.
 CATEGORY_ROLE_SOURCES: Final[dict[str, tuple[str, ...]]] = {
-    # `deep` first, not `ultrabrain`: the composer runs on every split, so its
-    # default is the strong tier rather than the deepest one. `ultrabrain` is
-    # reserved for work that DECLARES it needs that depth -- `research:deep`
-    # and scale `large` -- which is what keeps a declared dial meaningful.
-    # `deep` first, not `ultrabrain`: the composer runs on every split, so its
-    # default is the strong tier rather than the deepest one. `ultrabrain` is
-    # reserved for work that DECLARES it needs that depth -- `research:deep`
-    # and scale `large` -- which is what keeps a declared dial meaningful.
+    # `ultrabrain` first (owner decision, 2026-11-09): brain is planning and
+    # decomposition, the work whose mistakes every later unit inherits, so it
+    # heads on the deepest tier. `deep` follows as the next candidate. Scale
+    # `large` and `research:deep` keep their own entries for the other roles.
     # `unspecified-low` closes the chain so the fallback names a DIFFERENT
     # model rather than repeating the head at a weaker effort.
-    "brain": ("deep", "unspecified-low"),
-    # `unspecified-high` is omo's name for "the default working model", not for
+    "brain": ("ultrabrain", "deep", "unspecified-low"),
+    # `unspecified-high` is the runtime config's name for "the default working model", not for
     # "the strongest one" -- that is `ultrabrain`. So standard implementation
     # heads on it, `small` drops to quick/unspecified-low, and `large` escalates
     # to ultrabrain/deep. All three rungs stay distinct.
@@ -389,10 +440,12 @@ CATEGORY_SCALE_SOURCES: Final[dict[str, tuple[str, ...]]] = {
 
 # The built-in category->model table, the fallback for a profile with no local
 # inventory. Codex takes vendor model ids; Claude Code takes the pinned Opus
-# 5.5 id, then the pinned Fable 5.1 id, then the `opus` alias (owner decision,
+# 5.5 id, then the pinned Fable id, then the `opus` alias (owner decision,
 # 2026-10-13: literally "Opus 5.5 before Fable 5.1", with the alias as the
-# always-resolving tail the pre-2026-10-13 chain also ended on).
-CLAUDE_FRONTIER_CHAIN_MODELS: Final[tuple[str, ...]] = ("claude-opus-5-5", "claude-fable-5-1", "opus")
+# always-resolving tail the pre-2026-10-13 chain also ended on). Fable 5.2
+# took the Fable slot on 2026-11-10 (owner decision, superseded-generation
+# rule); the client needs v2.1.290 or newer for that id (observed).
+CLAUDE_FRONTIER_CHAIN_MODELS: Final[tuple[str, ...]] = ("claude-opus-5-5", "claude-fable-5-2", "opus")
 
 
 def _CLAUDE_FRONTIER_CHAIN(effort: str) -> tuple[dict[str, str], ...]:
@@ -400,43 +453,57 @@ def _CLAUDE_FRONTIER_CHAIN(effort: str) -> tuple[dict[str, str], ...]:
 
 
 BUILTIN_CATEGORY_MODELS: Final[dict[str, dict[str, tuple[dict[str, str], ...]]]] = {
-    # Codex: the same GPT generation the Hermes lane ships. GPT-6 Astra heads
-    # the full-depth categories on its own. GPT-6.1 Sol holds every slot GPT-6
-    # Sol held (owner decision, 2026-10-01, the superseded-generation rule;
-    # GPT-6 Sol had itself taken the two GPT-5.6 tiers' slots on 2026-09-23):
+    # Codex: the same GPT generation the Hermes lane ships. GPT-6.2 Astra heads
+    # the full-depth categories on its own and GPT-6.2 Sol holds every lighter
+    # slot, each taking its predecessor's rows at the same effort (owner
+    # decision, 2026-11-18: GPT-6 Astra -> 6.2 Astra, GPT-6.1 Sol -> 6.2 Sol,
+    # the superseded-generation rule). The Sol line's history: GPT-6.1 Sol held
+    # every slot GPT-6 Sol held (owner decision, 2026-10-01; GPT-6 Sol had
+    # itself taken the two GPT-5.6 tiers' slots on 2026-09-23):
     # `deep` is Sol alone at high, the same single-entry shape as ultrabrain
     # and architect, and every lighter category names Sol at the effort the
-    # tier already wanted (Astra lists at 5x Sol, so it never heads a
-    # cost-tier slot). The five categories that used to leave the effort to
+    # tier already wanted (Astra lists at 4x Sol in the 6.2 generation, so it
+    # never heads a cost-tier slot). The five categories that used to leave the effort to
     # the CLI (`""`) now name `medium`: the Codex catalog defaulted GPT-6 Sol
-    # to `medium` but defaults GPT-6.1 Sol to `low`, so an empty effort would
-    # have lowered those slots silently. Editorial and unmeasured.
+    # to `medium` but defaults GPT-6.1 Sol (and 6.2 Sol and 6.2 Astra) to
+    # `low`, so an empty effort would have lowered those slots silently. Editorial and unmeasured.
     "codex": {
-        "ultrabrain": ({"model_id": "gpt-6-astra", "reasoning_effort": "xhigh"},),
-        "deep": ({"model_id": "gpt-6.1-sol", "reasoning_effort": "high"},),
-        "architect": ({"model_id": "gpt-6-astra", "reasoning_effort": "xhigh"},),
-        "unspecified-high": ({"model_id": "gpt-6.1-sol", "reasoning_effort": "medium"},),
-        "unspecified-low": ({"model_id": "gpt-6.1-sol", "reasoning_effort": "medium"},),
-        "quick": ({"model_id": "gpt-6.1-sol", "reasoning_effort": "low"},),
-        "writing": ({"model_id": "gpt-6.1-sol", "reasoning_effort": "medium"},),
-        "visual-engineering": ({"model_id": "gpt-6.1-sol", "reasoning_effort": "medium"},),
-        "artistry": ({"model_id": "gpt-6.1-sol", "reasoning_effort": "medium"},),
+        "ultrabrain": ({"model_id": "gpt-6.2-astra", "reasoning_effort": "xhigh"},),
+        "deep": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "high"},),
+        "architect": ({"model_id": "gpt-6.2-astra", "reasoning_effort": "xhigh"},),
+        "unspecified-high": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "medium"},),
+        "unspecified-low": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "medium"},),
+        "quick": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "low"},),
+        "writing": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "medium"},),
+        "visual-engineering": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "medium"},),
+        "artistry": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "medium"},),
         # The three appended categories keep this profile's rule: Sol at the
         # effort the tier wants, and Astra only where the category is about
         # depth rather than cost. deep-work is the one that earns Astra here,
         # and Sol does not trail it -- same shape as ultrabrain and architect
         # above, for the same reason.
-        "capable": ({"model_id": "gpt-6.1-sol", "reasoning_effort": "medium"},),
-        "simple-work": ({"model_id": "gpt-6.1-sol", "reasoning_effort": "low"},),
-        "deep-work": ({"model_id": "gpt-6-astra", "reasoning_effort": "high"},),
+        "capable": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "medium"},),
+        "simple-work": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "low"},),
+        "deep-work": ({"model_id": "gpt-6.2-astra", "reasoning_effort": "high"},),
+        # The six routing-recipe categories (2026-10-28) keep the same rule.
+        # forensics is the depth category, so it alone earns Astra, at xhigh
+        # like ultrabrain; review and synthesize are frontier-shaped but
+        # judged by a second opinion and a merge, so they stay on Sol; the
+        # two search lanes and swarm are cost-tier Sol.
+        "google-search": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "medium"},),
+        "x-search": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "medium"},),
+        "review": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "xhigh"},),
+        "swarm": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "low"},),
+        "forensics": ({"model_id": "gpt-6.2-astra", "reasoning_effort": "xhigh"},),
+        "synthesize": ({"model_id": "gpt-6.2-sol", "reasoning_effort": "high"},),
     },
     # Claude Code: every frontier category runs the owner-ordered Claude chain
     # (owner decision, 2026-10-13, reversing the 2026-09-06 Fable -> Opus
     # order the Hermes lane also left that day): the pinned `claude-opus-5-5`
-    # heads it, `claude-fable-5-1` is the fall-through, and the `opus` alias
+    # heads it, `claude-fable-5-2` is the fall-through, and the `opus` alias
     # is the tail. The chain is next-candidate advice (omh never retries or
     # switches models itself), so a run moves down it only when the operator
-    # or a dispatcher acts on a rejection: Fable 5.1 when the account does
+    # or a dispatcher acts on a rejection: Fable 5.2 when the account does
     # not serve the pinned Opus 5.5 id, then `opus`, which every Claude Code
     # resolves -- to Opus 5.5 from v2.1.280 and to Opus 4.6 on Microsoft
     # Foundry -- so the tail keeps the out-of-the-box behavior.
@@ -466,6 +533,17 @@ BUILTIN_CATEGORY_MODELS: Final[dict[str, dict[str, tuple[dict[str, str], ...]]]]
         "capable": _CLAUDE_FRONTIER_CHAIN("medium"),
         "simple-work": ({"model_id": "haiku", "reasoning_effort": ""},),
         "deep-work": _CLAUDE_FRONTIER_CHAIN("high"),
+        # The six routing-recipe categories (2026-10-28): review, forensics
+        # and synthesize are frontier-shaped and run the ordered chain at
+        # xhigh; swarm is a cost-tier pick on the haiku lane; the two search
+        # lanes join the sonnet lanes. Neither search lane gets Claude's own
+        # search grounding from this table -- it names a model, not a tool.
+        "google-search": ({"model_id": "sonnet", "reasoning_effort": ""},),
+        "x-search": ({"model_id": "sonnet", "reasoning_effort": ""},),
+        "review": _CLAUDE_FRONTIER_CHAIN("xhigh"),
+        "swarm": ({"model_id": "haiku", "reasoning_effort": ""},),
+        "forensics": _CLAUDE_FRONTIER_CHAIN("xhigh"),
+        "synthesize": _CLAUDE_FRONTIER_CHAIN("xhigh"),
     },
 }
 
@@ -596,6 +674,10 @@ _MODEL_FAMILY_ALIASES: Final[tuple[tuple[str, str], ...]] = (
     ("anthropic-claude-", "claude"),
     ("qwen3-", "qwen"),
     ("qwen3.", "qwen"),
+    # Qwen4-Max (2026-11-16) opens the Qwen4 generation; bounded the same way
+    # as Qwen3, so `qwen4x-max` and a bare `qwen4` stay unknown.
+    ("qwen4-", "qwen"),
+    ("qwen4.", "qwen"),
 )
 _MODEL_FAMILY_ALIAS_EXCLUSIONS: Final[tuple[str, ...]] = ("openai-gpt-image-",)
 _CLAUDE_TIER_ALIASES: Final[frozenset[str]] = frozenset({"opus", "sonnet", "haiku", "fable", "mythos"})
@@ -680,8 +762,10 @@ def resolve_model_route(
     requested_depth: str = "",
     requested_scale: str = "",
     requested_category: str = "",
+    requested_identity: str = "",
     chains: Mapping[str, Mapping[str, tuple[Mapping[str, str], ...]]] | None = None,
     category_config: Mapping[str, object] | None = None,
+    identity_config: Mapping[str, object] | None = None,
     local_catalog: Mapping[str, object] | None = None,
     active_models: Iterable[str | Mapping[str, object]] | None = None,
     recommendation_overrides: Mapping[str, object] | None = None,
@@ -709,17 +793,24 @@ def resolve_model_route(
     not that the override changed the outcome: a route whose chain happens to
     match the built-in one, or that a requested model won over, still records
     the operator basis because that is the table that would have adjudicated;
-    `local_catalog` (a `local_model_catalog/v1` payload derived by
-    the caller from an observed inventory — I/O stays in the caller, this
-    function remains pure) is consulted ONLY when the profile has no built-in
-    catalog and the payload names this profile. A route resolved from a local
-    catalog records `catalog_kind: "local_inventory"` plus the catalog's
-    `fingerprint` so the frozen record names its exact basis, and a local
-    catalog never gains effort authority — observed config variants are
-    evidence of use, not of a model's effort vocabulary. An absent
-    `catalog_fingerprint` on any route means "no local basis was consulted",
-    never "unknown basis" — v1 routes and built-in-catalog routes correctly
-    carry none.
+    `identity_config` (the validated `omh_identity_profiles/v1` payload read by
+    the caller — I/O stays in the caller) supplies an explicit named chain
+    under `requested_identity`, below `requested_model`/`requested_effort` and
+    above every role/category/depth/scale chain source: a resolved identity
+    IS the chain, records `catalog_kind: "user_identity_config"` plus
+    `identity_id`/`identity_fingerprint`, and skips the category-table paths
+    entirely; an unknown or empty-chain identity is named in `attempted[]` and
+    the existing sources apply unchanged; `local_catalog` (a
+    `local_model_catalog/v1` payload derived by the caller from an observed
+    inventory — I/O stays in the caller, this function remains pure) is
+    consulted ONLY when the profile has no built-in catalog and the payload
+    names this profile. A route resolved from a local catalog records
+    `catalog_kind: "local_inventory"` plus the catalog's `fingerprint` so the
+    frozen record names its exact basis, and a local catalog never gains
+    effort authority — observed config variants are evidence of use, not of a
+    model's effort vocabulary. An absent `catalog_fingerprint` on any route
+    means "no local basis was consulted", never "unknown basis" — v1 routes
+    and built-in-catalog routes correctly carry none.
 
     `requested_domain` is explicit unit data (never inferred from text). When
     a locally-derived chain resolves and the catalog's affinity vocabulary
@@ -823,7 +914,45 @@ def resolve_model_route(
                 + contract_hint,
             ],
         )
-    if profile == "hermes" and active_models is not None:
+    # The identity overlay resolves before every chain source below it: a
+    # validated `identities.json` profile supplies its own ordered chain,
+    # sitting below `requested_model`/`requested_effort` but above
+    # role/category/depth/scale and the Hermes recommendation lane. The
+    # loader already validated the entries, so the resolver consumes them
+    # as-is — no file I/O, no re-validation. An identity that does not
+    # resolve is named in `attempted[]` and the existing sources apply.
+    identity_id = str(requested_identity or "").strip()
+    identity_fingerprint: dict[str, object] | None = None
+    identity_chain: tuple[Mapping[str, str], ...] = ()
+    if identity_id:
+        raw_identities = (
+            identity_config.get("identities") if isinstance(identity_config, Mapping) else None
+        )
+        identity_profile = (
+            raw_identities.get(identity_id) if isinstance(raw_identities, Mapping) else None
+        )
+        raw_chain = (
+            identity_profile.get("model_chain")
+            if (
+                isinstance(identity_profile, Mapping)
+                and identity_profile.get("enabled", True) is not False
+            )
+            else None
+        )
+        if isinstance(raw_chain, (list, tuple)) and raw_chain:
+            identity_chain = tuple(
+                entry for entry in raw_chain if isinstance(entry, Mapping)
+            )
+        if identity_chain:
+            raw_fp = (
+                identity_config.get("fingerprint")
+                if isinstance(identity_config, Mapping)
+                else None
+            )
+            if isinstance(raw_fp, Mapping):
+                identity_fingerprint = dict(raw_fp)
+
+    if not identity_chain and profile == "hermes" and active_models is not None:
         return _resolve_hermes_recommendation_route(
             role=normalized_role,
             requested_model=model,
@@ -863,10 +992,13 @@ def resolve_model_route(
     # The operator's category-maestro config applies only to profiles WITH a
     # built-in category table (the dispatchable CLIs); catalogless profiles
     # keep the local-inventory path as their single override source. `chains`
-    # stays the tests-only injection and wins over the operator table.
+    # stays the tests-only injection and wins over the operator table. When a
+    # requested identity resolves, the identity IS the chain source and the
+    # category table is never consulted, so the operator merge is skipped.
     operator_categories: Mapping[str, object] | None = None
     if (
-        category_config is not None
+        not identity_chain
+        and category_config is not None
         and chains is None
         and catalog_kind == MODEL_CATALOG_KIND
         and profile in BUILTIN_CATEGORY_MODELS
@@ -885,7 +1017,22 @@ def resolve_model_route(
         else BUILTIN_CATEGORY_MODELS.get(profile, {})
     )
     candidates = [dict(option) for option in options]
-    if catalog_kind == "local_inventory":
+    attempted: list[dict[str, str]] = []
+    if identity_chain:
+        # The resolved identity IS the routing basis: the chain is not merged
+        # over any category table and the catalog kind names the identity
+        # config so a frozen record can name its exact source.
+        catalog_kind = "user_identity_config"
+        catalog_fingerprint = identity_fingerprint
+        role_chain = identity_chain
+        attempted.append(
+            {
+                "stage": "requested_identity",
+                "outcome": "applied",
+                "reason": f"identity `{identity_id}` supplies its ordered model chain",
+            }
+        )
+    elif catalog_kind == "local_inventory":
         role_chain = tuple(local_chains.get(normalized_role, ())) if normalized_role else ()
     elif operator_categories is not None:
         role_chain = (
@@ -896,7 +1043,6 @@ def resolve_model_route(
     else:
         chain_table = ROLE_MODEL_CHAINS if chains is None else chains
         role_chain = tuple(chain_table.get(profile, {}).get(normalized_role, ())) if normalized_role else ()
-    attempted: list[dict[str, str]] = []
     if operator_categories is not None:
         attempted.append(
             {
@@ -908,7 +1054,18 @@ def resolve_model_route(
                 ),
             }
         )
-    if category:
+    if identity_id and not identity_chain:
+        attempted.append(
+            {
+                "stage": "requested_identity",
+                "outcome": "unknown",
+                "reason": (
+                    f"identity `{identity_id}` is not in the validated identity config; "
+                    "the existing chain sources apply"
+                ),
+            }
+        )
+    if category and not identity_chain:
         if catalog_kind == "local_inventory":
             raw_categories = local_catalog.get("categories", {}) if isinstance(local_catalog, Mapping) else {}
             category_chain = raw_categories.get(category, ()) if isinstance(raw_categories, Mapping) else ()
@@ -923,7 +1080,7 @@ def resolve_model_route(
             }
         )
     operator_table = effective_categories if operator_categories is not None else None
-    if depth and not category:
+    if depth and not category and not identity_chain:
         role_chain = _depth_selected_chain(
             depth,
             normalized_role,
@@ -933,7 +1090,7 @@ def resolve_model_route(
             attempted,
             operator_table=operator_table,
         )
-    if scale and not category:
+    if scale and not category and not identity_chain:
         role_chain = _scale_selected_chain(
             scale,
             normalized_role,
@@ -973,6 +1130,8 @@ def resolve_model_route(
             domain=domain,
             depth=depth,
             category=category,
+            identity_id=identity_id if identity_chain else "",
+            identity_fingerprint=identity_fingerprint,
             chain=_chain_payload(options, role_chain, selected_model=""),
             attempted=attempted,
             candidates=candidates,
@@ -980,7 +1139,7 @@ def resolve_model_route(
         )
     attempted.append({"stage": "requested_model", "outcome": "skipped", "reason": "no model requested"})
 
-    if not options:
+    if not options and not identity_chain:
         attempted.append(
             {"stage": "role_chain", "outcome": "skipped", "reason": "profile has no model catalog"}
         )
@@ -1011,19 +1170,25 @@ def resolve_model_route(
             ],
         )
 
-    if normalized_role or category:
+    if normalized_role or category or identity_chain:
         if role_chain:
             head = role_chain[0]
             selected = str(head.get("model_id", ""))
-            selected_stage = "category_chain" if category else "role_chain"
+            selected_stage = (
+                "requested_identity" if identity_chain else ("category_chain" if category else "role_chain")
+            )
             attempted.append(
                 {
                     "stage": selected_stage,
                     "outcome": "selected",
                     "reason": (
-                        f"chain head `{selected}` for category `{category}`"
-                        if category
-                        else f"chain head `{selected}` for role `{normalized_role}`"
+                        f"identity `{identity_id}` chain head `{selected}`"
+                        if identity_chain
+                        else (
+                            f"chain head `{selected}` for category `{category}`"
+                            if category
+                            else f"chain head `{selected}` for role `{normalized_role}`"
+                        )
                     ),
                 }
             )
@@ -1034,7 +1199,11 @@ def resolve_model_route(
             return _route_payload(
                 profile,
                 status="routed",
-                provenance="category_chain_head" if category else "role_chain_head",
+                provenance=(
+                    "identity_chain_head"
+                    if identity_chain
+                    else ("category_chain_head" if category else "role_chain_head")
+                ),
                 role=normalized_role,
                 selected_model=selected,
                 selected_reasoning_effort=selected_effort,
@@ -1044,16 +1213,24 @@ def resolve_model_route(
                 domain=domain,
                 depth=depth,
                 category=category,
+                identity_id=identity_id if identity_chain else "",
+                identity_fingerprint=identity_fingerprint,
                 chain=_chain_payload(options, role_chain, selected_model=selected),
                 attempted=attempted,
                 candidates=candidates,
                 reasons=role_reasons
                 + [
                     (
-                        f"Category `{category}` routes to its ordered chain head for `{profile}`; "
-                        f"role `{normalized_role or 'none'}` remains independent metadata."
-                        if category
-                        else f"Role `{normalized_role}` routes to its ordered chain head for `{profile}`."
+                        f"Identity `{identity_id}` routes to its ordered chain head for `{profile}`; "
+                        f"role `{normalized_role or 'none'}` and category `{category or 'none'}` "
+                        "remain independent metadata."
+                        if identity_chain
+                        else (
+                            f"Category `{category}` routes to its ordered chain head for `{profile}`; "
+                            f"role `{normalized_role or 'none'}` remains independent metadata."
+                            if category
+                            else f"Role `{normalized_role}` routes to its ordered chain head for `{profile}`."
+                        )
                     ),
                 ],
             )
@@ -1079,6 +1256,8 @@ def resolve_model_route(
             domain=domain,
             depth=depth,
             category=category,
+            identity_id=identity_id if identity_chain else "",
+            identity_fingerprint=identity_fingerprint,
             chain=[],
             attempted=attempted,
             candidates=candidates,
@@ -1113,6 +1292,8 @@ def resolve_model_route(
         domain=domain,
         depth=depth,
         category=category,
+        identity_id=identity_id if identity_chain else "",
+        identity_fingerprint=identity_fingerprint,
         chain=[],
         attempted=attempted,
         candidates=candidates,
@@ -1125,18 +1306,20 @@ def model_route_for_unit(
     executor_target: str,
     local_catalog: Mapping[str, object] | None = None,
     category_config: Mapping[str, object] | None = None,
+    identity_config: Mapping[str, object] | None = None,
 ) -> dict[str, object] | None:
     """Return the prepared model route for a fanout unit, or None when unrouted.
 
-    `local_catalog` and `category_config` are passed through verbatim; this
-    function stays pure and the resolver's precedence rules decide whether
-    either applies.
+    `local_catalog`, `category_config`, and `identity_config` are passed
+    through verbatim; this function stays pure and the resolver's precedence
+    rules decide whether any of them applies.
     """
     model = str(unit.get("model", "") or "").strip()
     effort = str(unit.get("reasoning_effort", "") or "").strip()
     role = str(unit.get("role", "") or "").strip()
     category = str(unit.get("category", unit.get("model_category", "")) or "").strip()
-    if not model and not effort and not role and not category:
+    identity = str(unit.get("identity", "") or "").strip()
+    if not model and not effort and not role and not category and not identity:
         # A declared domain alone never triggers routing: it advises chain
         # order, it does not request a model.
         return None
@@ -1149,7 +1332,9 @@ def model_route_for_unit(
         requested_depth=str(unit.get("depth", "") or "").strip(),
         requested_scale=str(unit.get("scale", "") or "").strip(),
         requested_category=category,
+        requested_identity=identity,
         category_config=category_config,
+        identity_config=identity_config,
         local_catalog=local_catalog,
     )
 
@@ -1169,9 +1354,9 @@ def _resolve_hermes_recommendation_route(
 ) -> dict[str, object]:
     """Resolve Hermes against editorial policy and confirmed active models.
 
-    Hermes owns native provider bindings rather than an OMO executor catalog.
+    Hermes owns native provider bindings rather than a pi-family executor catalog.
     Recommendation resolution therefore consumes only the caller-confirmed
-    active set. The local OMO catalog is intentionally absent from this path.
+    active set. The local pi-family catalog is intentionally absent from this path.
     """
     from .model_recommendations import resolve_model_recommendation
 
@@ -1261,6 +1446,30 @@ def _resolve_hermes_recommendation_route(
         overrides=recommendation_overrides,
         **selector,
     )
+    # A derived `ultrabrain` (brain, research depth deep, scale large) with no
+    # confirmed-active generative candidate steps down to `deep`, the next
+    # depth tier, before the shared last resort, and never into a cheaper
+    # tier. When `deep` has none either, the `ultrabrain` resolution stands
+    # unchanged. A requested category is never widened.
+    if not requested_category and category == "ultrabrain" and not _has_generative_candidate(recommendation, active):
+        deeper = resolve_model_recommendation(
+            owner="hermes",
+            active_models=active,
+            overrides=recommendation_overrides,
+            category="deep",
+        )
+        if _has_generative_candidate(deeper, active):
+            attempted.append(
+                {
+                    "stage": "recommendation_category",
+                    "outcome": "no_active_candidate",
+                    "reason": (
+                        "no confirmed-active generative candidate in recommendation category `ultrabrain`; "
+                        "`deep` selected before the shared last resort"
+                    ),
+                }
+            )
+            recommendation, category = deeper, "deep"
     chain = (
         _hermes_recommendation_chain(recommendation, active_models=active)
         if recommendation["status"] == "resolved"
@@ -1424,6 +1633,21 @@ def _recommendation_category(role: str, depth: str, scale: str) -> str:
         return "unspecified-low"
     sources = CATEGORY_ROLE_SOURCES.get(role, ("unspecified-high",))
     return sources[0]
+
+
+def _has_generative_candidate(
+    resolution: Mapping[str, object],
+    active_models: tuple[str | Mapping[str, object], ...],
+) -> bool:
+    """Whether a category resolved to a confirmed-active model that can write code.
+
+    The class rule stays in `_generative_chain`; its skip records go to a
+    scratch list because this only decides which category the lane shapes.
+    """
+    if resolution.get("source") != "recommendation_chain":
+        return False
+    chain = _hermes_recommendation_chain(resolution, active_models=active_models)
+    return bool(_generative_chain(tuple(chain), []))
 
 
 def _recommendation_binding(resolution: Mapping[str, object]) -> str:
@@ -2087,6 +2311,8 @@ def _route_payload(
     domain: str = "",
     depth: str = "",
     category: str = "",
+    identity_id: str = "",
+    identity_fingerprint: dict[str, object] | None = None,
     refusal: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
@@ -2122,6 +2348,10 @@ def _route_payload(
         payload["domain"] = domain
     if depth:
         payload["depth"] = depth
+    if identity_id:
+        payload["identity_id"] = identity_id
+    if identity_fingerprint is not None:
+        payload["identity_fingerprint"] = identity_fingerprint
     if catalog_fingerprint is not None:
         payload["catalog_fingerprint"] = catalog_fingerprint
     if effort_change is not None:

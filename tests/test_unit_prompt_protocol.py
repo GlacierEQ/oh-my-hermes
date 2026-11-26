@@ -71,6 +71,16 @@ class ProtocolContentTests(unittest.TestCase):
         self.assertIn(STRUCTURAL_SEARCH_DISCIPLINE_GUIDANCE, prompt)
         self.assertIn("Commit your work; do not merge or push other branches.", prompt)
 
+    def test_the_brief_outranks_repository_workflow_rules(self) -> None:
+        # "Stop if they conflict with your brief" made a delegated agent halt
+        # whenever the caller's instruction (no branch, no commit) met an
+        # AGENTS.md convention (branch first), declining the task before any
+        # edit. The brief now outranks repository workflow rules; only a
+        # brief that contradicts itself is stopped on.
+        self.assertIn("brief outranks repo workflow rules", GOAL_ECHO_PROTOCOL)
+        self.assertIn("only a self-contradiction", GOAL_ECHO_PROTOCOL)
+        self.assertNotIn("If they conflict with your brief", GOAL_ECHO_PROTOCOL)
+
     def test_structural_search_discipline_rides_the_shared_invariant_preamble(self) -> None:
         self.assertIn(STRUCTURAL_SEARCH_DISCIPLINE_GUIDANCE, shared_unit_preamble_lines(_GOAL))
 
@@ -338,6 +348,17 @@ class CalibrationSelectionTests(unittest.TestCase):
         # protocol, which the composition guide prints beside every composer
         # block, so the family entry no longer repeats it.
         self.assertIn("exact literal strings", HIGH_EFFORT_CALIBRATIONS["deepseek"])
+        # Measured 2026-11-17 on og deepseek-v4.1-flash-eco (live-model-tools,
+        # 6 templates x 3 seeds x 5 reps): 90/90 with this sentence against
+        # 76/90 without it; the search templates wrote a bare list or a
+        # wrapper key of their own instead of the task's `locations` object.
+        self.assertIn("not a bare list and not a wrapper key", HIGH_EFFORT_CALIBRATIONS["deepseek"])
+        # The V4.1 Flash override replaces the family block, so it carries the
+        # sentence itself: og deepseek/deepseek-flash 2026-11-18, same six
+        # templates x 3 seeds x 5 reps, 85/90 with it against 76/90 without.
+        self.assertIn(
+            "not a bare list and not a wrapper key", MODEL_HIGH_EFFORT_CALIBRATIONS["deepseek-v4.1-flash"]
+        )
         self.assertIn("byte-identical", PROMPT_CACHE_COMPOSITION_PROTOCOL)
         self.assertIn("interleaved", HIGH_EFFORT_CALIBRATIONS["glm"])
 

@@ -16,9 +16,17 @@ inline markup inside; the opening fence shows only its language as a dim label,
 or nothing, and the closing fence shows nothing; a language `highlight.py` knows
 is syntax-coloured, any other stays one code colour), ```diff fences whose added
 and removed lines are full-row bands, inline `code`, **bold**, *italic* / _italic_, links
-`[t](u)` -> `t (u)`, and horizontal rules. Tables pass through as plain text.
-Constructs that need a later line to decide an earlier one (setext headings,
-indented code) are left out on purpose.
+`[t](u)` -> `t (u)`, horizontal rules and tables (a `|` header row, the
+`|---|` separator row, body rows, drawn as a box of `┌─┬─┐` borders with a
+`├─┼─┤` line under the header and under each body row; the header goes bold
+in the accent colour, cells take the inline markup; a table wider than the
+row wraps each cell inside a narrower column, or draws each body row as
+`header: value` lines when even the narrowest columns do not fit). A table is
+decided between two lines, so `render_lines` steps past it in one move; a `|`
+line without that starting row stays a paragraph. Constructs that need a
+later line to decide an earlier one (setext headings, indented code) are left
+out on purpose, and a table's column alignment (`:---:`) is not drawn: every
+column is left-aligned.
 
 Every row is plain `Line`s for `screen.py` to paint. `clean_text` runs first:
 whole escape sequences (CSI, OSC, the other control strings, two-byte escapes)
@@ -32,19 +40,43 @@ Malformed markdown renders as literal text; nothing here raises on any input.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+import re
 import unicodedata
 
 from .escapes import strip_escapes
 from .highlight import highlight_line, highlights
-from .style import Line, Span, Style
+from .style import WRAP_VERBATIM, Line, Span, Style, wrap_mark, wrap_of
 from .theme import Theme
-from .width import TAB_CELLS, cell_width, cluster_width, clusters, is_unpainted, line_width, wrap_line
+from .width import TAB_CELLS, cell_width, cluster_width, clusters, is_unpainted, line_width, wrap_line, wrap_line_marked
 
 BULLET = "•"
 RULE = "─"
 QUOTE_BAR = "│ "
 DIFF_LANGUAGES = frozenset({"diff", "patch"})
+
+# Table cells' column widths: the widest cell of the column decides, with a
+# minimum of three cells. A table wider than the
+# row wraps its cells inside narrower columns: a column then keeps at least its
+# longest word up to `TABLE_WORD_CAP` cells, and never less than
+# `TABLE_WRAP_MIN` (or its whole width when that is less).
+TABLE_DIVIDER_RE = re.compile(r"^:?-{3,}:?$")
+TABLE_MIN_COL_WIDTH = 3
+TABLE_CELL_FRAME = 3  # a column's `│` on its left and a cell of padding each side of its text
+TABLE_BAR = "│"
+TABLE_LINE = "─"
+# A border line's character where columns' borders meet it: (border above, border below, line to the left, to the right)
+_JUNCTIONS = {
+    (True, True, True, True): "┼", (True, True, False, True): "├", (True, True, True, False): "┤",
+    (True, False, True, True): "┴", (False, True, True, True): "┬",
+    (True, False, False, True): "└", (True, False, True, False): "┘",
+    (False, True, False, True): "┌", (False, True, True, False): "┐",
+    (True, True, False, False): "│", (True, False, False, False): "╵", (False, True, False, False): "╷",
+}
+TABLE_WRAP_MIN = 8
+TABLE_WORD_CAP = 16
+TABLE_RECORD_HANG = 2  # a record's wrapped value hangs this far under its label
+
 
 _FENCE_CHARS = ("`", "~")
 _MIN_FENCE_RUN = 3
@@ -55,9 +87,20 @@ _ORDERED_DELIMITERS = frozenset(".)")
 _MAX_ORDINAL_DIGITS = 9
 _DIGITS = "0123456789"
 _RULE_CHARS = frozenset("-*_")
+_RULE_MARKS = frozenset(" -*_")  # a line of only these may yet turn out to be a rule
 _MIN_RULE_RUN = 3
 _ESCAPABLE = frozenset("\\`*_[]()#+-.!|>~")
 
+
+
+@dataclass(frozen=True)
+class TableColumns:
+    """What the rows of a table taken before its end was seen hang on."""
+
+    header: tuple[str, ...]  # the header's cells: a row drawn as a record labels its values with them
+    widths: tuple[int, ...] = ()  # the column widths; none when the table is drawn as records
+    indent: int = 0  # the table's indent
+    last: tuple[int, ...] = ()  # the columns of the last row drawn in the box; none when it was a record
 
 
 @dataclass(frozen=True)
@@ -69,6 +112,7 @@ class MarkdownState:
     fence_indent: int = 0
     list_indent: int = 0  # content column of the most recent list item; 0 outside a list
     code_carry: str = ""  # the string or comment opener a highlighted fence line ended inside
+    table: TableColumns | None = None  # a table whose rows were taken before its end was seen: still open
 
     @property
     def in_fence(self) -> bool:
@@ -95,8 +139,9 @@ def wrap_prefixed(spans: Sequence[Span], first: Line, rest: Line, width: int) ->
     prefix_cells = max(line_width(first), line_width(rest))
     if prefix_cells >= width:
         first, rest, prefix_cells = (), (), 0
-    rows = wrap_line(tuple(spans), width - prefix_cells)
-    return [(*(first if index == 0 else rest), *row) for index, row in enumerate(rows)]
+    rows = wrap_line_marked(tuple(spans), width - prefix_cells)
+    return [(*((wrap_mark(kind),) if kind else ()), *(first if index == 0 else rest), *row)
+            for index, (row, kind) in enumerate(rows)]
 
 
 def render_line(source: str, state: MarkdownState, width: int, theme: Theme) -> tuple[list[Line], MarkdownState]:
@@ -120,14 +165,164 @@ def render_line(source: str, state: MarkdownState, width: int, theme: Theme) -> 
 
 
 def render_lines(
-    sources: Sequence[str], state: MarkdownState, width: int, theme: Theme
+    sources: Sequence[str], state: MarkdownState, width: int, theme: Theme, closed: bool = True
 ) -> tuple[list[Line], MarkdownState]:
-    """`render_line` over several complete source lines, threading the state."""
+    """`render_line` over several complete source lines, threading the state.
+
+    `closed`: `sources` run to the end of the document, so a table at their
+    end is closed with its bottom border. False while more lines may follow:
+    the table is left open in the state, for the next lines to go on with.
+    """
     rows: list[Line] = []
-    for source in sources:
+    index = 0
+    limit = len(sources)
+    while index < limit:
+        source = sources[index]
+        if state.table:
+            cells = split_table_row(clean_text(source)) if source.strip().startswith("|") else []
+            if not state.in_fence and (len(cells) >= 2 or is_table_divider_cells(cells)):
+                # a table cut short by the cap on holding it back: the rest hangs on the columns it was given (a
+                # divider of any width is dropped there, never drawn raw)
+                table_rows, consumed, columns = table_rows_on(sources, index, state.table, width, theme, closed)
+                rows.extend(table_rows)
+                index += consumed
+                state = replace(state, table=columns)
+                continue
+            rows.extend(_table_end(state.table, theme))  # the line after its last row ends the table
+            state = replace(state, table=None)
+        if not state.in_fence and source.strip().startswith("|"):
+            if index + 1 < limit and opens_table(source, sources[index + 1]):
+                # the header's next line is its divider: the block runs as one table
+                table_rows, consumed, columns = _table_block(sources, index, width, theme, closed)
+                rows.extend(table_rows)
+                index += consumed
+                # a table that runs to the last line may go on in lines not yet taken
+                state = replace(state, list_indent=0, table=columns)
+                continue
         lines, state = render_line(source, state, width, theme)
         rows.extend(lines)
+        index += 1
+    if closed and state.table:
+        rows.extend(_table_end(state.table, theme))
+        state = replace(state, table=None)
     return rows, state
+
+
+@dataclass
+class GrowingLine:
+    """What `render_growing` keeps between the frames of a line still being written: the rows above a cut in it,
+    wrapped once, so that a frame wraps only what follows the cut, however long the line has grown."""
+
+    line: str = ""  # the line when the cut last moved: a later line goes on from it, or the cut is not used
+    cut: int = 0  # where in `line` the rows above end; 0 for no cut
+    dirty: str = ""  # a line `clean_text` changes: one that goes on from it is never cut, so is not checked again
+    wrapped: str = ""  # a line that took more than one row: from one that goes on from it, places to cut are noted
+    clean: str = ""  # a line `clean_text` leaves as it is: for one that goes on from it, only what was added is checked
+    rows: list[Line] = field(default_factory=list)  # the rows above the cut
+    rest: Line = ()  # what every row of the line but its first hangs on
+    cut_wrap: str | None = None  # how the row at the cut goes on from the one above it (`style.wrap_mark`)
+    after: MarkdownState = MarkdownState()  # the state the line hands the next
+    drawn: tuple[MarkdownState, int, Theme | None] = (MarkdownState(), 0, None)  # the state, width and theme
+
+
+def render_growing(
+    source: str, state: MarkdownState, width: int, theme: Theme, memo: GrowingLine
+) -> tuple[list[Line], MarkdownState]:
+    """`render_line(source, state, width, theme)` for a line that grows at its end from one call to the next.
+
+    The rows above `memo`'s cut are reused and only the text past it is
+    wrapped; the cut then moves down to the last row a word opens whose
+    rows nothing after it can change (`_move_cut`). So a long paragraph
+    streamed token by token costs a frame its last rows, not the whole
+    paragraph. Only a paragraph or a list item line that `clean_text` leaves
+    as it is, and that holds no tab, is cut; any other line is rendered whole.
+    """
+    width = max(1, width)
+    if "\t" in source or memo.dirty and source.startswith(memo.dirty):
+        return render_line(source, state, width, theme)
+    if memo.cut and memo.drawn[:2] == (state, width) and memo.drawn[2] is theme and source.startswith(memo.line):
+        start, lead = memo.cut, memo.rest
+        tail = source[start:]
+        text = clean_text(tail)
+        cuttable = text == tail
+    else:
+        memo.cut, memo.rows = 0, []
+        plain = not state.in_fence and source.strip() and not _fence_open(source)
+        inline = _inline_block(source, state, theme) if plain else None
+        printable = source.isprintable()  # a printable line `clean_text` leaves alone
+        if inline is None or line_width(inline[1]) != line_width(inline[2]):
+            # `render_line` would clean the line and make the checks just made: a printable one goes on from there.
+            return _block_rows(source, state, width, theme) if plain and printable else render_line(source, state,
+                                                                                                   width, theme)
+        if not printable:
+            # With no tab, `clean_text` leaves a line alone where it leaves each part of it alone.
+            added = source[len(memo.clean) :] if source.startswith(memo.clean) else source
+            if clean_text(added) != added:
+                memo.dirty = source
+                return render_line(source, state, width, theme)
+            memo.clean = source
+        start, lead, memo.rest, memo.after = inline
+        memo.drawn, text, cuttable = (state, width, theme), source[start:], True
+    # A line on one row has no row to cut at: until it has wrapped, it is parsed as `render_line` parses it.
+    noted = cuttable and bool(memo.wrapped) and source.startswith(memo.wrapped)
+    stops: list[tuple[int, int]] = []
+    spans = _inline_spans(text, theme.text, theme, stops if noted else None)
+    rows = wrap_prefixed(spans, lead, memo.rest, width)
+    if memo.cut and memo.cut_wrap and rows:
+        rows[0] = (wrap_mark(memo.cut_wrap), *rows[0])  # the row at the cut goes on from the rows above it
+    drawn = memo.rows + rows
+    if noted:
+        _move_cut(memo, source, start, spans, stops, rows, lead, width, theme)
+    elif len(rows) > 1:
+        memo.wrapped = source
+    return drawn, memo.after
+
+
+def _move_cut(
+    memo: GrowingLine, source: str, start: int, spans: list[Span], stops: list[tuple[int, int]], rows: list[Line],
+    lead: Line, width: int, theme: Theme,
+) -> None:
+    """Move `memo`'s cut from `start` down to the last of `rows` that opens at one of `stops` but the last.
+
+    Everything before a stop is decided however the line goes on, so with a
+    later stop the word the row opens with is too: that row stays where it
+    opens, and what follows wraps from there as that text alone would (a
+    row a word opens begins with nothing carried over). The rows the
+    shown text maps onto, and those the text from the cut wraps to on its
+    own, are checked against `rows` before the cut moves.
+    """
+    if len(stops) < 2 or len(rows) < 2:
+        return
+    shown = "".join(span.text for span in spans)
+    opens = {at: index for index, at in stops[:-1]}  # where a cut can go, by the characters shown before it
+    last = stops[-2][1]  # no row opening past this can take the cut: the rows below it are not read
+    bare = max(line_width(lead), line_width(memo.rest)) >= width  # `wrap_prefixed` then drops the prefixes
+    at, cut_row, cut_at = 0, 0, 0
+    for number, marked in enumerate(rows):
+        row = tuple(span for span in marked if span.style.wrap is None)  # a wrap's mark holds no text
+        if number:
+            while shown[at : at + 1] == " ":  # the spaces a break left out
+                at += 1
+            if at > last:
+                break
+            if at in opens:
+                cut_row, cut_at = number, opens[at]
+        words = "".join(span.text for span in row[0 if bare else len(memo.rest if number else lead) :])
+        if not shown.startswith(words, at):
+            return
+        at += len(words)
+    if not cut_row:
+        return
+    fresh = wrap_prefixed(_inline_spans(source[start + cut_at :], theme.text, theme), memo.rest, memo.rest, width)
+    kind = wrap_of(rows[cut_row])
+    if kind and fresh:
+        fresh[0] = (wrap_mark(kind), *fresh[0])
+    if fresh != rows[cut_row:]:
+        return
+    if not memo.cut and set(source[: start + cut_at]) <= _RULE_MARKS:
+        return  # it could still turn out to be a rule
+    memo.rows = memo.rows + rows[:cut_row]
+    memo.cut, memo.line, memo.cut_wrap = start + cut_at, source, kind
 
 
 def render_markdown(text: str, width: int, theme: Theme) -> list[Line]:
@@ -193,7 +388,34 @@ def _list_item(body: str) -> tuple[str, str] | None:
     return None
 
 
+def _inline_block(text: str, state: MarkdownState, theme: Theme) -> tuple[int, Line, Line, MarkdownState] | None:
+    """For a list item or a paragraph line: where in `text` its inline text starts, the prefix of its first row and
+    of every other, and the state after it. None for a heading, a rule, a quote or a table row."""
+    indent = _leading_spaces(text)
+    body = text[indent:]
+    if body.startswith("|") or indent <= _MAX_BLOCK_INDENT and (
+        _heading_text(body) is not None or _is_rule(body) or body.startswith(">")
+    ):
+        return None
+    pad: Line = (Span(" " * indent),) if indent else ()
+    item = _list_item(body)
+    if item is not None:
+        marker, content = item
+        column = indent + cell_width(marker)
+        first = (*pad, Span(marker, theme.muted))
+        return len(text) - len(content), first, (Span(" " * column),), replace(state, list_indent=column)
+    if not indent:
+        state = replace(state, list_indent=0)
+    elif state.list_indent:
+        pad = (Span(" " * state.list_indent),)  # a continuation line hangs under its item's text
+    return indent, pad, pad, state
+
+
 def _block_rows(text: str, state: MarkdownState, width: int, theme: Theme) -> tuple[list[Line], MarkdownState]:
+    inline = _inline_block(text, state, theme)
+    if inline is not None:
+        start, first, rest, after = inline
+        return wrap_prefixed(_inline_spans(text[start:], theme.text, theme), first, rest, width), after
     indent = _leading_spaces(text)
     body = text[indent:]
     if indent <= _MAX_BLOCK_INDENT:
@@ -205,20 +427,7 @@ def _block_rows(text: str, state: MarkdownState, width: int, theme: Theme) -> tu
         if body.startswith(">"):
             return _quote_rows(body, width, theme), state
     pad: Line = (Span(" " * indent),) if indent else ()
-    if body.startswith("|"):
-        return wrap_prefixed((Span(body, theme.text),), pad, pad, width), state
-    item = _list_item(body)
-    if item is not None:
-        marker, content = item
-        column = indent + cell_width(marker)
-        first = (*pad, Span(marker, theme.muted))
-        rows = wrap_prefixed(_inline_spans(content, theme.text, theme), first, (Span(" " * column),), width)
-        return rows, replace(state, list_indent=column)
-    if not indent:
-        state = replace(state, list_indent=0)
-    elif state.list_indent:
-        pad = (Span(" " * state.list_indent),)  # a continuation line hangs under its item's text
-    return wrap_prefixed(_inline_spans(body, theme.text, theme), pad, pad, width), state
+    return wrap_prefixed((Span(body, theme.text),), pad, pad, width), state  # a table row
 
 
 def _quote_rows(body: str, width: int, theme: Theme) -> list[Line]:
@@ -233,6 +442,354 @@ def _quote_rows(body: str, width: int, theme: Theme) -> list[Line]:
     return wrap_prefixed(_inline_spans(rest, theme.quote, theme), bar, bar, width)
 
 
+# ── tables ────────────────────────────────────────────────────────────────
+
+def split_table_row(line: str) -> list[str]:
+    """`| a | b |`-style source line into its cells (edges and padding stripped)."""
+    body = line.strip()
+    if body.startswith("|"):
+        body = body[1:]
+    if body.endswith("|"):
+        body = body[:-1]
+    if not body.strip():
+        return []
+    # `\|` is a literal pipe inside a cell, not a column edge
+    return [cell.strip().replace("\\|", "|") for cell in re.split(r"(?<!\\)\|", body)]
+
+def opens_table(header_line: str, next_line: str) -> bool:
+    """`header_line` opens a table: two or more columns, and `next_line` is a divider of as many."""
+    header = split_table_row(clean_text(header_line))
+    divider = split_table_row(clean_text(next_line))
+    return len(header) >= 2 and len(divider) == len(header) and is_table_divider_cells(divider)
+
+
+def is_table_divider_cells(cells: list[str]) -> bool:
+    """`|---|---|`: every cell is dashes alone (colons at the edges allowed)."""
+    return len(cells) > 0 and all(TABLE_DIVIDER_RE.match(cell) for cell in cells)
+
+def _longest_word(cell: Sequence[Span]) -> int:
+    """Cells of the widest run between spaces that `cell` shows: a column narrower than it breaks the word."""
+    return max(cell_width(word) for word in "".join(span.text for span in cell).split(" "))
+
+
+def _column_floor(own: int, word: int) -> int:
+    """The narrowest a column of width `own` whose longest word is `word` cells wraps to: the word up to
+    `TABLE_WORD_CAP`, at least `TABLE_WRAP_MIN`, never more than `own`."""
+    return min(own, max(TABLE_WRAP_MIN, min(word, TABLE_WORD_CAP)))
+
+
+def fit_columns(natural: Sequence[int], words: Sequence[int], room: int) -> tuple[int, ...] | None:
+    """Column widths that sum to at most `room`, from each column's own width (`natural`) and its longest word.
+
+    When every column fits whole, each keeps its own width. Otherwise the
+    columns narrow enough to take their share keep their own width, and the
+    wider ones share what is left in proportion to how much each wants past
+    its minimum (`_column_floor`). When those minimums do not fit, each
+    column's minimum is `TABLE_WRAP_MIN` (or its own width when less): its
+    longer words then break across rows, a path or URL after a `/`. None when
+    even that does not fit.
+    """
+    if sum(natural) <= room:
+        return tuple(natural)
+    for floors in (
+        [_column_floor(own, word) for own, word in zip(natural, words)],
+        [min(own, TABLE_WRAP_MIN) for own in natural],
+    ):
+        if sum(floors) <= room:
+            return _share_columns(natural, floors, room)
+    return None
+
+
+def _share_columns(natural: Sequence[int], floors: Sequence[int], room: int) -> tuple[int, ...]:
+    """`fit_columns` once the minimums fit and the whole widths do not.
+
+    A column within an even share of what is left keeps its whole width
+    (again over the rest, until none is); the others share what is left.
+    When that leaves a wrapped column narrower than one kept whole, or less
+    than the wrapped columns' minimums, every column shares from its minimum
+    instead: the long column a table is about is never the narrowest.
+    """
+    widths = list(floors)
+    wide = list(range(len(natural)))
+    budget = room
+    while True:
+        narrow = [ci for ci in wide if natural[ci] * len(wide) <= budget]  # within an even share of what is left
+        if not narrow:
+            break
+        for ci in narrow:
+            widths[ci] = natural[ci]
+            budget -= natural[ci]
+        wide = [ci for ci in wide if ci not in narrow]
+    kept = [widths[ci] for ci in range(len(natural)) if ci not in wide]
+    if sum(floors[ci] for ci in wide) <= budget:
+        _spread(widths, wide, natural, floors, budget)
+        if not kept or min(widths[ci] for ci in wide) >= max(kept):
+            return tuple(widths)
+    widths = list(floors)
+    _spread(widths, list(range(len(natural))), natural, floors, room)
+    return tuple(widths)
+
+
+def _spread(widths: list[int], wide: Sequence[int], natural: Sequence[int], floors: Sequence[int], budget: int) -> None:
+    """Set the `wide` columns of `widths` to their minimums plus `budget`'s cells past them, shared in proportion to
+    how much each wants past its minimum (their whole widths sum to more than `budget`)."""
+    spare = budget - sum(floors[ci] for ci in wide)
+    wants = {ci: natural[ci] - floors[ci] for ci in wide}
+    total = sum(wants.values())
+    for ci in wide:
+        widths[ci] = floors[ci] + spare * wants[ci] // total
+    left = budget - sum(widths[ci] for ci in wide)
+    for ci in sorted(wide, key=lambda ci: -wants[ci]):  # the cells the rounding left go to the widest wants
+        if left <= 0:
+            break
+        if widths[ci] < natural[ci]:
+            widths[ci] += 1
+            left -= 1
+
+
+def _edges(widths: Sequence[int]) -> set[int]:
+    """Where a row on columns `widths` has its `│` borders, in cells from the table's left edge."""
+    if not widths:
+        return set()
+    at, edges = 0, {0}
+    for cells in widths:
+        at += cells + TABLE_CELL_FRAME
+        edges.add(at)
+    return edges
+
+
+def _rule(above: Sequence[int], below: Sequence[int], indent: int, style: Style) -> Line:
+    """The border line under a row on columns `above` and over one on `below`: the top with no row above, the bottom
+    with none below. Where the two rows' columns differ, each border meets the line from its own side (`┴`, `┬`)."""
+    ups, downs = _edges(above), _edges(below)
+    end = max(ups | downs)
+    text = "".join(
+        _JUNCTIONS[(x in ups, x in downs, x > 0, x < end)] if x in ups or x in downs else TABLE_LINE
+        for x in range(end + 1)
+    )
+    return ((Span(" " * indent),) if indent else ()) + (Span(text, style),)
+
+
+def _border_style(theme: Theme) -> Style:
+    """The table's borders: the rule colour, and gutter cells, which a drag never copies."""
+    return replace(theme.rule, gutter=True)
+
+
+def _grid_lines(
+    cells: Sequence[Sequence[Span]], widths: Sequence[int], indent: int, style: Style, border: Style
+) -> list[Line]:
+    """One row on the columns `widths`, between `│` borders: each cell wrapped inside its column and padded to it,
+    the cells' rows side by side, as many as the tallest cell takes. No cell is cut: a word wider than its column
+    breaks across rows."""
+    stacks = [wrap_line(tuple(cell), widths[ci]) for ci, cell in enumerate(cells)]
+    lines: list[Line] = []
+    for at in range(max(len(stack) for stack in stacks)):
+        line: list[Span] = [Span(" " * indent)] if indent else []
+        for ci, stack in enumerate(stacks):
+            piece = stack[at] if at < len(stack) else ()
+            line.extend((Span(TABLE_BAR, border), Span(" ", style), *piece))
+            line.append(Span(" " * (max(0, widths[ci] - line_width(piece)) + 1), style))
+        line.append(Span(TABLE_BAR, border))
+        lines.append(tuple(line))
+    return lines
+
+
+def _record_lines(cells: Sequence[Sequence[Span]], labels: Sequence[Sequence[Span]], indent: int, width: int,
+                  label_style: Style) -> list[Line]:
+    """One row as a record, for a row too narrow for columns: a line per cell, `label: value`, wrapped rows hanging
+    under the label. A cell past the header's columns has no label."""
+    pad: Line = (Span(" " * indent),) if indent else ()
+    hang: Line = (Span(" " * (indent + TABLE_RECORD_HANG)),)
+    lines: list[Line] = []
+    for ci, cell in enumerate(cells):
+        label = [*labels[ci], Span(": ", label_style)] if ci < len(labels) and labels[ci] else []
+        lines.extend(wrap_prefixed([*label, *cell], pad, hang, width))
+    return lines
+
+
+def _table_cells(cells: Sequence[str], style: Style, theme: Theme, count: int = 0) -> list[list[Span]]:
+    """Each cell's inline markup as spans over `style` (code, emphasis and links as in a paragraph), padded with
+    empty cells to `count`."""
+    spans = [_inline_spans(cell, style, theme) for cell in cells]
+    return spans + [[] for _ in range(count - len(spans))]
+
+
+def _header_style(theme: Theme) -> Style:
+    return replace(theme.text, bold=True, fg=theme.brand.fg or theme.accent.fg)
+
+
+def _header_cells(cells: Sequence[str], theme: Theme, count: int = 0) -> list[list[Span]]:
+    """`_table_cells` for the header: bold throughout, a code span or a link in it too."""
+    return [
+        [Span(span.text, replace(span.style, bold=True)) for span in cell]
+        for cell in _table_cells(cells, _header_style(theme), theme, count)
+    ]
+
+
+def _grid_room(width: int, indent: int, count: int) -> int:
+    """The cells `count` columns' text has in a row `width` wide behind `indent`: each column's borders and padding
+    take `TABLE_CELL_FRAME`, and the right edge one more."""
+    return width - indent - 1 - TABLE_CELL_FRAME * count
+
+
+def _table_end(columns: TableColumns, theme: Theme) -> list[Line]:
+    """The bottom border that closes a table whose rows are out: none when its last row is a record."""
+    return [_rule(columns.last, (), columns.indent, _border_style(theme))] if columns.last else []
+
+
+def _body_lines(
+    rows: Sequence[Sequence[str]], columns: TableColumns, width: int, theme: Theme
+) -> tuple[list[Line], TableColumns]:
+    """Body rows on `columns`, each after one that is already out, and the columns the next row hangs on.
+
+    Each row opens with the `├─┼─┤` line under the row before. A cell wider
+    than its column widens it for its own row only: whole when the row still
+    fits; else every column keeps at least the given width and the cell's
+    minimum (`_column_floor`), and the row's room past those goes to the
+    columns whose cells want more, in proportion. A row whose minimums do not
+    fit wraps inside the given columns, and one with cells past them that do
+    not fit is drawn as a record (the box closed above it). No cell is cut or
+    lost.
+    """
+    labels = _header_cells(columns.header, theme)
+    border = _border_style(theme)
+    indent = columns.indent
+    lines: list[Line] = []
+    for cells in rows:
+        spans = _table_cells(cells, theme.text, theme, len(columns.widths))
+        widths: Sequence[int] | None = None
+        if columns.widths:
+            room = _grid_room(width, indent, len(spans))
+            natural = [max(TABLE_MIN_COL_WIDTH, line_width(tuple(cell))) for cell in spans]
+            floors = [_column_floor(natural[ci], _longest_word(cell)) for ci, cell in enumerate(spans)]
+            given = columns.widths
+            high = [max(given[ci], natural[ci]) if ci < len(given) else natural[ci] for ci in range(len(spans))]
+            low = [max(given[ci], floors[ci]) if ci < len(given) else floors[ci] for ci in range(len(spans))]
+            if sum(high) <= room:
+                widths = high
+            elif sum(low) <= room:
+                widths = list(low)
+                _spread(widths, range(len(spans)), high, low, room)
+            elif len(spans) == len(given):
+                widths = given
+        if widths is None:
+            # a record: after a record a blank row, after the box its bottom
+            lines.extend(_table_end(columns, theme) if columns.last else [()])
+            lines.extend(_record_lines(spans, labels, indent, width, _header_style(theme)))
+            columns = replace(columns, last=())
+        else:
+            lines.append(_rule(columns.last, widths, indent, border))
+            lines.extend(_grid_lines(spans, widths, indent, theme.text, border))
+            columns = replace(columns, last=tuple(widths))
+    return lines, columns
+
+
+def table_block(sources: Sequence[str], first: int, width: int, theme: Theme) -> tuple[list[Line], int]:
+    """`_table_block` drawn whole, closed whether or not more rows may follow, without the columns."""
+    rows, consumed, _columns = _table_block(sources, first, width, theme, closed=True)
+    return rows, consumed
+
+
+def table_rows_on(
+    sources: Sequence[str], first: int, columns: TableColumns, width: int, theme: Theme, closed: bool = True
+) -> tuple[list[Line], int, TableColumns | None]:
+    """Body rows from `sources[first]` on columns already given: (rows, count of lines consumed, the columns the
+    next row hangs on). See `_body_lines`. The table is closed (`_table_end`, and no columns returned) when a line
+    after its rows ends it, a divider that opens the next table on the row before it, or at the end of `sources`
+    when `closed`."""
+    body: list[list[str]] = []
+    index = first
+    while index < len(sources) and sources[index].strip().startswith("|"):
+        cells = split_table_row(clean_text(sources[index]))
+        if is_table_divider_cells(cells):
+            before = split_table_row(clean_text(sources[index - 1])) if index > first else []
+            if before and not is_table_divider_cells(before) and opens_table(sources[index - 1], sources[index]):
+                # this divider opens the next table: its header is the row before, which is not ours
+                body.pop()
+                index -= 1
+                break
+            index += 1  # a divider that opens nothing here is dropped, never drawn raw
+            continue
+        if len(cells) < 2:
+            break
+        body.append(cells)
+        index += 1
+    rows, after = _body_lines(body, columns, width, theme)
+    if closed or index < len(sources):
+        return rows + _table_end(after, theme), index - first, None
+    return rows, index - first, after
+
+
+def _table_block(
+    sources: Sequence[str], first: int, width: int, theme: Theme, closed: bool = True
+) -> tuple[list[Line], int, TableColumns | None]:
+    """`sources[first]` opens a Markdown table: `|` header, `|---|` divider, body rows.
+
+    The table is a box: a `┌─┬─┐` top, the header row bold in the accent
+    colour, a `├─┼─┤` line under the header and under each body row, a
+    `└─┴─┘` bottom, `│` between cells and a cell of padding inside each side.
+    Body rows hang on the header's columns, a row's cells past them on
+    columns of their own. A table wider than the row narrows its columns
+    (`fit_columns`) and wraps each cell inside its column; a table too wide
+    for even the narrowest columns draws each body row as a record,
+    `header: value` a line, a blank row between records. Returns (rows, count
+    of lines the table consumed, the columns a row after them hangs on) so
+    `render_lines` steps past the whole block in one pass. A table that runs
+    to the end of `sources` with `closed` False is left open (no bottom; its
+    columns returned), as more of its rows may follow; any other is closed
+    and returns no columns. The caller has checked `opens_table`.
+    """
+    header = split_table_row(clean_text(sources[first]))
+    index = first + 1
+    body: list[list[str]] = []
+    while index < len(sources) and sources[index].strip().startswith("|"):
+        cells = split_table_row(clean_text(sources[index]))
+        if is_table_divider_cells(cells):
+            if index == first + 1:
+                # the `|---|` row between header and body: the line under the header, no cells of the table
+                index += 1
+                continue
+            before = split_table_row(clean_text(sources[index - 1]))
+            if body and not is_table_divider_cells(before) and opens_table(sources[index - 1], sources[index]):
+                # this divider opens the next table: its header is the row before, which is not ours (a dropped
+                # divider before it is no header, and the row before that is ours)
+                body.pop()
+                index -= 1
+                break
+            index += 1  # a divider-shaped row that opens nothing is dropped, never drawn raw
+            continue
+        if len(cells) < 2:
+            break  # a `|` line that is not a table row closes the table here
+        body.append(cells)
+        index += 1
+    indent = _leading_spaces(sources[first])
+    header_style = _header_style(theme)
+    count = max(len(cells) for cells in [header, *body])
+    head = _header_cells(header, theme, count)
+    spans = [head, *(_table_cells(cells, theme.text, theme, count) for cells in body)]
+    # each column's own width: its widest cell, at least the minimum
+    natural = [max(TABLE_MIN_COL_WIDTH, *(line_width(tuple(cells[ci])) for cells in spans)) for ci in range(count)]
+    words = [max(_longest_word(cells[ci]) for cells in spans) for ci in range(count)]
+    widths = fit_columns(natural, words, _grid_room(width, indent, count))
+    open_ended = not closed and index >= len(sources)
+    if widths is None:
+        # too narrow for columns: each body row a record, its values behind the header's labels
+        records = [_record_lines(cells, head, indent, width, header_style) for cells in spans[1:]]
+        if not records:  # a header with no body yet: its labels, a line each
+            records = [_record_lines(head, [], indent, width, header_style)]
+        lines = [row for at, record in enumerate(records) for row in ([(), *record] if at else record)]
+        return lines, index - first, TableColumns(tuple(header), (), indent) if open_ended else None
+    border = _border_style(theme)
+    lines = [_rule((), widths, indent, border), *_grid_lines(head, widths, indent, header_style, border)]
+    for cells in spans[1:]:
+        lines.append(_rule(widths, widths, indent, border))
+        lines.extend(_grid_lines(cells, widths, indent, theme.text, border))
+    columns = TableColumns(tuple(header), widths, indent, widths)
+    if open_ended:
+        return lines, index - first, columns
+    return lines + _table_end(columns, theme), index - first, None
+
+
 # ── fenced code ───────────────────────────────────────────────────────────
 
 
@@ -245,12 +802,12 @@ def hard_wrap(spans: Sequence[Span], width: int) -> list[Line]:
         piece = ""
         for cluster in clusters(span.text):
             cluster_cells = cluster_width(cluster)
-            if (row or piece) and used + cluster_cells > width:
+            if (used or piece) and used + cluster_cells > width:
                 if piece:
                     row.append(Span(piece, span.style))
                     piece = ""
                 rows.append(tuple(row))
-                row, used = [], 0
+                row, used = [wrap_mark(WRAP_VERBATIM)], 0
             piece += cluster
             used += cluster_cells
         if piece:
@@ -264,7 +821,8 @@ def band_rows(text: str, width: int, band: Style) -> list[Line]:
     rows: list[Line] = []
     for row in hard_wrap((Span(text, band),), width):
         filled = "".join(span.text for span in row)
-        rows.append((Span(filled + " " * max(0, width - line_width(row)), band),))
+        mark = tuple(span for span in row if span.style.wrap is not None)
+        rows.append((*mark, Span(filled + " " * max(0, width - line_width(row)), band)))
     return rows
 
 
@@ -295,6 +853,13 @@ def _diff_fence_rows(text: str, state: MarkdownState, width: int, theme: Theme) 
 
 
 # ── inline ────────────────────────────────────────────────────────────────
+
+
+def _cluster_each(text: str, index: int) -> bool:
+    """Whether the character at `index`, the one before it and the one before that are a cluster each: a cut
+    there breaks no glyph (a ZWJ joins the space after it, a combining mark the space before it)."""
+    piece = text[max(index - 2, 0) : index + 1]
+    return len(clusters(piece)) == len(piece)
 
 
 def _code_span(text: str, start: int) -> tuple[str, int] | None:
@@ -366,10 +931,21 @@ def _emphasis(text: str, start: int) -> tuple[str, bool, int] | None:
         search = close + 1
 
 
-def _inline_spans(text: str, style: Style, theme: Theme) -> list[Span]:
-    """Inline markup in one line of block text, as spans over the block's `style`."""
+def _inline_spans(text: str, style: Style, theme: Theme, stops: list[tuple[int, int]] | None = None) -> list[Span]:
+    """Inline markup in one line of block text, as spans over the block's `style`.
+
+    With `stops`, each place `text` can be cut at is added to it as (index in
+    `text`, characters shown before it): a word that opens after a space, at
+    the top level, each of the three a cluster of its own, with every mark
+    before it decided however the text goes on (a closer found, with the
+    character after it that a closer is checked against, or a mark that can
+    open nothing). The spans then break at each stop, which wrapping them
+    does not see (`wrap_line` joins a style's neighbouring runs).
+    """
     spans: list[Span] = []
     plain: list[str] = []
+    end = len(text)
+    settled, counted, shown = stops is not None, 0, 0
 
     def take_plain() -> None:
         if plain:
@@ -379,12 +955,20 @@ def _inline_spans(text: str, style: Style, theme: Theme) -> list[Span]:
     index = 0
     while index < len(text):
         ch = text[index]
+        if settled and index and text[index - 1] == " " and ch != " " and _cluster_each(text, index):
+            take_plain()
+            shown += sum(len(span.text) for span in spans[counted:])
+            counted = len(spans)
+            stops.append((index, shown))  # type: ignore[union-attr]  # `settled` holds only with `stops`
         if ch == "\\" and text[index + 1 : index + 2] in _ESCAPABLE:
             plain.append(text[index + 1])
             index += 2
             continue
+        if ch == "\\":
+            settled = settled and index + 1 < end
         if ch == "`":
             code = _code_span(text, index)
+            settled = settled and code is not None and code[1] < end
             if code is None:
                 ticks = _run_of(text[index:], "`")
                 plain.append(ticks)
@@ -397,6 +981,9 @@ def _inline_spans(text: str, style: Style, theme: Theme) -> list[Span]:
             continue
         if ch == "[":
             link = _link(text, index)
+            if settled and link is None:  # stays plain only when its `]` is there and is not followed by `(`
+                close = text.find("]", index + 1)
+                settled = close >= 0 and close + 1 < end and text[close + 1] != "("
             if link is not None:
                 take_plain()
                 label, url, index = link
@@ -406,6 +993,9 @@ def _inline_spans(text: str, style: Style, theme: Theme) -> list[Span]:
                 continue
         if ch in "*_":
             emphasis = _emphasis(text, index)
+            if settled:
+                marker = text[index : index + 2] if text[index : index + 2] in ("**", "__") else ch
+                settled = emphasis[2] < end if emphasis else index + 2 < end and not _opens_emphasis(text, index, marker)
             if emphasis is not None:
                 take_plain()
                 inner, strong, index = emphasis

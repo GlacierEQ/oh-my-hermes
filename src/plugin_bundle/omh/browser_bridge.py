@@ -12,6 +12,35 @@ from time import time
 MUTATION_INTERCEPTION = "none"  # Hermes tool hooks are not last-mile interception.
 
 
+_IDENTITY_VARS = ("_SESSION_ID", "_BROWSER_CONTROL_PRINCIPAL",
+                  "_BROWSER_CONTROL_TRANSPORT_FAMILY", "_SESSION_MESSAGE_ID")
+
+
+def host_browser_capability():
+    """Feature-level API support only; never a grant or a cached verdict.
+
+    Hermes main removed the principal/transport seam. Neither user IDs nor
+    environment fallbacks establish an equivalent authenticated principal.
+    Missing APIs therefore remain unsupported, not reconstructed by OMH.
+    """
+    try:
+        from gateway import session_context
+        from tools import registry
+    except ImportError:
+        missing = ["gateway.session_context", "tools.registry"]
+    else:
+        missing = [name for name in _IDENTITY_VARS
+                   if not callable(getattr(getattr(session_context, name, None), "get", None))]
+        missing.extend(name for name in ("no_cache_check_fn", "check_fn_cache_scope")
+                       if not callable(getattr(registry, name, None)))
+        if not hasattr(registry, "CHECK_FN_CACHE_BYPASS"):
+            missing.append("CHECK_FN_CACHE_BYPASS")
+    return {"feature": "omh_browser", "supported": not missing,
+            "reason": "host_browser_api_supported" if not missing else "host_browser_identity_unsupported",
+            "missing_capabilities": missing,
+            "admission": "explicit_trusted_wrapper_required"}
+
+
 def _host_identity():
     """Require task-local host identity AND both host schema-cache bypasses.
 
@@ -46,6 +75,7 @@ class _Admission:
 def register(ctx, config):
     # An adapter is a trusted host-supplied object, never reconstructed from
     # model arguments, import paths, configuration code, or executable names.
+    ctx.browser_capability = host_browser_capability
     adapter = getattr(ctx, "browser_adapter", None)
     effects_enabled = (config.get("effects_enabled") is True
                        and callable(getattr(ctx, "browser_effect_approval", None))
@@ -66,7 +96,9 @@ def register(ctx, config):
 
         identity = _host_identity()
         if identity is None:
-            raise BrowserContractError("host_scope_unavailable")
+            capability = host_browser_capability()
+            detail = "" if capability["supported"] else ": " + capability["reason"] + ": " + ",".join(capability["missing_capabilities"])
+            raise BrowserContractError("host_scope_unavailable" + detail)
         admitted = _Admission(identity, text(task, 256), time() + number(ttl_seconds, 300))
         token = admission.set(admitted)
         try:
@@ -103,17 +135,17 @@ def register(ctx, config):
     def handler(args, **kwargs):
         current = available()
         if current is None:
-            return json.dumps({"status": "blocked", "reason": "admission_required"})
+            return json.dumps({"status": "blocked", "reason": "admission_required"}, ensure_ascii=False)
         operations = {"acquire", "act", "observe", "release"}
         if effects_enabled:
             operations |= {"effect_preview", "effect_execute", "effect_abort"}
         if not isinstance(args, dict) or not isinstance(args.get("operation"), str) or args["operation"] not in operations:
-            return json.dumps({"status": "blocked", "reason": "invalid_operation"})
+            return json.dumps({"status": "blocked", "reason": "invalid_operation"}, ensure_ascii=False)
         owner = current.identity[0]
         if kwargs.get("session_id", owner) != owner:
-            return json.dumps({"status": "blocked", "reason": "foreign_owner"})
+            return json.dumps({"status": "blocked", "reason": "foreign_owner"}, ensure_ascii=False)
         if args["operation"] == "acquire" and args.get("task") != current.task:
-            return json.dumps({"status": "blocked", "reason": "foreign_task"})
+            return json.dumps({"status": "blocked", "reason": "foreign_task"}, ensure_ascii=False)
         from omh.workflows.browser_adapter import BrowserContractError
 
         try:
@@ -130,7 +162,7 @@ def register(ctx, config):
                 result = lifecycle.operate(owner, args)
         except BrowserContractError as exc:
             result = {"status": "blocked", "reason": str(exc)}
-        return json.dumps(result, sort_keys=True)
+        return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
     def on_session_end(**kwargs):
         identity = _host_identity()

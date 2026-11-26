@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 
@@ -36,6 +37,7 @@ from ..coding.data_handling_policy import (
     SENSITIVE_WORK_CHAIN_CLAIM_BOUNDARY,
     data_handling_filtered_chain,
 )
+from ..coding.model_contracts import contract_effort_option
 from ..coding.model_routing import NON_GENERATIVE_MODEL_CLASS, REASONING_EFFORT_LADDER, model_class
 from ..local_store import atomic_write_text
 from ..plugin_bundle.omh.hermes_delegation import (
@@ -60,13 +62,17 @@ from ..plugin_bundle.omh.hermes_delegation import (
     unknown_route_labels,
 )
 from ..plugin_bundle.omh.model_chain_picker import (
+    apply_picker_changes,
     chain_text,
-    compose_override_document,
     picker_rows,
     read_override_document,
 )
 from ..install.config_adapter import display_skin_selection, read_config
-from ..skin_pack import effective_theme, skin_colors
+from ..skin_pack import effective_theme, read_launch_choice
+from ..system.stdin_probe import stdin_is_tty
+from ..tui.style import NO_COLOR, color_depth
+from ..tui.terminal import background_from_colorfgbg
+from ..tui.theme import DEFAULT_LAUNCH, LAUNCH_PRESETS, Theme, build_theme, with_launch_look, without_colour
 from .common import _paths
 from .model_chain_picker import pick_chains_interactively
 
@@ -189,6 +195,17 @@ def _state(omh_home, hermes_home=None) -> dict[str, object]:
     }
 
 
+def _print_prompt_cache_hint(hermes_home) -> None:
+    """One read-only hint when the main route's cache TTL is off or mis-set (config read only)."""
+    from ..maintenance.prompt_cache_route import prompt_cache_hint_lines
+
+    lines = prompt_cache_hint_lines(hermes_home)
+    if lines:
+        print("Prompt cache (read-only; `omh doctor` shows warmer stop reasons):")
+        for line in lines:
+            print(f"  {line}")
+
+
 def _print_state(state: dict[str, object]) -> None:
     print("Current model chains (category -> effective order):")
     for row in state["categories"]:
@@ -233,7 +250,7 @@ def _print_state(state: dict[str, object]) -> None:
             print("  none of these names a model family, so no chain is reordered. Record what one serves")
             print("  with `omh model-chains provider set <id> <kind>`.")
     else:
-        print("Linked Hermes providers: none found (a `hermes auth` login, a config provider, or a key name counts)")
+        print("Linked Hermes providers: none found (a `hermes auth` login, a config provider, a provider plugin, or a key name counts)")
     routes_status = str(state.get("routes_status", ""))
     if routes_status.startswith("invalid:"):
         # An absent document is the common case and says nothing; an
@@ -350,6 +367,7 @@ def cmd_model_chains_show(args: argparse.Namespace) -> int:
         _print_sensitive_state(state)
     else:
         _print_state(state)
+        _print_prompt_cache_hint(paths.hermes_home)
     return _sensitive_chain_exit_code(state)
 
 
@@ -411,14 +429,28 @@ def cmd_model_chains_set(args: argparse.Namespace) -> int:
     return 0
 
 
-def _active_palette(paths) -> dict[str, str]:
-    """The colours of the theme the OMH TUI opens with, so the picker matches it.
+def _picker_theme(paths) -> tuple[Theme, str]:
+    """The OMH TUI's theme as it opens, and the depth stdout paints at, so the picker matches it.
 
-    `effective_theme`'s order: the theme saved under the OMH home, else an
-    OMH palette `display.skin` names, else the default.
+    The skin is `effective_theme`'s (the theme saved under the OMH home, else an
+    OMH palette `display.skin` names, else the default), measured against a
+    light background `COLORFGBG` names (None: the palette's own dark one
+    stands in, as `omh hud` does), in the launch look saved beside it (the
+    default look for none or a name the TUI does not have). At the `NO_COLOR`
+    depth the theme carries no colour. A Hermes config it cannot read names no
+    skin, as in `omh hud`, so the picker still opens.
     """
-    theme, _source = effective_theme(paths.omh_home, display_skin_selection(read_config(paths.hermes_config_path)))
-    return skin_colors(theme.skin_name)
+    try:
+        hermes_skin = display_skin_selection(read_config(paths.hermes_config_path))
+    except (OSError, UnicodeDecodeError):
+        hermes_skin = ""
+    skin, _source = effective_theme(paths.omh_home, hermes_skin)
+    background = background_from_colorfgbg(os.environ)
+    saved = read_launch_choice(paths.omh_home)
+    look = saved if saved in LAUNCH_PRESETS else DEFAULT_LAUNCH
+    theme = with_launch_look(build_theme(skin, background), skin, background, look)
+    depth = color_depth(os.environ, sys.stdout.isatty())
+    return (without_colour(theme) if depth == NO_COLOR else theme), depth
 
 
 def cmd_model_chains_pick(args: argparse.Namespace) -> int:
@@ -434,22 +466,38 @@ def cmd_model_chains_pick(args: argparse.Namespace) -> int:
     paths = _paths(args)
     omh_home = paths.omh_home
     payload = picker_rows(
-        omh_home, hermes_home=paths.hermes_home, labels=MODEL_DISPLAY_LABELS, purposes=CHAIN_SURFACE_PURPOSES
+        omh_home,
+        hermes_home=paths.hermes_home,
+        labels=MODEL_DISPLAY_LABELS,
+        purposes=CHAIN_SURFACE_PURPOSES,
+        contract_option=contract_effort_option,
     )
-    changes = pick_chains_interactively(payload, use_color=_use_color(), palette=_active_palette(paths))
+    theme, depth = _picker_theme(paths)
+    changes = pick_chains_interactively(payload, use_color=_use_color(), theme=theme, depth=depth)
     if changes is None:
         print(f"Cancelled; {payload['path']} was not changed.")
         return 0
     if not changes:
         print("No changes.")
         return 0
-    try:
-        document = compose_override_document(read_override_document(omh_home), changes)
-        path = _write_document(omh_home, document)
-    except ValueError as exc:
-        print(f"omh: refused to write an invalid document: {exc}", file=sys.stderr)
+    result = apply_picker_changes(
+        omh_home, changes, hermes_home=paths.hermes_home, contract_option=contract_effort_option
+    )
+    if "error" in result:
+        print(f"omh: did not save: {result['error']}", file=sys.stderr)
         return 2
-    print(f"Saved {len(changes)} categor{'y' if len(changes) == 1 else 'ies'} to {path}.")
+    if result.get("warning"):
+        print(f"omh: warning: {result['warning']}", file=sys.stderr)
+    category_count = len(result.get("categories_changed", []))
+    identity_count = len(result.get("identities_changed", []))
+    if identity_count == 0:
+        print(f"Saved {category_count} categor{'y' if category_count == 1 else 'ies'} to {result['path']}.")
+    else:
+        parts = []
+        if category_count:
+            parts.append(f"{category_count} categor{'y' if category_count == 1 else 'ies'}")
+        parts.append(f"{identity_count} custom identit{'y' if identity_count == 1 else 'ies'}")
+        print(f"Saved {' and '.join(parts)}.")
     _print_state(_state(omh_home, paths.hermes_home))
     return 0
 
@@ -462,7 +510,7 @@ def _ultrafast_variant(
 
 
 def _stdin_is_tty() -> bool:
-    return sys.stdin.isatty()
+    return stdin_is_tty()
 
 
 def model_chains_interview(paths) -> int:

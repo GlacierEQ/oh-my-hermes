@@ -17,12 +17,25 @@ from .theme import Theme
 from .width import cell_width, wrap_line
 
 SHORTCUTS: tuple[tuple[str, str], ...] = (
-    ("Enter", "Sends the composer"),
-    ("\\ then Enter, Alt+Enter, Shift+Enter, Ctrl+J", "Adds a line"),
-    ("Ctrl+Enter", "Steers a running turn with the composer's text, on a terminal that tells it from Enter "
-                   "(/steer <text> steers on any terminal); idle, sends it as Enter does"),
-    ("Tab", "Completes a slash command, or the @ reference being typed; on an open menu, Enter takes the "
-             "highlighted row too, and sends a command already typed in full"),
+    ("Enter", "Sends the composer; while a turn runs, typed text goes into it now as a steer (shown as your prompt "
+              "above the working row, read at the next tool call); a slash command, a ! line, a prompt with images, "
+              "one sent in plan mode or behind queued lines queues for the turn's end instead (/stop, /steer, "
+              "/queue, /btw, /bg, /yolo, /effort, /reasoning <level> and the commands about this terminal run at "
+              "once), whatever Hermes' busy_input_mode says"),
+    ("\\ then Enter, Alt+Enter, Shift+Enter, Ctrl+J", "Adds a line; with a list or menu focused, Ctrl+J moves down instead. "
+                                                 "Alt+Enter and Shift+Enter still add a line in an open menu; "
+                                                 "backslash then Enter may accept a completion"),
+    ("Ctrl+Enter", "While a turn runs, sends the composer's text into it now as a steer (/steer <text> too); with "
+                   "images, stops the turn and sends the prompt with them as soon as it ends; idle, sends as Enter "
+                   "does"),
+    ("Ctrl+Enter, Ctrl+J", "While a turn runs, on an empty composer, send the oldest queued prompt into it now as a "
+                           "steer, or, with images, stop the turn and send it with them as soon as it ends; the row "
+                           "under the queue names the key (Ctrl+J where the terminal has not shown it tells Ctrl+Enter "
+                           "from Enter). A queued ! line, slash command, skill prompt or plan prompt waits its turn"),
+    ("Tab", "Completes the slash command or skill at the start of the input, a skill typed as /name after a "
+             "space, or the @ reference being typed; on an open menu, Enter takes the highlighted row too, and sends "
+             "a command already typed in full; a menu opened after a space leaves Enter and ↑ to the line until ↓ "
+             "moves into it"),
     ("Shift+Tab", "Cycles the input mode: normal, accept all (Hermes asks no approvals in this session), plan "
                   "(prompts go as /plan); while Hermes itself has approvals off, turns plan on and off"),
     ("Ctrl+T", "Steps the reasoning effort: low, medium, high, xhigh, max; the info line shows it as effort medium"),
@@ -31,39 +44,88 @@ SHORTCUTS: tuple[tuple[str, str], ...] = (
           "it and its output are not sent to the model"),
     ("?", "On an empty composer, shows this list; /keys does too"),
     ("↑ / ↓", "Move between the composer's rows, walk the input history at its first and last row "
-              "(earlier sessions' too, shared with hermes --tui), or move through an open completion menu"),
+              "(earlier sessions' too, shared with hermes --tui), or move through an open completion menu "
+              "(Ctrl+J / Ctrl+K and Ctrl+N / Ctrl+P move through the menu too)"),
+    ("Ctrl+N / Ctrl+P", "Move down / up in lists, menus, pickers and prompts; scroll one line in pagers, including /dag. "
+                         "Also work in CLI theme, model-chain and setup pickers"),
     ("Ctrl+R", "Searches the input history; Ctrl+R again finds an older match, Enter puts it in the composer, "
                "Esc leaves the composer as it was"),
     ("Ctrl+X", "Opens the /sessions picker"),
+    ("Alt+P", "Opens correction or dictionary actions at cursor; Cancel/Esc closes; never sends"),
+    ("Ctrl+S", "Opens the bot board, as /bots does: this machine's Hermes profiles, their gateways and sessions, "
+               "read-only"),
+    ("Ctrl+P", "Folds the plan above the composer to its header and the item it is on, or expands it again, while "
+               "a turn runs or between turns; the header says which on its right; on an open menu, Ctrl+P and Ctrl+N "
+               "move the menu instead"),
     ("↑", "On an empty composer with prompts queued, takes them back into the composer to edit; a queued shell line comes back on its own"),
-    ("↓", "On an empty composer while the agent view under the info line shows subagents, gives its rows the keys "
+    ("↓ / Ctrl+N", "On an empty composer while the agent view under the info line shows subagents, gives its rows the keys "
           "as the agent list; in a DAG run, to its folding tree"),
     ("← / →", "Move by a character; with Ctrl or Alt, by a word (Alt+B and Alt+F too)"),
     ("Home / End, Ctrl+A / Ctrl+E", "Go to the start or the end of the line"),
-    ("Backspace / Delete", "Delete a character, or a paste chip whole; Backspace on an empty composer removes "
-                           "the last attached image"),
+    ("Backspace / Delete", "Delete a character, or a paste chip or an [Image #N] token whole; deleting a token "
+                           "removes its image"),
     ("Ctrl+W, Alt+Backspace, Ctrl+Backspace", "Deletes the word before the caret (Ctrl+Backspace where the terminal reports it apart from Backspace)"),
-    ("Ctrl+U / Ctrl+K", "Delete to the start or the end of the line"),
+    ("Ctrl+U / Ctrl+K", "Delete to the start or the end of the line; with a list or menu focused, Ctrl+K moves up instead"),
     ("Ctrl+_ / Ctrl+Y", "Undo or redo an edit in the composer (Ctrl+_ is what Ctrl+- and Ctrl+/ send on most terminals); "
                         "a run of typed characters is one edit"),
-    ("Esc", "Closes the / or @ menu; on an empty composer, interrupts a running turn "
-            "(the activity row shows how long it has run, then interrupting…, and what you queued comes back to the "
-            "composer unsent); cancels a rewind you picked; "
+    ("Esc", "Closes the / or @ menu; in a subagent's session, goes back to main (in Vim INSERT the first Esc leaves INSERT); else interrupts a running turn, with a draft typed too, which stays in the "
+            "composer (the activity row shows how long it has run, then interrupting…, and what you queued comes back "
+            "to an empty composer unsent, or waits); cancels a rewind you picked; "
             "cancels an agent steer you picked and keeps what you typed; after an approval's tell row, "
             "sends nothing more and brings your draft back"),
-    ("Esc Esc", "With text, clears it and keeps it in this session's history; on an empty composer between turns, "
+    ("Esc Esc", "Between turns, with text, clears it and keeps it in this session's history; on an empty composer, "
                 "lists your prompts to rewind to (/rewind does too)"),
-    ("Ctrl+V", "Attaches the clipboard image"),
+    ("Esc (vim mode)", "With display.vim_mode on in Hermes' config, the composer starts in INSERT and Esc goes to "
+                       "NORMAL and does nothing else; in NORMAL, . repeats the last completed local change and [n]. "
+                       "overrides its count rather than multiplying it. Insert/change sessions complete on Escape and undo "
+                       "as one transaction; put repeats its captured payload even after another yank. External paste/image "
+                       "edits and oversized insertion sessions do not replace the saved change. Submit, clear, history/draft "
+                       "replacement, masked transitions and Vim toggles reset it; motion, yank and undo do not. Repeat "
+                       "is local to this composer, not a macro. In NORMAL, v enters character VISUAL; motions extend its inclusive atom "
+                       "selection, d/c/y delete, change or yank, and v or Esc cancels (Esc drops a pending command first). "
+                       "Visual j/k clamp to draft rows without history; counts before v or d/c/y do not scale the selection. "
+                       "Visual delete/change dot repeats the selected atom length forward, with [n]. scaling that length. "
+                       "In NORMAL, V enters VISUAL LINE over whole hard lines; v/V converts modes retaining endpoint columns, "
+                       "and V again cancels line selection. Linewise d/c/y use a linewise register without a terminal separator; "
+                       "put supplies it. Line delete/change dot repeats the selected hard-line count forward, with [n]. scaling that count. "
+                       "NORMAL-only gv restores the last completed selection with exact anchor/head, type and direction; its count is ignored (vl Esc h 9999gv restores the original two atoms). Escape, toggle-out and yank save it. Text or paste/image metadata generation changes, undo/redo, submit, clear, history/draft replacement, masking and Vim toggles invalidate it, even when text becomes identical again; failed/no-op edits do not. Resize and navigation preserve it; absent/stale gv is a consumed no-op and gv inside VISUAL is unsupported. Space is not a visual leader; Enter sends unchanged text and Ctrl+V invalidates active and saved selection before attaching the clipboard image, never block visual. "
+                       "In NORMAL, h l 0 ^ $ w W b B e E ge gE j k gg G move, f F t T and a character "
+                       "find on the line and ; , repeat the find, i a I A o O insert, x X dd D C cc S s r, d c y "
+                       "with a motion (operator j/k select logical hard lines, never wrapped rows or history; gg/G select "
+                       "through the first/last hard line, or an absolute line with a count), iw aw, a quote object (i or a with double quote, single quote or backtick; "
+                       "inner count 1 selects inside, count 2 or more includes the quotes, around includes quotes and "
+                       "adjacent blanks without extra pairs; quote objects never cross a logical line; empty inner y keeps "
+                       "the register and moves inside, d keeps register and caret, and c enters INSERT inside), or a bracket "
+                       "object (i or a with (, ), [, ], {, }; closing aliases identical; inner and around count selects enclosing ancestor; "
+                       "empty inner y keeps register and moves to interior, d keeps register and caret, and c enters INSERT at interior), p P, u and "
+                       "Ctrl+R edit, a motion or edit count scales or repeats, and Esc "
+                       "does what it does without vim mode, except that during a turn it takes two to interrupt on an "
+                       "empty composer, and two clear a draft as between turns. "
+                       "In NORMAL, Space is the leader: Space s opens sessions, Space b opens bots, Space p folds the "
+                       "plan, Space r or Space / searches history, Space m cycles the input mode, and Space t steps "
+                       "reasoning effort. Space Enter submits or steers typed text, or sends the oldest eligible queued "
+                       "prompt now on an empty composer; Space c interrupts a running turn, else clears the draft into "
+                       "session history. Esc or an unmapped key cancels the leader; Ctrl+C, Ctrl+O, Ctrl+L and Ctrl+Z "
+                       "cancel it and do what they always do. "
+                       "A picker taking input also cancels pending leader and Vim commands; a session picker waiting "
+                       "while you type leaves typing, leader shortcuts and Enter with the composer until ↑, ↓, Esc or "
+                       "Ctrl+C or Ctrl+N / Ctrl+P takes the picker; Ctrl+J / Ctrl+K still edit a typed draft. "
+                       "The info line says INSERT, NORMAL, VISUAL or VISUAL LINE, NORMAL · SPC while the leader is armed "
+                       "(steady block), or REPLACE while r waits for one character (steady underline, CSI 4 SP q). "
+                       "A non-character follower cancels r without editing or firing a mode shortcut; continuous R is unsupported"),
+    ("Ctrl+V", "Attaches the clipboard image as an [Image #N] token at the caret; with no image, pastes the clipboard's text"),
     ("Ctrl+O", "Opens the whole transcript with every detail (thinking, tool output, whole diffs) at its end, or, "
                "while Hermes asks something, the whole question (it answers nothing); q leaves it"),
     ("Ctrl+L", "Redraws the screen"),
     ("Ctrl+Z", "Suspends the OMH TUI to the shell, as Ctrl+Z does in any terminal program (Hermes stops with it); "
                "fg brings it back"),
-    ("Ctrl+C", "Clears the composer, interrupts a running turn, or (twice when idle) exits"),
+    ("Ctrl+C", "Clears the composer, else interrupts a running turn; a second press within 2 s exits, "
+               "mid-turn too; a prompt held for its pasted image comes back to the composer"),
     ("Ctrl+D", "On an empty composer, exits; with text, deletes the character ahead"),
     ("↑ / ↓ or ← / → then Enter", "On an approval, highlight allow once, allow this session or (when Hermes "
                                   "offers it) always allow, and allow it, or the last row to deny and tell Hermes "
-                                  "what to do instead; Enter alone denies and stops the running turn"),
+                                  "what to do instead; Enter alone allows once, and ↑ then Enter denies and stops "
+                                  "the running turn"),
     ("d, n", "On an approval, deny and stop the running turn"),
     ("1 to 9", "On a clarify question's list, pick that choice, or the last number opens the field for your own "
                "answer; ↑ / ↓ then Enter picks too, and any other character starts your own answer"),
@@ -75,18 +137,33 @@ SHORTCUTS: tuple[tuple[str, str], ...] = (
                                              "row (switch to that session, put that prompt in the composer to send "
                                              "again, or switch this session to that model), or close it; typing "
                                              "filters the list"),
-    ("↑ / ↓, Enter, Esc, ←, q, Ctrl+C", "In the agent list, move, open the highlighted agent's log (on main, "
-                                        "only leave), or go back; any other key does nothing there"),
+    ("Ctrl+R, Ctrl+D", "In the /sessions list, rename or delete the highlighted session: Ctrl+R makes the search box "
+                       "(the list's last row on a short terminal) its title (Enter renames it, Esc cancels, an empty title is refused); Ctrl+D asks on the "
+                       "row and a second Ctrl+D deletes it, any other key keeps it; the session you are in is not "
+                       "deleted, and what Hermes refuses is said on the row"),
+    ("↑ / ↓, Enter, Esc, ←, q, Ctrl+C", "In the agent list, move, show the highlighted agent's session on the "
+                                        "main screen (its log where Hermes cannot show it; on main, back to main's "
+                                        "session), or go back; any other key does nothing there"),
     ("x, s", "In the agent list, on an agent: x twice interrupts it; s steers it with the next line you send "
              "(Esc cancels)"),
-    ("↑ / ↓ or a click, Enter, Esc", "In the /theme picker, preview a launch look (spectrum, violet, gold, graphite) on the logo and the card, keep it, or put the one in use back; /theme <look> keeps one at once"),
-    ("Click", "On a row of the agent list, opens that agent's log (on main, only leaves the list)"),
+    ("↑ / ↓ or a click, Enter, Esc", "In the /theme picker, preview a launch look (spectrum, violet, gold, graphite, sakura, moonlit, aurora, ember, kanagawa-wave) on the logo, the card and the chrome, keep it, or put the one in use back; /theme <look> keeps one at once"),
+    ("Click", "On a row of the agent list, shows that agent's session as Enter does (on main, leaves the list "
+              "and goes back to main's session)"),
+    ("Enter, Esc", "In a subagent's session on the main screen, Enter sends what you typed to that agent (a steer "
+                   "while it runs; after it ended, a turn that continues it where Hermes can); Esc goes back to "
+                   "main; slash commands, ! lines and images stay in the composer"),
     ("← / →, q or Esc", "In an agent's log, show the agent before or after, or go back; the pager's keys scroll it"),
     ("Tab / n, Shift+Tab / p, Space / Enter, d", "In /dag, highlight the next or the previous box, fold or unfold "
                                                  "the highlighted one, or show or hide Node details; ↑ / ↓, "
                                                  "PageUp / PageDown and g / G scroll, q or Esc leaves"),
+    ("↑ / ↓, Enter or →, ← or Esc or q, r", "On the bot board, move, open a profile's sessions or a session's last "
+                                            "messages, go back (on the profiles, close the board), or read it again "
+                                            "now; it reads again every 5 s by itself"),
     ("j / k, Space / b, g / G, q or Esc", "In a pager (/history, /logs, an agent's log, this list), "
                                           "move a line, a page, or to either end, or leave"),
+    ("Drag, double click, triple click, wheel", "In a pager (/dag and the bot board too), select text and copy it "
+                                                "when you let go (without the rails), copy a word, copy a row, or "
+                                                "scroll three lines; the footer says what the copy did"),
 )
 
 TITLE = "OMH TUI keys"

@@ -26,7 +26,12 @@ from ..coding_contracts import (
     TASK_PROMPT_REQUIRED_SECTIONS,
 )
 from .action_gate import evaluate_action_gate, is_authority_shaped, split_handoff_safety_contract
-from .handoff_contract import HANDOFF_CONTRACT_KEY, build_handoff_contract, require_valid_handoff_contract
+from .handoff_contract import (
+    HANDOFF_CONTRACT_KEY,
+    build_handoff_contract,
+    independent_parts,
+    require_valid_handoff_contract,
+)
 from .prompting import build_executor_prompting_contract, render_executor_prompt_sections
 from ..executors import (
     EXTERNAL_CLI_PROFILES,
@@ -90,6 +95,7 @@ from ..system.tracker_content import normalize_tracker_content
 from ..isolation import build_isolation_plan
 from ..memory import validate_handoff_context_blocked, validate_handoff_context_pack, validate_project_memory_recall_pack
 from ..workflows.role_context_packs import build_role_context_pack, pin_role_context_pack
+from .pi_family_interop import PI_DISTRIBUTION_HOST, RUNTIME_USER_PHRASE
 from ..routing.coding_route_actions import named_executor_owners
 from ..routing.executor_cues import contains_boundary_phrase
 from ..routing.localization import normalized_phrase
@@ -249,9 +255,9 @@ _LOCAL_CAPABILITY_EXAMPLES = {
         "team or worker lanes",
         "MCP tools",
     ],
-    "omo-runtime": [
-        "OMO/oh-my runtime templates",
-        "OMO skills",
+    "pi-family-runtime": [
+        "pi-family/oh-my runtime templates",
+        "pi-family runtime skills",
         "worker lanes",
         "MCP tools",
     ],
@@ -268,16 +274,16 @@ _CODING_STATUS_AGENT_TERMS = (
     "coding agent",
     "coding-agent",
     "hermes coding",
-    "senpi",
+    PI_DISTRIBUTION_HOST,
     "opencode",
-    "omo runtime",
+    RUNTIME_USER_PHRASE,
     "코덱스",
     "클로드 코드",
     "클로드",
     "코딩 에이전트",
     "코딩-agent",
 )
-# Bare "pi" hides inside "api" and "pipeline", so the omo host CLI only counts
+# Bare "pi" hides inside "api" and "pipeline", so the pi host CLI only counts
 # through these right-bounded forms — and never when the message carries
 # Raspberry-Pi (or api) context, which names hardware, not the executor.
 # Right-bounding alone is not enough: "raspi status" and "spi status" contain
@@ -380,6 +386,8 @@ def build_coding_delegation_payload(
     model_chains: Mapping[str, Sequence[tuple[str, str]]] | None = None,
     requested_model: str = "",
     requested_effort: str = "",
+    requested_identity: str = "",
+    identity_config: Mapping[str, object] | None = None,
     input_representation: object = "text_only",
     transformation: Mapping[str, object] | None = None,
     now: str = "",
@@ -391,7 +399,7 @@ def build_coding_delegation_payload(
         "codex",
         "claude-code",
         "omx-runtime",
-        "omo-runtime",
+        "pi-family-runtime",
         "omc-runtime",
         "generic",
     }:
@@ -431,6 +439,8 @@ def build_coding_delegation_payload(
                 model_chains=dict(model_chains) if model_chains is not None else None,
                 requested_model=requested_model,
                 requested_effort=requested_effort,
+                requested_identity=requested_identity,
+                identity_config=identity_config,
                 handoff_contract=handoff_contract,
             )
         try:
@@ -473,6 +483,8 @@ def build_coding_delegation_payload(
         model_chains=model_chains,
         requested_model=requested_model,
         requested_effort=requested_effort,
+        requested_identity=requested_identity,
+        identity_config=identity_config,
         input_representation=input_representation,
         transformation=transformation,
         now=now,
@@ -511,6 +523,8 @@ def _build_coding_delegation_payload_native(
     model_chains: Mapping[str, Sequence[tuple[str, str]]] | None = None,
     requested_model: str = "",
     requested_effort: str = "",
+    requested_identity: str = "",
+    identity_config: Mapping[str, object] | None = None,
     input_representation: object = "text_only",
     transformation: Mapping[str, object] | None = None,
     now: str = "",
@@ -607,7 +621,8 @@ def _build_coding_delegation_payload_native(
     # `target_paths` declaration -- reused here (and re-derived there) rather
     # than threaded through the dataclass, since it is a pure, cheap scan of
     # the message and the two call sites read it for unrelated purposes.
-    verification_target_paths = _safety_preflight_target_paths(message)
+    target_scan_text = _plan_scan_text(message, plan_artifact)
+    verification_target_paths = _safety_preflight_target_paths(target_scan_text)
     # The explicit post-completion merge/deploy intent, read from the user's own
     # message only. It preserves the intent through the gate; it grants nothing.
     post_completion_directive = _user_merge_directive(message)
@@ -691,7 +706,7 @@ def _build_coding_delegation_payload_native(
     # intents, target paths — and rebuilding it there would scan the message a
     # second time to produce a value this build already has.
     preflight_request = _safety_preflight_request(
-        message,
+        target_scan_text,
         owner=proposed_selection.selected_executor_profile or "hermes",
         workflow=delegation.recommended_workflow,
         message_context_mode=message_context_mode,
@@ -878,6 +893,14 @@ def _build_coding_delegation_payload_native(
         category=model_route_category,
         recommendation=model_recommendation,
     )
+    _attach_identity_model_route(
+        payload,
+        selection.selected_executor_profile or executor_target,
+        requested_identity=requested_identity,
+        requested_model=requested_model,
+        requested_effort=requested_effort,
+        identity_config=identity_config,
+    )
     modality_route = _primary_modality_route(
         selected_executor=selection.selected_executor_profile,
         recommendation=model_recommendation,
@@ -1003,6 +1026,49 @@ def _primary_modality_route(
         "wire_model": wire_model,
         "endpoint_mode": endpoint_mode,
     }
+
+
+def _attach_identity_model_route(
+    payload: dict[str, object],
+    executor_profile: str,
+    *,
+    requested_identity: str,
+    requested_model: str,
+    requested_effort: str,
+    identity_config: Mapping[str, object] | None,
+) -> None:
+    """Resolve a declared identity into a bounded `model_route` on the payload.
+
+    The coding-delegation payload resolves no route of its own, so the
+    identity's chain lands here as the same `coding_model_route/v2` block a
+    fanout unit freezes: `identity_id`, `identity_fingerprint`, selected
+    model/effort, attempted trail, and the route claim boundary — never the
+    prompt. Only a declared `requested_identity` triggers the resolve; every
+    other payload stays byte-identical to before this attach point existed.
+    The name is the caller's declared selector, not read from the message.
+    """
+    if not str(requested_identity or "").strip():
+        return
+    from .model_routing import resolve_model_route
+
+    route = resolve_model_route(
+        executor_profile,
+        requested_identity=str(requested_identity).strip(),
+        requested_model=requested_model,
+        requested_effort=requested_effort,
+        identity_config=identity_config,
+    )
+    payload["model_route"] = route
+    handoff = next(
+        (
+            value
+            for key in ("executor_handoff", "runtime_handoff", "prompt_handoff")
+            if isinstance((value := payload.get(key)), dict)
+        ),
+        None,
+    )
+    if handoff is not None:
+        handoff["model_route"] = route
 
 
 def _attach_model_routing_metadata(
@@ -1496,6 +1562,24 @@ def _is_preflight_filesystem_target(token: str) -> bool:
     )
 
 
+def _plan_scan_text(message: str, plan_artifact: dict[str, object] | None) -> str:
+    """What the target scan reads for a supplied plan: the message minus an intact reviewed body.
+
+    With `--from-plan` the message carries the whole plan file. A reviewed body is
+    text a reviewer wrote after the person did, so a path inside it (a results
+    file, a forbidden `~/.ssh`, an endpoint) is not a target the user named.
+    Everything else -- title, task, generated sections, a scaffold -- is scanned
+    exactly as before, so nothing the person wrote can move the gate from deny to
+    allow. The body is cut only between markers whose random nonce was written
+    with the file and whose digest matches; any doubt leaves the whole message.
+    """
+    if not plan_artifact or not plan_artifact.get("path"):
+        return message
+    from ..workflows.hermes_planning import scan_text_without_reviewed_body
+
+    return scan_text_without_reviewed_body(message)
+
+
 def _safety_preflight_target_paths(message: str, *, excluded_path: str = "") -> list[str]:
     """Filesystem targets the user named in the message, before prompt expansion.
 
@@ -1938,7 +2022,7 @@ def _names_sole_external_executor(message: str) -> bool:
     member is the *sole* named owner. A user who names one external CLI with an
     imperative has already made the explicit owner choice, so the delegation
     path yields the same delegate outcome for Codex that it always has for
-    Claude Code. Hermes coding and the omo-runtime family are runtime owners,
+    Claude Code. Hermes coding and the pi-family-runtime family are runtime owners,
     not external CLIs, and stay on the retained-workflow clarify outcome; a
     message naming more than one owner is a genuine owner-comparison question.
     Broadening this detection to either case regresses those clarifications.
@@ -2099,7 +2183,8 @@ def _action_for(
             # `named_coding_agent` above is the one thing strong enough to
             # override that case, and only when the owner is named in the
             # message itself. Callers thread this only from genuine per-run
-            # provenance (see `_resolved_executor_for_delegate` and the
+            # provenance (`--explicit-owner-choice` on `coding delegate`, whose
+            # `--executor` default comes from `_resolved_executor`, and the
             # wrapper's `explicit`/`message_mention` executor-resolution
             # sources); a caller-default or learned-preference resolution
             # never sets it.
@@ -2587,7 +2672,7 @@ def _runtime_handoff(
             "Use the original task message as the runtime request.",
             f"Run {label} with the recommended OMH workflow unless local runtime routing has stronger evidence.",
             "For Hermes-owned coding, use OMH coding skills directly instead of pretending a separate executor ran.",
-            "For OMX/OMO/OMC, treat the runtime as the chosen oh-my execution layer, not a plain prompt.",
+            "For OMX, pi-family, or OMC runtimes, treat the runtime as the chosen oh-my execution layer, not a plain prompt.",
             "Keep prepared runtime state separate from observed runtime evidence.",
         ],
         "non_goals": [
@@ -2767,7 +2852,7 @@ def _local_capability_fallback(profile: str) -> str:
         "generic": "plain generic executor",
         "hermes": "plain Hermes runtime",
         "omx-runtime": "plain OMX runtime",
-        "omo-runtime": "plain OMO runtime",
+        "pi-family-runtime": "plain pi-family runtime",
         "omc-runtime": "plain OMC runtime",
     }
     label = fallback_labels.get(profile, f"plain {executor_label(profile)}")
@@ -2997,7 +3082,7 @@ def _local_capability_prompt_block(profile: str, label: str) -> str:
 
 
 def _runtime_local_capability_prompt_block(profile: str, label: str) -> str:
-    runtime_examples = "OMX/OMO/OMC templates"
+    runtime_examples = "OMX/pi-family/OMC templates"
     if profile == "hermes":
         runtime_examples = "Hermes/OMH runtime skills and coding-team paths"
     return (
@@ -3016,6 +3101,27 @@ def _runtime_local_capability_prompt_block(profile: str, label: str) -> str:
     )
 
 
+# OpenAI's documented trigger phrase (learn.chatgpt.com, agent-configuration/
+# subagents; "Prompting GPT-6.2 in Codex", read 2026-11-20, official): naming
+# subagents gives Codex permission to decide when parallel work helps. Codex
+# template only, and only beside two or more declared independent parts.
+CODEX_SUBAGENT_RULE = "- Use subagents as needed: the parts listed above can move ahead independently."
+
+
+def _independent_parts_block(handoff_contract: Mapping[str, Any] | None) -> str:
+    """List the declared parts that depend on nothing, or '' for fewer than two.
+
+    The parallel-parts signal is structural: a `handoff_contract/v1` `parts[]`
+    entry with no `depends_on`. Acceptance criteria are never counted, because
+    two criteria can describe one indivisible change.
+    """
+    parts = independent_parts(handoff_contract)
+    if len(parts) < 2:
+        return ""
+    lines = "".join(f"- `{part['id']}`: {part['title']}\n" for part in parts)
+    return f"Parts that depend on no other part:\n{lines}\n"
+
+
 def _codex_prompt_template(
     delegation: CodingDelegation,
     *,
@@ -3030,6 +3136,7 @@ def _codex_prompt_template(
         "Executor-local workflow invocation is not observed available.\n"
         "Keep the dispatched task text generic.\n"
     )
+    independent_parts_block = _independent_parts_block(handoff_contract)
     return (
         "You are Codex, acting as the coding executor for a Hermes-orchestrated request.\n\n"
         "Executor target: codex\n"
@@ -3040,10 +3147,12 @@ def _codex_prompt_template(
         "Prepared status: `prepared_not_observed`\n\n"
         "{local_capability_prompt}"
         "{task_prompt_shape}"
+        "{independent_parts}"
         "Rules:\n"
         "- Implement only after inspecting the repository and confirming the scope.\n"
         "- Preserve unrelated behavior and user changes.\n"
         "- Run targeted verification and report exact evidence.\n"
+        "{subagent_rule}"
         "- Do not say Hermes performed the implementation; Hermes prepared this handoff.\n\n"
         "Report local executor capabilities only with evidence refs.\n\n"
         "{prompt_sections}"
@@ -3054,6 +3163,8 @@ def _codex_prompt_template(
         intent=delegation.intent,
         local_capability_prompt=_local_capability_prompt_block("codex", "Codex"),
         task_prompt_shape=_task_prompt_shape_block(),
+        independent_parts=independent_parts_block,
+        subagent_rule=CODEX_SUBAGENT_RULE + "\n" if independent_parts_block else "",
         prompt_sections=_executor_prompt_sections(delegation, prompting_contract, handoff_contract),
     )
 

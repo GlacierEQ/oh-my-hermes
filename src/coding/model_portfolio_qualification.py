@@ -85,37 +85,58 @@ QUALIFICATION_HOLDS: Final[dict[str, dict[str, object]]] = {
 # Re-reviewed 2026-10-13 against the owner's table of that date: every slot
 # below is that decision, editorial except the `unspecified-high` GPT head,
 # which rests on the 2026-09-05 live-model-tools measurement of its
-# predecessor (gpt-5.6-sol); GPT-6.1 Sol itself is unmeasured there.
+# predecessor (gpt-5.6-sol); GPT-6.1 Sol and GPT-6.2 Sol are unmeasured there.
+# The six routing-recipe categories (google-search, x-search, review, swarm,
+# forensics, synthesize) were added on 2026-10-28 from the owner's published
+# recipe; every slot they add is editorial and unmeasured.
+# ultrabrain gained Claude Fable 5.1 (head) and Claude Opus 5.5 (third) on
+# 2026-11-09 (owner decision), editorial and unmeasured. Claude Fable 5.2
+# took every Fable 5.1 slot at the same effort on 2026-11-10 (owner
+# decision), editorial and unmeasured. The same day Fable 5.2 moved ahead of
+# Opus 5.5 to head visual-engineering (owner decision); the slot set did not
+# change, editorial and unmeasured. GPT-6.2 Astra took every GPT-6 Astra slot
+# and GPT-6.2 Sol every GPT-6.1 Sol slot, each at the same effort, on
+# 2026-11-18 (owner decision), editorial and unmeasured; the `unspecified-high`
+# GPT head's measurement is still of gpt-5.6-sol.
 RECOMMENDATION_DECISIONS: Final[dict[str, tuple[str, ...]]] = {
-    "claude-fable-5-1": (
+    "claude-fable-5-2": (
         "categories:architect", "categories:artistry", "categories:capable",
-        "categories:visual-engineering", "role_suggestions:main",
+        "categories:ultrabrain", "categories:visual-engineering", "role_suggestions:main",
     ),
     "claude-haiku-5-5": ("categories:quick", "categories:simple-work"),
     "claude-opus-5-5": (
         "categories:architect", "categories:artistry", "categories:capable", "categories:deep",
-        "categories:deep-work", "categories:unspecified-high", "categories:visual-engineering",
-        "categories:writing", "last_resort:any", "role_suggestions:main",
+        "categories:deep-work", "categories:forensics", "categories:google-search",
+        "categories:review", "categories:synthesize", "categories:ultrabrain", "categories:unspecified-high",
+        "categories:visual-engineering", "categories:writing", "last_resort:any", "role_suggestions:main",
     ),
     "claude-sonnet-5-5": ("categories:unspecified-low", "categories:writing"),
-    "deepseek-flash": ("categories:simple-work", "categories:unspecified-low"),
-    "gemini-3.1-pro": (
-        "categories:artistry", "categories:visual-engineering", "categories:writing",
+    "deepseek-flash": ("categories:simple-work", "categories:swarm", "categories:unspecified-low"),
+    "gemini-4-argon": (
+        "categories:artistry", "categories:google-search", "categories:synthesize",
+        "categories:visual-engineering", "categories:writing", "categories:x-search",
         "domain_affinities:x_platform_data",
     ),
     "glm-5.3": ("categories:unspecified-low",),
-    "glm-5.3-flash": ("categories:quick",),
-    "gpt-6-astra": ("categories:architect", "categories:ultrabrain", "role_suggestions:main"),
-    "gpt-6-luna": ("categories:quick", "categories:simple-work"),
-    "gpt-6.1-sol": (
-        "categories:capable", "categories:deep", "categories:deep-work", "categories:unspecified-high",
+    "glm-5.3-flash": ("categories:quick", "categories:swarm"),
+    "gpt-6-luna": ("categories:quick", "categories:simple-work", "categories:swarm"),
+    "gpt-6.2-astra": (
+        "categories:architect", "categories:forensics", "categories:ultrabrain", "role_suggestions:main",
+    ),
+    "gpt-6.2-sol": (
+        "categories:capable", "categories:deep", "categories:deep-work", "categories:google-search",
+        "categories:review", "categories:synthesize", "categories:unspecified-high",
         "categories:unspecified-low", "last_resort:any", "role_suggestions:main",
     ),
+    # Grok 4.7 heads x-search (owner recipe, 2026-10-28), editorial and
+    # unmeasured; the x_platform_data affinity stays on Grok Build 0.1.
+    "grok-4.7": ("categories:x-search",),
     "grok-build-0.1": ("domain_affinities:x_platform_data",),
     "kimi-k3.1-pro": (
         "categories:architect", "categories:artistry", "categories:capable", "categories:deep",
-        "categories:quick", "categories:unspecified-high", "categories:visual-engineering",
-        "categories:writing", "domain_affinities:x_platform_data", "role_suggestions:main",
+        "categories:forensics", "categories:quick", "categories:review", "categories:unspecified-high",
+        "categories:visual-engineering", "categories:writing", "categories:x-search",
+        "domain_affinities:x_platform_data", "role_suggestions:main",
     ),
 }
 # Each row carries its own decision date: retirements land one onboarding at
@@ -149,6 +170,15 @@ RETIREMENT_DECISIONS: Final[dict[str, dict[str, object]]] = {
         ("gpt-6-sol", "gpt-6.1-sol", "all_shipped_chains", "2026-10-01"),
         ("claude-haiku-4-5", "claude-haiku-5-5", "all_shipped_chains", "2026-10-13"),
         ("kimi-k3", "kimi-k3.1-pro", "all_shipped_chains", "2026-10-24"),
+        # Google made Gemini 4 Argon generally available on 2026-10-13.
+        ("gemini-3.1-pro", "gemini-4-argon", "all_shipped_chains", "2026-10-28"),
+        # Anthropic released Claude Fable 5.2 on 2026-11-09; it took every
+        # Fable 5.1 slot, the ultrabrain head included.
+        ("claude-fable-5-1", "claude-fable-5-2", "all_shipped_chains", "2026-11-10"),
+        # OpenAI released GPT-6.2 Astra and GPT-6.2 Sol on 2026-11-17; each
+        # took every slot of the line's previous generation.
+        ("gpt-6-astra", "gpt-6.2-astra", "all_shipped_chains", "2026-11-18"),
+        ("gpt-6.1-sol", "gpt-6.2-sol", "all_shipped_chains", "2026-11-18"),
     )
 } | {
     # Qwen3-Coder (2025) left its only slot on 2026-10-13 and no Qwen-line

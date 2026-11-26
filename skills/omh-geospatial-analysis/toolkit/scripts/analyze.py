@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import math
@@ -46,12 +47,24 @@ def system_alias(part):
         return False
 
 
+def is_link(part):
+    # From Python 3.14, Path.is_symlink() swallows every OSError, so an entry
+    # under a directory that cannot be searched reads as "not a link". lstat it
+    # first: a missing entry is fine, any other error means it cannot be checked.
+    try:
+        os.lstat(part)
+    except OSError as exc:
+        if exc.errno not in (errno.ENOENT, errno.ENOTDIR):
+            raise ValueError(f"path could not be checked: {exc.strerror}") from exc
+    return part.is_symlink()
+
+
 def safe_path(value):
     path = Path(value)
     if ".." in path.parts:
         raise ValueError("path traversal is not accepted")
     path = path.absolute()
-    if any(part.is_symlink() and not system_alias(part) for part in (path, *path.parents)):
+    if any(is_link(part) and not system_alias(part) for part in (path, *path.parents)):
         raise ValueError("symlink paths are not accepted")
     return path
 
@@ -172,6 +185,31 @@ def bounded_json_size(value, limit, level=0):
     return used
 
 
+def mercator_family(crs):
+    """True for Web Mercator (EPSG:3857) and plain Mercator, whose planar areas are not ground areas."""
+    operation = getattr(crs, "coordinate_operation", None)
+    method = (operation.method_name if operation is not None else "").lower()
+    return method.startswith("mercator") or "pseudo mercator" in method or "auxiliary sphere" in method
+
+
+# The shipped synthetic fixture, by the digest of its two example files: a label a layer can carry is
+# not evidence that it is the fixture.
+FIXTURE_DIGESTS = frozenset({
+    "2fcda5f6bc3d34ac0c4df7ae75d7c62d1ebb0597833cf326ff89141a7234b492",
+    "fb712b2ca917bb0ec9431c6dd76b9660113fb48f65b6ca78c17af3a9cb841bd8",
+})
+
+
+def require_area_safe_target(target_is_mercator, layer_digests):
+    """Raise unless the target CRS may measure these layers: Mercator-family targets measure only the shipped fixture.
+
+    The message does not say how to qualify, so a real layer is never relabelled to pass.
+    """
+    if target_is_mercator and not all(item in FIXTURE_DIGESTS for item in layer_digests):
+        raise ValueError("Web Mercator and Mercator distort area (about 1.6x at 38 degrees latitude): "
+                         "choose an equal-area or local projected metre CRS for the study extent")
+
+
 def compute(args, left, right, shapely, pyproj):
     """Do real polygon overlay. Imports remain inside explicit invocation only."""
     from shapely.geometry import shape, mapping
@@ -187,6 +225,7 @@ def compute(args, left, right, shapely, pyproj):
                 or any(axis.unit_conversion_factor != 1.0 or axis.unit_name.lower() not in ("metre", "meter")
                        for axis in target.axis_info)):
             raise ValueError("measurement CRS must be projected with metre axes; geographic degree area/distance is refused")
+        require_area_safe_target(mercator_family(target), (digest(left[1]), digest(right[1])))
         crs_left, crs_right = pyproj.CRS(args.input_crs), pyproj.CRS(args.overlay_crs)
         def checked(geom, crs):
             if geom.is_empty or not geom.is_valid or geom.geom_type not in ("Polygon", "MultiPolygon"):
@@ -267,7 +306,7 @@ def compute(args, left, right, shapely, pyproj):
             "pair_area_sum_m2": math.fsum(float(g.area) for g in intersections),
             "pair_perimeter_sum_m": math.fsum(float(g.length) for g in intersections),
             "union_area_m2": float(unary_union(intersections).area) if intersections else 0.0,
-            "limitations": ["Planar measurements in the declared target CRS, not geodesic ground truth.",
+            "limitations": ["Planar measurements in the declared target CRS, not geodesic ground truth; check the CRS preserves area for the study extent.",
                 "Pair sums can double-count overlapping source features; union area removes duplicate coverage.",
                 "Synthetic fixtures are not public-world findings. No map, raster, buffer or nearest-distance result."]}
         return result, summary

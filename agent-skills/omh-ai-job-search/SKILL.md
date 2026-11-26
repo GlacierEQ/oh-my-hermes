@@ -1,6 +1,6 @@
 ---
 name: "omh-ai-job-search"
-description: "[omh] Career search to interview: find verified opportunities, tailor evidence-grounded applications and track confirmed outcomes. Use when the user says: ai-job-search, job search, evaluate this job posting, tailor my resume, tailor my cv, prepare for my job interview, track my job applications, draft my cover letter."
+description: "[omh] Career search to interview: find verified opportunities…"
 license: MIT
 metadata:
   hermes:
@@ -21,7 +21,7 @@ Cross-session career work needs stable posting identity, candidate-evidence link
 
 ## First Steps
 
-- Read `toolkit/README.md` and `references/execution-and-qa.md`; load only the relevant profile/discovery, fit/drafting or interview/outcomes reference for the current action.
+- Read `toolkit/README.md` (`skill_view(name='omh-ai-job-search', file_path='toolkit/README.md')`) and `references/execution-and-qa.md`; load only the relevant profile/discovery, fit/drafting or interview/outcomes reference for the current action.
 - Confirm an approved private workspace outside the product checkout through the active profile; ask only action-specific questions and keep group replies public-safe.
 - Actually invoke `toolkit/scripts/job_state.py` through the host terminal: validate captures, merge approved local tracking input, then summary and read-back; produce requested documents rather than stopping at a prepared card.
 
@@ -41,9 +41,9 @@ Good example:
 
 Bad example:
 
-- Prompt: Debug a failed cron job in the application server.
-- Expected behavior: Use the debugging owner; do not collect career facts.
-- Why: Generic task vocabulary does not establish a career request.
+- Prompt: Screen these 40 resumes for our backend opening and rank them.
+- Expected behavior: Route to `omh-people-ops`; this skill serves the candidate, not the employer.
+- Why: Hiring vocabulary appears in both, but only the candidate side is a career request here.
 
 ## Completion Checklist
 
@@ -86,7 +86,7 @@ Required inputs:
 Expert clarification questions:
 - `requested career action`
   - English: Which career action is needed now: discovery, fit, tailoring, interview preparation or tracking?
-  - Korean: Which career action is needed now: discovery, fit, tailoring, interview preparation or tracking?
+  - Korean: 지금 필요한 구직 작업은 무엇인가요: 공고 탐색, 적합도 판단, 서류 맞춤 작성, 면접 준비, 지원 현황 관리 중 어느 것인가요?
 
 Expected outputs:
 

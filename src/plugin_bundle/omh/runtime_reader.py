@@ -16,11 +16,19 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, Sequence
 
+from .pi_family_names import canonical_progress_record
 from .approval_bypass import effective_approval_bypass
 from .awareness_delivery import _awareness_delivery_lock
-from .delegation_graph import GRAPH_LINGER_SECONDS, build_delegation_graph, inactive_graph
+from .catch_log import read_catches
+from .delegation_graph import (
+    GRAPH_LINGER_SECONDS,
+    build_delegation_graph,
+    dag_run_choices,
+    graph_segments,
+    inactive_graph,
+)
 from .delegation_ledger import LEDGER_MAX_AGE_SECONDS, newest_ledger_session
 from .hermes_delegation import _CHILD_SELECT_LIMIT, read_hermes_native_subagents
 from .kanban_board_reader import conversation_session_ids, kanban_db_path, read_kanban_lanes
@@ -110,6 +118,8 @@ from .iso_datetime import strict_fromisoformat
 STATUS_SCHEMA_VERSION = "omh_status/v1"
 HUD_SCHEMA_VERSION = "omh_hud/v1"
 HUD_PRESETS = {"minimal", "focused", "full"}
+# A run record is history; only a recent update suggests work is still going on.
+RUNTIME_ACTIVE_WINDOW_SECONDS = 1800
 # How long a fully-done plan keeps rendering after its last update.
 ALL_DONE_TODO_LINGER_SECONDS = 15 * 60
 TODO_DISPLAY_ITEM_LIMIT = 3
@@ -149,6 +159,11 @@ TODO_STALL_CLAIM_BOUNDARY = (
 # own per-source bound (`hermes_delegation._ROW_LIMIT`); the TUI widget
 # applies its viewport clamp on top and names anything hidden with `+N more`.
 ACTIVITY_ROW_LIMIT = 8
+# The reading session's newest catches the HUD carries (`catch_log`). The OMH
+# TUI prints each one once, as it first sees it, and polls every two to eight
+# seconds; each kind is latched per streak, window or turn, so more than this
+# landing between two polls is not a shape a session produces.
+HUD_CATCH_LIMIT = 4
 # The native reader is asked for every child row its query read (`hermes_delegation._CHILD_SELECT_LIMIT`), and the
 # HUD applies `ACTIVITY_ROW_LIMIT` itself, so it knows which rows it did not list.
 NATIVE_ROW_SCAN_LIMIT = _CHILD_SELECT_LIMIT
@@ -210,6 +225,7 @@ _FANOUT_GRAPH_STATUSES = {
     "already_completed",
     "dry_run_planned",
     "capability_snapshot_invalid",
+    "owner_profile_renamed",
     "route_unresolved",
     "modality_unknown",
     "modality_unsupported",
@@ -242,6 +258,16 @@ HUD_FANOUT_CACHE_LOCK_SECONDS = 1.0
 # with the files it saw. A coarse mtime does not hide a rewrite: `write_progress_binding` replaces the file
 # atomically (a temp file renamed over it), so each version is a new inode while the old one is still live.
 _hud_binding_orders: dict[Path, tuple[tuple[int, int, int, int], str | None]] = {}
+# The same idea for the latency-sensitive readers (`read_omh_activity`, which `pre_llm_call` runs every turn, and
+# `read_omh_status`): per runtime directory, what the last read learned from each binding file (its identity, its
+# `updated_at` or None, and the validated binding) and from each surviving progress directory (the identities of
+# its binding, event log and report log, and the item built from them). A file whose identity is unchanged is not
+# opened again; every other file is read exactly as before. Each read replaces its directory's maps with the files
+# it saw, and only the most recent `_PROGRESS_READ_CACHE_DIRS` directories are kept.
+_FileIdentity = tuple[int, int, int, int]
+_progress_read_cache: dict[Path, tuple[dict[Path, tuple[_FileIdentity, str | None, dict[str, Any] | None]],
+                                       dict[Path, tuple[tuple[_FileIdentity | None, ...], dict[str, Any]]]]] = {}
+_PROGRESS_READ_CACHE_DIRS = 8
 
 
 def _expand_path(value: str | Path) -> Path:
@@ -572,14 +598,46 @@ def _child_names(directory: Path) -> list[str]:
 
 
 def _child_files(directory: Path, *relative: str) -> list[Path]:
-    """Return every existing `directory/<child>/*relative` file (children read by `_child_names`)."""
-    candidates = [directory.joinpath(name, *relative) for name in _child_names(directory)]
-    return [
-        candidate
-        for candidate in candidates
-        if not _contains_symlink(candidate, root=directory)
-        and candidate.is_file()
-    ]
+    """Return every existing `directory/<child>/*relative` file (children read by `_child_names`).
+
+    The same refusal as `_contains_symlink(candidate, root=directory)` for each candidate, which a hook that
+    runs every turn pays once per child: no component from the candidate up to `directory` and no `directory`
+    itself may be a symlink. `directory` is the same path for every candidate, so it is checked once per call
+    rather than once per child, and each component with one `lstat` rather than through pathlib.
+    """
+    names = _child_names(directory)
+    if not names or _is_symlink(directory):
+        return []
+    found: list[Path] = []
+    base = os.fspath(directory)
+    for name in names:
+        parts = (name, *relative)
+        component = base
+        refused = False
+        prefixes: list[str] = []
+        for part in parts:
+            component = os.path.join(component, part)
+            prefixes.append(component)
+        for prefix in prefixes:
+            if _is_symlink(prefix):
+                refused = True
+                break
+        if refused:
+            continue
+        try:
+            if stat.S_ISREG(os.stat(prefixes[-1]).st_mode):
+                found.append(directory.joinpath(*parts))
+        except (OSError, ValueError):
+            continue
+    return found
+
+
+def _is_symlink(path: str | Path) -> bool:
+    """`Path.is_symlink()` without the Path: False when the path cannot be lstat'ed, as pathlib answers."""
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode)
+    except (OSError, ValueError):
+        return False
 
 
 def _hud_child_files(directory: Path, *relative: str) -> list[Path]:
@@ -650,6 +708,9 @@ def _summarize_run(
         "ci_status": str(ci.get("status", "not_observed" if ci else "unknown")),
         "merge_observed": _bool_from_record(merge),
         "merge_status": str(merge.get("status", "not_observed" if merge else "unknown")),
+        # Recency (`_hud_runtime_summary`) reads these; without them every real run reads as history.
+        "created_at": str(run.get("created_at") or ""),
+        "updated_at": str(run.get("updated_at") or ""),
     }
     lifecycle = _journal_projection_for_run(run_dir, legacy, journal_events)
     _apply_lifecycle_to_run_summary(legacy, lifecycle)
@@ -881,7 +942,7 @@ def _later_status(current: str, candidate: str) -> str:
 def _ordered_activity_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Running first, then blocked, then done; settled rows newest-first.
 
-    Display-priority ordering learned from OMO's DAG status widget: running
+    Display-priority ordering learned from the pi-family runtime's DAG status widget: running
     work outranks everything, and a late failure must never be pushed off
     screen by older completed rows. Running rows keep dispatch order. The
     helper orders only — the call site applies ACTIVITY_ROW_LIMIT and counts
@@ -927,8 +988,14 @@ def read_omh_hud(
     session_scoped: bool = False,
     tui_identity_expected: bool = False,
     delegation_graph: bool = True,
+    dag_run: str | None = None,
+    dag_open: Sequence[int] = (),
 ) -> dict[str, Any]:
     """The HUD payload for one reading session.
+
+    ``dag_run`` is for a pane that lets the person switch between the session's dag runs: a string (empty for the
+    newest) draws that run and adds ``dag_runs``, the runs to choose from; ``None`` leaves both out. ``dag_open`` are
+    the graph's layers that pane holds open, sent whole (`delegation_graph._bounded`).
 
     Without ``delegation_graph`` the payload's graph is left inactive
     (``not_requested``) unread: a reader that only wants the status line, or
@@ -1014,12 +1081,17 @@ def read_omh_hud(
         # arguments. The stage is the one the gate RECORDED for this session,
         # so a surface cannot show an escalation the gate is withholding.
         "repeat": tool_calls["repeat"],
+        # The moments OMH caught a model mistake in the reading session, newest
+        # last: a kind and small integers, each with the file-wide `seq` the
+        # OMH TUI prints it by once. Scoped like the repeat block above, and
+        # empty without a reading session, never a list across sessions.
+        "catches": read_catches(home, reading[0], limit=HUD_CATCH_LIMIT),
         # Effective approval-bypass (yolo) state, read from the host's own
         # persisted surfaces (session row's /yolo flag, approvals.mode) so a
         # toggle between turns shows on the next widget poll; the hook
         # ledger answers only when neither surface speaks. The [OMH] status
         # line renders it as "yolo mode: on/off".
-        "yolo": effective_approval_bypass(str(home), str(hermes)),
+        "yolo": effective_approval_bypass(str(home), str(hermes), session_id=reading[0] if scoped else ""),
         "evidence_boundary": (
             "HUD is metadata-only. Prepared handoffs are not execution, review, CI, merge, or token-usage evidence. "
             "Todo items are plan declarations, not execution evidence."
@@ -1137,16 +1209,33 @@ def read_omh_hud(
         payload["delegation_graph"] = inactive_graph("explicit_off", scope="session" if scoped else "global")
     else:
         graph_session = reading[0] if scoped else newest_ledger_session(home, now=time.time())
+        # The fanout record is the home's. A pane that names its chat (`dag_run` set, a session named) is not offered
+        # a fanout whose dispatch names another chat as its origin; one that names this chat is drawn as this chat's,
+        # and one that names none (still running, or recorded before origins were) is drawn as the home's, as before.
+        pane_named = dag_run is not None and bool(reference)
+        fanout = _hud_verified_fanout(fanout_record)
+        origin = _hud_fanout_origin(fanout)
+        own_fanout = pane_named and bool(origin) and origin in {graph_session, *graph_segments(hermes, graph_session)}
+        if pane_named and origin and not own_fanout:
+            fanout = None
         payload["delegation_graph"] = build_delegation_graph(
             home,
             hermes,
             graph_session,
-            fanout=_hud_verified_fanout(fanout_record),
+            fanout=fanout,
             scope="session" if scoped else "global",
+            dag_run=dag_run or "",
+            keep_dag=dag_run is not None,
+            open_layers=dag_open,
+            layered=dag_run is not None,
         )
+        if own_fanout and payload["delegation_graph"].get("source") == "fanout":
+            payload["delegation_graph"]["scope"] = "session"
+        if dag_run is not None and scoped:
+            payload["dag_runs"] = dag_run_choices(home, hermes, graph_session)
     payload["subagents"]["hidden_in_graph"] = _hidden_graph_lanes(unlisted, payload["delegation_graph"])
     payload["active"] = bool(
-        payload["runtime"]["workflow"] != "idle"
+        (payload["runtime"]["recent"] and payload["runtime"]["workflow"] != "idle")
         or payload["subagents"]["active"]
         # Lingering just-finished native rows keep the activity block visible.
         or payload["subagents"]["rows"]
@@ -1189,6 +1278,22 @@ def _hud_current_fanout_record(home: Path, record: object, *, now: float) -> obj
     window = LEDGER_MAX_AGE_SECONDS if open_unit else GRAPH_LINGER_SECONDS
     updated_at = _hud_fanout_candidate_score(home / "coding" / "fanout" / fanout_id)[0]
     return record if now - updated_at <= window else None
+
+
+# The id shape `omh coding fanout dispatch` accepts for the originating Hermes session
+# (`coding.fanout_dispatch._ORIGIN_SESSION_ID_RE`), vendored: the bundle may run without `omh`.
+_FANOUT_ORIGIN_RE = re.compile(r"[A-Za-z0-9_.:@-]{1,160}")
+
+
+def _hud_fanout_origin(fanout: Mapping[str, Any] | None) -> str:
+    """The chat a verified fanout's dispatch names as its origin, or "" where it names none.
+
+    The dispatch writes `origin_session_id` into its summary when it ends, so a running fanout names none, and so
+    does one dispatched outside Hermes or recorded before the field existed: the record cannot tell these apart.
+    """
+    roster = fanout.get("roster") if isinstance(fanout, Mapping) else None
+    origin = roster.get("origin_session_id") if isinstance(roster, Mapping) else None
+    return origin if isinstance(origin, str) and _FANOUT_ORIGIN_RE.fullmatch(origin) else ""
 
 
 def _hud_verified_fanout(record: object) -> dict[str, Any] | None:
@@ -1621,6 +1726,7 @@ def _hud_fanout_roster(
         summary_present = False
     except OSError:
         return _hud_graph_roster(fanout_id, units_by_id), "unreadable_fanout_status"
+    origin = ""
     if summary_present:
         summary = _read_hud_json(summary_path, root=home)
         if not summary:
@@ -1653,6 +1759,11 @@ def _hud_fanout_roster(
             _hud_roster_model(units_by_id[unit_id], entry)
         if seen_summary_units != set(units_by_id):
             return _hud_graph_roster(fanout_id, units_by_id), "invalid_fanout_status"
+        # The chat that dispatched it: on the summary, else on its units (`fanout_dispatch` stamps both).
+        for candidate in [summary.get("origin_session_id")] + [entry.get("origin_session_id") for entry in raw_summary_units]:
+            if isinstance(candidate, str) and _FANOUT_ORIGIN_RE.fullmatch(candidate):
+                origin = candidate
+                break
     inflight_dir = fanout_dir / "inflight"
     try:
         inflight_dir.lstat()
@@ -1696,7 +1807,10 @@ def _hud_fanout_roster(
                 value = marker.get(field)
                 if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
                     units_by_id[unit_id][field] = _hud_text(str(value), limit=limit)
-    return _hud_graph_roster(fanout_id, units_by_id), ""
+    roster = _hud_graph_roster(fanout_id, units_by_id)
+    if origin:
+        roster["origin_session_id"] = origin
+    return roster, ""
 
 
 def _hud_roster_model(unit: dict[str, Any], source: dict[str, Any]) -> None:
@@ -2110,6 +2224,7 @@ def _hud_runtime_summary(status: dict[str, Any], latest_run: dict[str, Any]) -> 
     if not latest_run:
         return {
             "state_present": bool(status.get("runtime_state_present", False)),
+            "recent": False,
             "recent_run_count": run_count,
             "latest_run_id": "",
             "executor_target": "",
@@ -2118,8 +2233,11 @@ def _hud_runtime_summary(status: dict[str, Any], latest_run: dict[str, Any]) -> 
             "observation_status": "idle",
             "evidence_state": "idle",
         }
+    updated = _epoch_seconds(str(latest_run.get("updated_at") or latest_run.get("created_at") or ""))
+    recent = updated is not None and -60 <= time.time() - updated <= RUNTIME_ACTIVE_WINDOW_SECONDS
     return {
         "state_present": bool(status.get("runtime_state_present", False)),
+        "recent": recent,
         "recent_run_count": run_count,
         "latest_run_id": _hud_text(latest_run.get("run_id", ""), limit=80),
         "executor_target": _hud_text(latest_run.get("executor_target", ""), limit=80),
@@ -3078,6 +3196,9 @@ def _hud_segments(payload: dict[str, Any], *, preset: str) -> list[str]:
     if topology_label != "unknown":
         focused.append(f"target:{topology_label}")
     focused.append(_coding_agent_segment(runtime, executor))
+    cache_segment = _cache_segment(payload.get("cache"))
+    if cache_segment:
+        focused.append(cache_segment)
     evidence_state = str(runtime.get("evidence_state", "unknown") or "unknown")
     if preset == "full" and evidence_state not in {"idle", "unknown"}:
         focused.append(f"evidence:{_evidence_display_status(evidence_state)}")
@@ -3087,6 +3208,14 @@ def _hud_segments(payload: dict[str, Any], *, preset: str) -> list[str]:
         # An unobserved total gets no denominator rather than a made-up 0.
         focused.append(f"ach:{achievements.get('unlocked_count')}" + (f"/{total}" if total is not None else ""))
     return focused
+
+
+def _cache_segment(cache: Any) -> str:
+    """`cache:NN%`, the main sessions' 24h prompt-cache read share, or "" when the payload has none."""
+    share = cache.get("read_share") if isinstance(cache, dict) else None
+    if isinstance(share, bool) or not isinstance(share, (int, float)):
+        return ""
+    return f"cache:{round(share * 100)}%"
 
 
 REPEAT_STAGE_LABELS = {
@@ -3189,7 +3318,7 @@ def _coding_agent_label(value: Any) -> str:
         "codex": "codex",
         "claude-code": "claude-code",
         "omx-runtime": "omx-runtime",
-        "omo-runtime": "omo-runtime",
+        "pi-family-runtime": "pi-family-runtime",
         "omc-runtime": "omc-runtime",
     }
     return labels.get(normalized, normalized)
@@ -3431,7 +3560,19 @@ def _progress_bindings(
         if hud_safe
         else _read_jsonl
     )
+    # A binding, event, or report an older release wrote reads on today's lane.
+    raw_json_reader, raw_jsonl_reader = json_reader, jsonl_reader
+
+    def json_reader(path: Path) -> Any:
+        return canonical_progress_record(raw_json_reader(path))
+
+    def jsonl_reader(path: Path) -> list[Any]:
+        return [canonical_progress_record(row) for row in raw_jsonl_reader(path)]
+
     seen: dict[Path, tuple[tuple[int, int, int, int], str | None]] = {}
+    held_bindings, held_items = _progress_read_cache.get(runtime_dir, ({}, {})) if not hud_safe else ({}, {})
+    seen_bindings: dict[Path, tuple[_FileIdentity, str | None, dict[str, Any] | None]] = {}
+    seen_items: dict[Path, tuple[tuple[_FileIdentity | None, ...], dict[str, Any]]] = {}
     for root, target_type in roots:
         for binding_path in sorted(child_files(root, "executor_progress", EXECUTOR_PROGRESS_BINDING_FILE), reverse=True):
             if hud_safe:
@@ -3439,10 +3580,9 @@ def _progress_bindings(
                 if order is None:
                     continue
             else:
-                binding = json_reader(binding_path)
-                if not _valid_progress_binding(binding, target_type):
+                order, binding = _plain_binding_order(binding_path, target_type, json_reader, held_bindings, seen_bindings)
+                if order is None:
                     continue
-                order = str(binding.get("updated_at", ""))
             candidates.append((order, binding, binding_path, target_type))
     if hud_safe:
         _hud_binding_orders.clear()
@@ -3457,20 +3597,78 @@ def _progress_bindings(
         if read is None and not _valid_progress_binding(binding, target_type):
             continue  # its file changed after it was stat'ed
         progress_dir = binding_path.parent
+        key: tuple[_FileIdentity | None, ...] | None = None
+        if not hud_safe and binding_path in seen_bindings:
+            key = (
+                seen_bindings[binding_path][0],
+                _file_identity(progress_dir / EVENTS_FILE),
+                _file_identity(progress_dir / EXECUTOR_PROGRESS_REPORTS_FILE),
+            )
+            held_item = held_items.get(progress_dir)
+            if held_item is not None and held_item[0] == key:
+                seen_items[progress_dir] = held_item
+                # A copy: the projection replaces the item's `binding` with its own projected copy.
+                items.append(dict(held_item[1]))
+                continue
         events = jsonl_reader(progress_dir / EVENTS_FILE)
         reports = jsonl_reader(progress_dir / EXECUTOR_PROGRESS_REPORTS_FILE)
         binding_id = str(binding.get("binding_id", ""))
         instance_id = str(binding.get("instance_id", ""))
         matching_events = [event for event in events if _valid_progress_event(event, binding_id, instance_id)]
         matching_reports = [report for report in reports if _valid_progress_report(report, binding_id, instance_id)]
-        items.append(
-            {
-                "binding": binding,
-                "latest_event": matching_events[-1] if matching_events else {},
-                "latest_report": matching_reports[-1] if matching_reports else {},
-            }
-        )
+        item = {
+            "binding": binding,
+            "latest_event": matching_events[-1] if matching_events else {},
+            "latest_report": matching_reports[-1] if matching_reports else {},
+        }
+        if key is not None:
+            seen_items[progress_dir] = (key, item)
+            item = dict(item)
+        items.append(item)
+    if not hud_safe:
+        _progress_read_cache.pop(runtime_dir, None)
+        _progress_read_cache[runtime_dir] = (seen_bindings, seen_items)
+        while len(_progress_read_cache) > _PROGRESS_READ_CACHE_DIRS:
+            del _progress_read_cache[next(iter(_progress_read_cache))]
     return items
+
+
+def _file_identity(path: Path) -> _FileIdentity | None:
+    """A file's (inode, mtime, ctime, size), or None when it cannot be stat'ed (a missing log reads as empty)."""
+    try:
+        status = os.stat(path)
+    except OSError:
+        return None
+    return (status.st_ino, status.st_mtime_ns, status.st_ctime_ns, status.st_size)
+
+
+def _plain_binding_order(
+    path: Path,
+    target_type: str,
+    json_reader: Callable[[Path], dict[str, Any]],
+    held: dict[Path, tuple[_FileIdentity, str | None, dict[str, Any] | None]],
+    seen: dict[Path, tuple[_FileIdentity, str | None, dict[str, Any] | None]],
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The binding file's `updated_at` and validated binding, both None when it holds no valid binding.
+
+    `_hud_binding_order`'s counterpart for the non-HUD readers: while the file is the one the last read of this
+    runtime directory saw (`held`), the answer comes from there and the file is not opened. A file that cannot be
+    stat'ed is read as before and not remembered.
+    """
+    identity = _file_identity(path)
+    entry = held.get(path)
+    if identity is not None and entry is not None and entry[0] == identity:
+        seen[path] = entry
+        return entry[1], entry[2]
+    binding = json_reader(path)
+    if not _valid_progress_binding(binding, target_type):
+        if identity is not None:
+            seen[path] = (identity, None, None)
+        return None, None
+    order = str(binding.get("updated_at", ""))
+    if identity is not None:
+        seen[path] = (identity, order, binding)
+    return order, binding
 
 
 def _hud_binding_order(
@@ -3673,6 +3871,15 @@ def _compact_progress_report(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_EXTERNAL_PROGRESS_PROFILE_PATTERN = re.compile(r"external\.[a-z][a-z0-9-]{1,31}", re.ASCII)
+
+
+def _progress_profile_allowed(profile: object) -> bool:
+    """The built-in progress profiles, or one exact `external.<id>` tag (core `executor_progress.progress_profile_allowed`)."""
+    value = str(profile or "")
+    return value in EXECUTOR_PROGRESS_PROFILES or _EXTERNAL_PROGRESS_PROFILE_PATTERN.fullmatch(value) is not None
+
+
 def _valid_progress_binding(binding: dict[str, Any], expected_target_type: str) -> bool:
     if not isinstance(binding, dict) or _has_raw_or_hidden_content(binding):
         return False
@@ -3693,7 +3900,7 @@ def _valid_progress_binding(binding: dict[str, Any], expected_target_type: str) 
         or "\x00" in target_id
     ):
         return False
-    if profile not in EXECUTOR_PROGRESS_PROFILES:
+    if not _progress_profile_allowed(profile):
         return False
     if str(binding.get("binding_id", "")) != f"{target_type}:{target_id}:{profile}":
         return False
@@ -3717,7 +3924,7 @@ def _valid_progress_event(event: dict[str, Any], binding_id: str, instance_id: s
         return False
     if str(event.get("event_type", "")) not in EXECUTOR_PROGRESS_EVENT_TYPES:
         return False
-    if str(event.get("executor_profile", "")) not in EXECUTOR_PROGRESS_PROFILES:
+    if not _progress_profile_allowed(event.get("executor_profile", "")):
         return False
     summary = str(event.get("summary", "")).strip()
     if not summary or len(summary) > 360:
@@ -3736,7 +3943,7 @@ def _valid_progress_report(report: dict[str, Any], binding_id: str, instance_id:
         return False
     if str(report.get("instance_id", "")) != instance_id:
         return False
-    if str(report.get("executor_profile", "")) not in EXECUTOR_PROGRESS_PROFILES:
+    if not _progress_profile_allowed(report.get("executor_profile", "")):
         return False
     summary = str(report.get("summary", "")).strip()
     if not summary or len(summary) > 360:

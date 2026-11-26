@@ -6,9 +6,20 @@ on:
     paths:
       - ".github/workflows/pages.yml"
       - "site/**"
+      - "skills/**"
+      - "tools/render_site_skills.py"
+      - "tools/render_site_guide.py"
+      - "src/coding/model_recommendations.py"
+      - "src/catalogs/model_chain_table.py"
+      - "tools/stamp_site_counts.py"
       - "README.md"
       - "docs/**"
   workflow_dispatch:
+  # Rebake the GitHub star count every 6 hours without a merge. A scheduled
+  # run builds the default branch head, so it deploys the same content as
+  # the latest push to main, plus the fresh count.
+  schedule:
+    - cron: '17 */6 * * *'
 
 permissions:
   contents: read
@@ -16,14 +27,18 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-progress: true
+  # Never cancel a running deploy. A build takes 10-25 minutes while main
+  # often moves faster, and cancelling on every push left the live site on a
+  # build an hour old. GitHub keeps one run going and one pending (a newer
+  # pending run replaces an older one), so the latest main still deploys.
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@v7.1.0
         with:
           python-version: "3.11"
       - name: Install package
@@ -32,6 +47,10 @@ jobs:
         run: python -m omh.cli docs workflows --check
       - name: Validate harness catalog
         run: python -m omh.cli harness validate
+      - name: Refresh the skill guide from skills/*/SKILL.md
+        run: python tools/render_site_skills.py --write
+      - name: Refresh the Start Guide model lists from the shipped catalog
+        run: python tools/render_site_guide.py --write
       - name: Configure Pages
         uses: actions/configure-pages@v6
         with:
@@ -43,6 +62,13 @@ jobs:
           # site/assets is self-contained: the DAG-ULW capture (webm/mp4 and
           # poster), the logo, and the wordmark are tracked under site/.
           cp -R site/. _site/
+      - name: Bake the GitHub star count into the site
+        # Fills every [data-stars] / [data-star-count] placeholder in _site.
+        # The token only lifts the API rate limit and is never printed; a
+        # failed call keeps the committed value and does not fail the deploy.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/stamp_site_counts.py _site
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5
         with:

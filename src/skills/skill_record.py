@@ -59,14 +59,19 @@ from .catalog import (
 )
 from .procedure_rendering import specialist_procedure_reference_markdown
 from .search_guidance import search_reference_templates
+from .monitor_recipes import monitor_recipes_reference_templates
 from .dag_ulw_skill import dag_ulw_reference_templates
 from .market_research_skill import REFERENCE_CONTENT as MARKET_RESEARCH_REFERENCES
 from .show_reel_references import show_reel_reference_templates
 from .review_methods import review_method_reference_templates
 from .geospatial_analysis_skill import geospatial_analysis_reference_templates
+from .sprite_forge_skill import sprite_forge_reference_templates
 from .biomedical_evidence_skill import biomedical_evidence_reference_templates
 from .molecular_docking_skill import molecular_docking_reference_templates
 from .ai_job_search_skill import ai_job_search_reference_templates
+from .model_compression_skill import model_compression_reference_templates
+from .skill_eval_skill import skill_eval_reference_templates
+from .bot_template_skill import bot_template_reference_templates
 from .render import (
     SkillReferenceTemplate,
     SkillTemplate,
@@ -77,6 +82,7 @@ from .render import (
     agent_evaluation_reference_templates,
     agent_instructions_reference_templates,
     agent_ops_review_reference_templates,
+    agent_skill_detail_templates,
     agent_skill_template,
     ai_slop_cleaner_reference_templates,
     ai_slop_ui_review_reference_templates,
@@ -86,6 +92,9 @@ from .render import (
     ask_reference_templates,
     automation_blueprint_reference_templates,
     award_bar_score_reference_templates,
+    channel_watch_reference_templates,
+    pr_watch_reference_templates,
+    app_work_intake_reference_templates,
     buzz_reference_templates,
     buzz_skill,
     code_review_reference_templates,
@@ -131,9 +140,11 @@ from .render import (
     plan_mode_reference_templates,
     portable_reference_templates,
     prose_lexicon_reference_templates,
+    playable_check_reference_templates,
     refactor_plan_reference_templates,
     relational_db_reference_templates,
     release_cut_reference_templates,
+    rendered_scene_reference_templates,
     requirement_coverage_reference_templates,
     requirements_quality_reference_templates,
     research_reference_templates,
@@ -144,6 +155,8 @@ from .render import (
     security_event_response_reference_templates,
     security_safety_review_reference_templates,
     spend_gate_reference_templates,
+    agent_board_reference_templates,
+    instinct_ledger_reference_templates,
     strategy_brief_reference_templates,
     structural_search_skill,
     tech_debt_audit_reference_templates,
@@ -249,12 +262,21 @@ REFERENCE_PRODUCERS: tuple[Callable[[], list[SkillReferenceTemplate]], ...] = (
     iac_change_reference_templates,
     data_pipelines_reference_templates,
     model_finetuning_reference_templates,
+    model_compression_reference_templates,
+    skill_eval_reference_templates,
+    bot_template_reference_templates,
     mobile_release_reference_templates,
     internal_audit_reference_templates,
     data_share_review_reference_templates,
     release_cut_reference_templates,
     spend_gate_reference_templates,
+    agent_board_reference_templates,
+    instinct_ledger_reference_templates,
     automation_blueprint_reference_templates,
+    channel_watch_reference_templates,
+    pr_watch_reference_templates,
+    app_work_intake_reference_templates,
+    monitor_recipes_reference_templates,
     external_connector_reference_templates,
     verification_gate_reference_templates,
     security_safety_review_reference_templates,
@@ -268,6 +290,7 @@ REFERENCE_PRODUCERS: tuple[Callable[[], list[SkillReferenceTemplate]], ...] = (
     dag_ulw_reference_templates,
     show_reel_reference_templates,
     geospatial_analysis_reference_templates,
+    sprite_forge_reference_templates,
     biomedical_evidence_reference_templates,
     molecular_docking_reference_templates,
     ai_job_search_reference_templates,
@@ -287,6 +310,8 @@ REFERENCE_PRODUCERS: tuple[Callable[[], list[SkillReferenceTemplate]], ...] = (
     frontend_performance_reference_templates,
     scroll_motion_reference_templates,
     frontend_design_reference_templates,
+    rendered_scene_reference_templates,
+    playable_check_reference_templates,
     accessibility_audit_reference_templates,
     agent_evaluation_reference_templates,
     strategy_brief_reference_templates,
@@ -331,6 +356,7 @@ class SkillRecord:
     next_action_label: str
     body: Callable[[], SkillTemplate]
     references: Callable[[], tuple[SkillReferenceTemplate, ...]]
+    value_mechanisms: tuple[str, ...] = ()
 
     def support(self):
         """Optional closed support resources; reading is never runtime execution."""
@@ -414,6 +440,7 @@ def _build_record(definition: SkillDefinition) -> SkillRecord:
     from ..routing.action_copy import next_action_label
     from ..routing.recommend import policy_with_source
     from .catalog_portable import skill_portability
+    from .value_mechanisms import value_mechanisms_for_skill
 
     name = definition.name
     harness_name = declared_primary_harness(name)
@@ -430,6 +457,7 @@ def _build_record(definition: SkillDefinition) -> SkillRecord:
         next_action_label=next_action_label(policy.next_action),
         body=skill_body_renderer(name),
         references=partial(_skill_references, name),
+        value_mechanisms=value_mechanisms_for_skill(name),
     )
 
 
@@ -458,7 +486,7 @@ def _project_agent_skills(skill: SkillRecord) -> ProjectedFiles:
     files.update(
         {
             f"{template.skill_name}/{template.relative_path}": template.content
-            for template in portable_reference_templates(skill.references())
+            for template in (*portable_reference_templates(skill.references()), *agent_skill_detail_templates([skill.definition]))
         }
     )
     files.update({f"{t.skill_name}/{t.relative_path}": t.content for t in agent_skill_support_templates() if t.skill_name == skill.display_name})

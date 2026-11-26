@@ -7,7 +7,13 @@ from typing import Protocol
 import unicodedata
 
 from .catalog import primary_harness_for_skill
-from .catalog_types import HarnessDefinition, SkillDefinition
+from .catalog_types import (
+    HarnessDefinition,
+    SkillDefinition,
+    _CATEGORY_RECOVERY_NOTES,
+    _GENERAL_RECOVERY_NOTES,
+    _HANDOFF_RECOVERY_NOTES,
+)
 
 SKILL_STRUCTURE_LINT_SCHEMA_VERSION = "omh_skill_structure_lint/v1"
 STRUCTURE_LINT_RULE_IDS = (
@@ -20,9 +26,14 @@ STRUCTURE_LINT_RULE_IDS = (
     "SKILL_GENERATED_PARITY",
     "SKILL_HARNESS_RESOLVES",
     "SKILL_INDEX_OPENING_DISTINCT",
+    "SKILL_INDEX_SITUATION_VISIBLE",
+    "SKILL_RECOVERY_SPECIFIC",
     "SKILL_RENDERED_IDENTITY_UNIQUE",
     "SKILL_TRIGGER_FORMAT",
 )
+# Migration ratchet: a skill leaves this tuple when it gains specific recovery notes.
+RECOVERY_DEFAULT_ONLY_ALLOWED: tuple[str, ...] = ()
+
 # Per-skill SKILL.md body ceiling (paid on each load, not every request). Ratchet, not a target: raise it only
 # with the reason written here. 24_000 held until 2026-09-11, when the
 # ultrawork body measured 25_078 bytes after the seven executing-engine bars
@@ -81,7 +92,7 @@ STRUCTURE_LINT_RULE_IDS = (
 # and content only. The next hundred, 27_000, is under the measured body, so
 # the ceiling is the hundred above it. "The host's own voice" alone left a
 # casual-register Korean persona writing its interim progress lines in
-# English (miku, 2026-09-30). Same reason as the entries above. Warranted
+# English (mbot, 2026-09-30). Same reason as the entries above. Warranted
 # always-loaded growth, not drift.
 #
 # 27_100 -> 27_200: `ultrawork` ships 27_156 bytes (27_089 before) once its
@@ -233,11 +244,65 @@ def _definition_violations(
         ("SKILL_FRONTMATTER_FIELDS", _lint_frontmatter_fields(definition)),
         ("SKILL_GENERATED_PARITY", _lint_generated_parity(definition)),
         ("SKILL_HARNESS_RESOLVES", _lint_harness_resolves(definition, harness_names)),
+        ("SKILL_INDEX_SITUATION_VISIBLE", _lint_index_situation_visible(definition)),
+        ("SKILL_RECOVERY_SPECIFIC", _lint_recovery_specific(definition)),
         ("SKILL_TRIGGER_FORMAT", _lint_trigger_format(definition)),
     ):
         if detail:
             found.append({"rule": rule, "skill": definition.name, "detail": detail})
     return found
+
+
+def _lint_index_situation_visible(definition: SkillDefinition) -> str:
+    """The situation clause must sit whole inside Hermes' visible index window.
+
+    Every OMH description opens `[omh] <situation>: <what it does>`, and the
+    situation is what a model reads to decide whether the skill applies. Hermes
+    shows only `skill_index.hermes_index_description` of it, so a clause cut
+    there is a skill the model cannot place. The clause is the text before the
+    first `: ` of the description lead (the trigger tail excluded), or the whole
+    lead when it has none. Only installable skills count, because a retired
+    definition contributes no index line.
+    """
+    from .catalog import installable_skill_names
+    from .catalog_types import OMH_DESCRIPTION_PREFIX, omh_description
+    from .render import frontmatter_description
+    from .skill_index import hermes_index_description
+
+    if definition.name not in installable_skill_names():
+        return ""
+    try:
+        description = frontmatter_description(definition)
+    except ValueError:
+        return ""  # SKILL_FRONTMATTER_FIELDS reports an unrenderable description.
+    lead = omh_description(definition.description)
+    prefix = OMH_DESCRIPTION_PREFIX if lead.lower().startswith(OMH_DESCRIPTION_PREFIX) else ""
+    clause = prefix + lead[len(prefix) :].partition(": ")[0]
+    visible = hermes_index_description(description)
+    if visible != description.strip().strip("'\""):
+        visible = visible.removesuffix("...")
+    if visible.startswith(clause):
+        return ""
+    return (
+        f"situation clause {clause!r} ({len(clause)} chars) is cut in the Hermes index, which shows "
+        f"{visible!r}; shorten the clause so it ends inside the window and move the detail after the colon"
+    )
+
+
+def _lint_recovery_specific(definition: SkillDefinition) -> str:
+    from .catalog import installable_skill_names
+
+    if definition.name not in installable_skill_names():
+        return ""
+    defaults = set(_GENERAL_RECOVERY_NOTES) | set(_HANDOFF_RECOVERY_NOTES)
+    defaults.update(line for notes in _CATEGORY_RECOVERY_NOTES.values() for line in notes)
+    default_only = all(line in defaults for line in definition.recovery_notes)
+    if definition.name in RECOVERY_DEFAULT_ONLY_ALLOWED:
+        if not default_only:
+            return "skill has specific recovery notes; remove it from RECOVERY_DEFAULT_ONLY_ALLOWED"
+    elif default_only:
+        return "installable skill needs skill-specific recovery notes, not only library defaults"
+    return ""
 
 
 def _lint_catalog_contract(

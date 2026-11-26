@@ -340,6 +340,8 @@ def _fenced(lines: Sequence[str]) -> str:
 
 def start_block(graph: Mapping[str, Any], lanes: Sequence[Mapping[str, Any]]) -> str:
     """The run's start: its size, then one line per layer listing its tasks, at most `MOMENT_LINES` lines."""
+    # An outside_dag lane is no lane of the run: it is not a layer's task, and the unplaced fallback never lands it.
+    lanes = [node for node in lanes if node.get("outside_dag") is not True]
     by_id = {str(node["id"]): node for node in lanes}
     layers = [
         [by_id[node_id] for node_id in layer if node_id in by_id]
@@ -365,12 +367,16 @@ def end_block(graph: Mapping[str, Any], lanes: Sequence[Mapping[str, Any]]) -> s
     """The run's end: each lane under Done, Failed, Stopped or Working (`collapse`), the first failure, the totals.
 
     The header says ``ended`` when every lane settled, ``stalled`` when some
-    are not moving and none is in flight, and ``so far`` while one is.
+    are not moving and none is in flight, and ``so far`` while one is; a
+    dag-ulw run's then says its goal verdict (`dag_run.goal_verdict`):
+    ``verified``, ``unverified`` or ``verify_failed``, and for a run with goal
+    criteria how many are met (``2/3 criteria met``).
     """
     counts = tally(lanes)
     sep = UNICODE.separator
     verdict = "ended" if counts["settled"] else ("so far" if counts["working"] else "stalled")
-    lines = [sep.join(["DAG", graph_name(graph), verdict])]
+    goal = [text for text in (graph.get("dag_verdict"), graph.get("dag_criteria")) if isinstance(text, str) and text]
+    lines = [sep.join(["DAG", graph_name(graph), verdict, *goal])]
     width = max(len(word) for word, _glyph in COLLAPSE)
     for word, glyph_state in COLLAPSE:
         members = [node for node in lanes if collapse(node) == word]

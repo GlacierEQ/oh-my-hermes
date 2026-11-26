@@ -54,6 +54,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -190,6 +191,22 @@ PROCESS_SPAWN_ALLOWLIST: dict[str, str] = {
         "data, never imported by core, routing, preparation, or install; companion nonexecution "
         "and built-wheel parity tests guard it."
     ),
+    "src/skills/pr_watch_toolkit/scripts/pr_watch.py": (
+        "the PR watch monitor -- inert package data that only a Hermes cron job runs, as the "
+        "`--monitor-script` of a copy the person installed into `<profile>/scripts/`, on Hermes' "
+        "interpreter; spawns exactly one read-only `gh pr view` per tick (argv pinned in "
+        "GH_INVOCATION_EXCEPTIONS), no shell, stdin closed, a 30 s timeout. Nothing in src/ imports it "
+        "(test_core_never_imports_the_pr_watch_toolkit); stated in docs/IMPLEMENTATION-BOUNDARIES.md."
+    ),
+    "src/skills/monitor_watch_toolkit/scripts/google_watch.py": (
+        "the Gmail and Calendar monitor -- inert package data that only a Hermes cron job runs, as the "
+        "`--monitor-script` of a copy the person installed into `<profile>/scripts/`, on Hermes' interpreter; "
+        "spawns exactly one read of Hermes' own google-workspace skill CLI per tick (`<python> "
+        "<profile>/skills/productivity/google-workspace/scripts/google_api.py gmail search --max <n> -- <query>` or "
+        "`... calendar list --start <t> --end <t> --max 100 --calendar <id>`), no shell, stdin closed, a 90 s "
+        "timeout; it holds and reads no credential. Nothing in src/ imports it "
+        "(test_core_never_imports_the_monitor_watch_toolkit); stated in docs/IMPLEMENTATION-BOUNDARIES.md."
+    ),
     "src/install/agent_skills_projection.py": (
         "explicit `omh install --target agents --scope repo` (including read-only --status); "
         "runs only bounded local git rev-parse --show-toplevel with fsmonitor disabled, "
@@ -272,6 +289,12 @@ PROCESS_SPAWN_ALLOWLIST: dict[str, str] = {
         "in-worktree git identity reads - to validate an observed session receipt against the "
         "current binary and workspace. It never launches a resume or any executor turn."
     ),
+    "src/coding/paired_run_arm_home.py": (
+        "`omh coding paired-run dispatch --confirm-dispatch` only; starts one harness-owned "
+        "`hermes gateway run --quiet` per arm home in its own process group (never a service "
+        "manager), minimal env with the provider key by declared name, and stops the whole group "
+        "and removes the home in a finally block. Model turns still go through the Hermes child seam."
+    ),
     "src/coding/hermes_child_dispatch.py": (
         "operator-only, explicitly confirmed `ask_before_dispatch` seam for one bounded local "
         "`hermes chat --query-file - --model` child; suppresses recursion and cleans its process group."
@@ -292,17 +315,59 @@ PROCESS_SPAWN_ALLOWLIST: dict[str, str] = {
     "src/commands/bare_launch.py": (
         "bare `omh` with a tty -- the operator's own launch of `hermes` (as `hermes --tui` "
         "with the OMH frontend when it can run, otherwise Hermes' own `hermes --tui`, or plain "
-        "`hermes` without Node), the same launch as typing it themselves; never reached from any "
-        "prepared-handoff path."
+        "`hermes` without Node), the same launch as typing it themselves; and, only after the person "
+        "picked Restart in that TUI's own question once `omh update` installed another generation under "
+        "it, one `<installer root>/current/venv/bin/python -P -m omh.cli [homes, profile] [--resume <id>]` "
+        "that opens the TUI again on the installed generation. Never reached from any prepared-handoff path."
     ),
     "src/tui/gateway.py": (
         "the OMH TUI's single gateway child: Hermes' own `tui_gateway`, spawned with the interpreter "
         "and import path Hermes' launcher handed the frontend, inside a foreground terminal the "
         "person launched; never reached from a prepared-handoff path."
     ),
+    "src/tui/clipboard.py": (
+        "the OMH TUI pager's copy on a Mac whose screen is local (no SSH): one fixed `pbcopy` with the text the "
+        "person selected with the mouse on stdin, a two-second timeout, and inside tmux first one fixed read-only "
+        "`tmux show-environment SSH_CONNECTION` with a one-second timeout; and, for a Ctrl+V that Hermes found no image "
+        "for, the clipboard's text read only when no SSH variable is set: one fixed `pbpaste` on a Mac, or on Linux "
+        "the first of `wl-paste --no-newline --type text`, `xclip -selection clipboard -out` and `xsel --clipboard "
+        "--output` that answers, each with a one-second timeout (the first that runs past it ends the search) and at most "
+        "4 MiB and a byte read from it (Windows reads it in process); nothing else spawns "
+        "from it, and it is never reached from a prepared-handoff path."
+    ),
+    "src/tui/git_status.py": (
+        "the OMH TUI's branch row: one fixed `git -c core.fsmonitor=false --no-optional-locks status "
+        "--porcelain=v2 --branch` in the session's own directory, on a thread of its own with a two-second "
+        "timeout, at start, after a tool or a turn completes and every 15 seconds; read-only and local, "
+        "never reached from a prepared-handoff path."
+    ),
+    "src/tui/herdr.py": (
+        "the OMH TUI's state report to herdr: `herdr pane report-agent` / `release-agent` with fixed "
+        "verbs and flags; only the binary path and pane id come from herdr's pane env. Only inside a "
+        "herdr pane the person launched, gated on the same pane environment (HERDR_ENV=1, "
+        "HERDR_PANE_ID) as herdr's own Hermes plugin; the binary is the person's own, an absolute "
+        "HERDR_BIN_PATH or `herdr` on PATH: a local state report over herdr's own unix "
+        "socket, no network call. Reached only from the TUI's title state and exit; never from a "
+        "prepared-handoff path."
+    ),
+    "src/tui/gateway_restart.py": (
+        "the OMH TUI's `/gateway restart`, only after the person typed it and picked Restart in the slot: one fixed "
+        "`<HERMES_PYTHON> -m hermes_cli.main [-p <profile>] gateway restart --yes --detach`, Hermes' own restart "
+        "command as Hermes' updater runs it, on the interpreter and import path Hermes' launcher handed the TUI; the "
+        "profile is the one Hermes named for the session, or `default` when the person picked the whole shared gateway, "
+        "checked against Hermes' profile id rule. It signals no process itself and is never reached from a "
+        "prepared-handoff path."
+    ),
     "src/commands/setup.py": (
-        "`omh setup` / `omh update` -- pip self-update, CLI re-entry after update, and the "
-        "opt-in GitHub star (see GH_INVOCATION_EXCEPTIONS in INVARIANT 3)."
+        "`omh setup` / `omh update` -- pip self-update, CLI re-entry after update, the "
+        "opt-in GitHub star (see GH_INVOCATION_EXCEPTIONS in INVARIANT 3), and after an activated update "
+        "in the process the person started, only on their yes at a terminal or an explicit "
+        "`--restart-gateway`: the person's `hermes -p <profile> gateway restart --yes --detach` for each "
+        "running gateway still on the old OMH plugin code (`commands/update_gateway.py` builds the argv), "
+        "in a session of its own with no stdin; and after an interactive setup, only on the person's yes to "
+        "the wizard's model-setup question, `hermes config get model --json`, the person's own `hermes model` "
+        "in the foreground when no main model is set, then the OMH TUI as a foreground "
+        "`python -P -m omh.cli ... --onboard model-setup` child."
     ),
     "src/quality/cross_harness_adapter_sandbox.py": (
         "sandboxed child process for the cross-harness benchmark lane."
@@ -615,7 +680,9 @@ PATH_MODULE_LOAD_ALLOWLIST: dict[str, str] = {
         "one file, `<bundle_root>/runtime_reader.py`, under the private parent `omh_desktop_bundle` "
         "whose `__path__` is the bundle root; the one route passes no root at all and takes the "
         "default, `Path(__file__).resolve().parent.parent`, the installed bundle this file ships "
-        "in. Everything the load reaches is a sibling of this file, which `_source_modules()` "
+        "in. `delegation_drawing` then reaches `delegation_view` with a static "
+        "`from omh_desktop_bundle import delegation_view`, through that same package's `__path__`. "
+        "Everything the load reaches is a sibling of this file, which `_source_modules()` "
         "already parses under `src/plugin_bundle/omh/`."
     ),
 }
@@ -694,6 +761,90 @@ class NoHiddenProcessSpawn(unittest.TestCase):
                     continue
                 for dotted in paths:
                     self.assertNotIn("show_reel_toolkit", dotted.split("."), (relative_path, node.lineno, dotted))
+
+    def test_core_never_imports_the_pr_watch_toolkit(self) -> None:
+        """The PR watch scripts are run by the person's Hermes, never by omh."""
+        companion = "src/skills/pr_watch_toolkit/"
+        self.assertEqual(
+            {p for p in PROCESS_SPAWN_ALLOWLIST if p.startswith(companion)}, {companion + "scripts/pr_watch.py"}
+        )
+        for relative_path, tree in _source_modules():
+            if relative_path.startswith(companion):
+                continue
+            for stem in ("pr_watch", "pr_event_guard", "pr_watch_toolkit"):
+                self.assertFalse(_imports_module_named(tree, stem), (relative_path, stem))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    paths = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    paths = [node.module or "", *(f"{node.module or ''}.{alias.name}" for alias in node.names)]
+                else:
+                    continue
+                for dotted in paths:
+                    self.assertNotIn("pr_watch_toolkit", dotted.split("."), (relative_path, node.lineno, dotted))
+
+    def test_core_never_imports_the_monitor_watch_toolkit(self) -> None:
+        """The monitor-recipe scripts are run by the person's Hermes, never by omh."""
+        companion = "src/skills/monitor_watch_toolkit/"
+        self.assertEqual(
+            {p for p in PROCESS_SPAWN_ALLOWLIST if p.startswith(companion)}, {companion + "scripts/google_watch.py"}
+        )
+        self.assertEqual({p for p in NETWORK_CLIENT_BRIDGES if p.startswith(companion)}, {companion + "scripts/api_watch.py"})
+        for relative_path, tree in _source_modules():
+            if relative_path.startswith(companion):
+                continue
+            for stem in ("api_watch", "google_watch", "vault_watch", "monitor_watch_toolkit"):
+                self.assertFalse(_imports_module_named(tree, stem), (relative_path, stem))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    paths = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    paths = [node.module or "", *(f"{node.module or ''}.{alias.name}" for alias in node.names)]
+                else:
+                    continue
+                for dotted in paths:
+                    self.assertNotIn("monitor_watch_toolkit", dotted.split("."), (relative_path, node.lineno, dotted))
+
+    def test_the_monitor_watch_scripts_are_stdlib_only_and_write_nothing(self) -> None:
+        """Each script reaches only what its kind needs, and its only output is stdout and stderr.
+
+        `api_watch.py` is the network client and starts no process; `google_watch.py`
+        starts the one skill CLI and opens no connection; `vault_watch.py` does
+        neither. None imports a third-party or Hermes module, and none calls a
+        filesystem write: no `open` for writing, no `write_text`/`write_bytes`, no
+        `mkdir`, rename, replace, unlink, chmod or link, no `shutil` or `tempfile`.
+        """
+        companion = "src/skills/monitor_watch_toolkit/scripts/"
+        trees = {path: tree for path, tree in _source_modules() if path.startswith(companion)}
+        self.assertEqual(set(trees), {companion + name for name in ("api_watch.py", "google_watch.py", "vault_watch.py")})
+        allowed_extra = {
+            companion + "api_watch.py": {"urllib"},
+            companion + "google_watch.py": {"subprocess"},
+            companion + "vault_watch.py": set(),
+        }
+        os_writes = {"replace", "rename", "renames", "remove", "unlink", "mkdir", "makedirs", "rmdir", "removedirs",
+                     "chmod", "chown", "symlink", "link", "truncate", "open", "write", "system", "popen"}
+        path_writes = {"write_text", "write_bytes", "mkdir", "touch", "unlink", "rmdir", "rename", "chmod",
+                       "symlink_to", "hardlink_to"}
+        for path, tree in trees.items():
+            tops = {module.split(".")[0] for module, _names, _lineno in _imported_modules(tree) if module}
+            self.assertLessEqual(tops - {"__future__"}, set(sys.stdlib_module_names), path)
+            self.assertEqual(tops & {"shutil", "tempfile", "socket", "http", "ssl", "asyncio"}, set(), path)
+            self.assertEqual(tops & {"urllib", "subprocess"}, allowed_extra[path], path)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if isinstance(func, ast.Attribute):
+                    if isinstance(func.value, ast.Name) and func.value.id == "os":
+                        self.assertNotIn(func.attr, os_writes, (path, node.lineno))
+                    self.assertNotIn(func.attr, path_writes, (path, node.lineno))
+                    if func.attr == "open" and not (isinstance(func.value, ast.Name) and func.value.id == "self"):
+                        modes = [a.value for a in node.args if isinstance(a, ast.Constant)]
+                        modes += [k.value.value for k in node.keywords if k.arg == "mode" and isinstance(k.value, ast.Constant)]
+                        self.assertTrue(all(isinstance(m, str) and set(m) <= {"r", "b"} for m in modes), (path, node.lineno))
+                if isinstance(func, ast.Name) and func.id == "open":
+                    self.fail(f"{path} line {node.lineno} calls open(); the monitor scripts read with read_text only")
 
     def test_only_allowlisted_modules_import_subprocess(self) -> None:
         for relative_path, tree in _source_modules():
@@ -862,21 +1013,63 @@ PARSING_ONLY_URLLIB_REQUEST_FILES: dict[str, str] = {
 }
 
 
-# The one opt-in network client in `src/`. Its whole surface is these names:
-# a request object, an opener, the HTTPS handler, and the redirect handler it
-# subclasses to refuse every 3xx. Each entry must still import from
-# `urllib.request` (stale check), and only its named importer may import it.
+# The scoped network clients in `src/`. Their whole surface is these names:
+# a request object, an opener, the HTTPS handler, and the redirect handler each
+# subclasses to refuse a 3xx (every one for Jev; any off the registry's host for
+# the update notice). Each entry must still import from `urllib.request` (stale
+# check), and only its named importer may import it.
 NETWORK_CLIENT_BRIDGES: dict[str, str] = {
     "src/plugin_bundle/omh/jev_ask_client.py": (
         "omh_jev_ask -- the one opt-in bridge that POSTs typed questions to Jev with the user's own "
         "key; reached only from an explicit tool call, after the user named Jev in that turn and a "
-        "route resolved; fixed two-host HTTPS route table, redirects refused, bounded both ways; "
+        "route resolved; fixed route identities, TypeSafe host optionally configured through "
+        "TYPESAFE_BASE_URL as an HTTPS base URL without credentials/query/fragment (plain HTTP only to a "
+        "loopback/private/link-local IP literal or localhost, behind the operator's local_http_endpoint "
+        "setting, sent direct and never through a proxy), OpenRouter host fixed; "
+        "redirects refused, bounded both ways; "
         "documented as a scoped exception in CLAUDE.md and AGENTS.md."
     ),
+    "src/tui/update_notice.py": (
+        "the OMH TUI's update notice -- GETs npm's `latest` oh-my-hermes version from the one fixed host "
+        "registry.npmjs.org, on a background thread, at most once a day per OMH home (cached under "
+        "`<omh_home>/tui/update-check.json`); HTTPS only, a 3 s socket timeout, redirects off that host refused, the "
+        "reply bounded and only its version kept; sends nothing about the person; off with "
+        "OMH_TUI_UPDATE_CHECK=0, `omh theme update-check off`, or `omh update-check` stored as off. Its one other "
+        "caller is the explicit `omh update` on an installer-managed stable install, which calls `fetch_latest` "
+        "once to pick the release wheel it is about to download (`commands/setup.py:_installer_self_update_release`); "
+        "documented as a scoped exception in CLAUDE.md and AGENTS.md."
+    ),
+    "src/skills/channel_watch_toolkit/scripts/channel_watch.py": (
+        "the channel watch collector -- inert package data that only a Hermes cron job runs, from a copy the person "
+        "installed into `<profile>/scripts/`, on Hermes' interpreter; read-only GETs to Slack (`auth.test`, "
+        "`conversations.history`; in brief mode also `users.conversations`, `conversations.members`, "
+        "`conversations.replies`, `users.info`) or Discord (`/users/@me`, `/channels/{id}/messages`) with the bot token read by its "
+        "one key name, never printed; redirects refused, bounded reply, a 15 s timeout; `api_base` only to a loopback "
+        "host (tests), sent direct and never through a proxy. Nothing in src/ imports it; owner approved as a scoped "
+        "integration 2026-11-15, documented in AGENTS.md."
+    ),
+    "src/skills/monitor_watch_toolkit/scripts/api_watch.py": (
+        "the Notion, Linear, Jira and Sentry monitor -- inert package data that only a Hermes cron job runs, as the "
+        "`--monitor-script` of a copy the person installed into `<profile>/scripts/`, on Hermes' interpreter; reads "
+        "only: `GET /v1/pages/<id>` and the database query on api.notion.com, one GraphQL query on api.linear.app, "
+        "`GET /rest/api/3/search/jql` on <site>.atlassian.net, `GET /api/0/organizations/<org>/issues/` on sentry.io "
+        "or de.sentry.io, each host fixed in the script; the credential comes only from its environment name and is "
+        "never printed or written; redirects refused, a 15 s read timeout and a 30 s reply deadline, a bounded reply; `api_base` only to a loopback "
+        "host (tests), sent direct and never through a proxy; it writes nothing. Nothing in src/ imports it "
+        "(test_core_never_imports_the_monitor_watch_toolkit); the same class of scoped integration the owner approved "
+        "for the PR watch scripts on 2026-11-23, documented in AGENTS.md."
+    ),
 }
-NETWORK_CLIENT_BRIDGE_URLLIB_NAMES = frozenset({"Request", "build_opener", "HTTPSHandler", "HTTPRedirectHandler"})
+# `ProxyHandler` is imported only to pass an empty mapping, which turns proxies
+# off for the Jev local plain-HTTP endpoint (and the collector's loopback test base) so no proxy reads the key in clear.
+NETWORK_CLIENT_BRIDGE_URLLIB_NAMES = frozenset(
+    {"Request", "build_opener", "HTTPSHandler", "HTTPRedirectHandler", "ProxyHandler"}
+)
 NETWORK_CLIENT_BRIDGE_IMPORTERS: dict[str, frozenset[str]] = {
     "src/plugin_bundle/omh/jev_ask_client.py": frozenset({"src/plugin_bundle/omh/tools/jev_ask_tool.py"}),
+    "src/tui/update_notice.py": frozenset({"src/tui/app.py", "src/commands/setup.py"}),
+    "src/skills/channel_watch_toolkit/scripts/channel_watch.py": frozenset(),
+    "src/skills/monitor_watch_toolkit/scripts/api_watch.py": frozenset(),
 }
 
 
@@ -945,7 +1138,8 @@ HERMES_INTERPRETER_SCRIPTS: dict[str, HermesScriptPolicy] = {
             }),
             "base64": frozenset({"b64encode"}),
             "json": frozenset({"dumps", "loads"}),
-            "os": frozenset({"environ", "getcwd"}),
+            # read: the TUI's stdin by descriptor (#2327); name: Windows takes Hermes' `attach_gateway` (#3059)
+            "os": frozenset({"environ", "getcwd", "name", "read"}),
             "signal": frozenset({"SIGTERM"}),
             "sys": frozenset({"exit", "stderr", "stdin", "stdout"}),
             "threading": frozenset({"Thread"}),
@@ -964,6 +1158,7 @@ HERMES_INTERPRETER_SCRIPTS: dict[str, HermesScriptPolicy] = {
             "hermes_cli.gateway_client": frozenset({"GATEWAY_WS_PROTOCOL", "gateway_ws_target"}),
             "hermes_cli.gateway_runtime": frozenset({"attachable", "control_home_for", "ensure_gateway_runtime"}),
             "hermes_cli.gateway_runtime_discovery": frozenset({"connect_private"}),
+            "hermes_cli.gateway_runtime_attach": frozenset({"TicketUnavailable", "attach_gateway"}),
             "hermes_cli.cli_terminal_input": frozenset({"_resolve_attachment_path", "_split_path_input"}),
             "hermes_cli.clipboard": frozenset({"save_clipboard_image"}),
             "gateway.platforms.base": frozenset({"get_image_cache_dir"}),
@@ -975,7 +1170,10 @@ HERMES_INTERPRETER_SCRIPTS: dict[str, HermesScriptPolicy] = {
         dial=("dial", "grant"),
         # Hermes' own client dials with `proxy=None` (`hermes_cli/gateway_client.py`): without it websockets sends
         # the session-ticket upgrade through HTTP(S)_PROXY.
-        dial_pinned={"proxy": None},
+        # `ping_interval=None`: Hermes keeps no keepalive ping on loopback (`hermes_cli/web_server.py`), since a busy
+        # gateway answers it late and websockets' default then closes a connection whose turn still runs. A liveness
+        # policy rather than a safety one, pinned here because this is where the dial's keywords are held.
+        dial_pinned={"proxy": None, "ping_interval": None},
         private_attributes={},  # it reads no private attribute of anything but itself
         environ_key="TERMINAL_CWD",  # set for Hermes' path helper and restored (`HermesFiles.image`)
         # What Hermes' own bootstrap removes before it may start a gateway (`ui-tui/scripts/gateway_bootstrap.py`).
@@ -990,7 +1188,8 @@ HERMES_INTERPRETER_SCRIPTS: dict[str, HermesScriptPolicy] = {
             "the OMH TUI's gateway child (docs/OMH-TUI-BOUNDARY.md; AGENTS.md, the OMH TUI bullet). On a Hermes that has the shared-gateway "
             "attach API it does what Hermes' own Ink TUI does: Hermes' `ensure_gateway_runtime` finds the "
             "profile's gateway or starts one, Hermes' `connect_private` mints a session ticket over the home's "
-            "private control socket, and `websockets.asyncio.client.connect` dials the WebSocket URL "
+            "private control socket (on Windows, where that socket is not a Unix-domain one, Hermes' `attach_gateway` "
+            "does both, as Hermes' own Ink bootstrap does), and `websockets.asyncio.client.connect` dials the WebSocket URL "
             "`gateway_ws_target` builds from that grant. It relays what the TUI sends and what the gateway sends back."
         ),
     ),
@@ -1378,6 +1577,8 @@ class NoNetworkClientInSource(unittest.TestCase):
                 top = module.split(".")[0]
                 if top not in NETWORK_CLIENT_MODULES:
                     continue
+                if relative_path == "src/tui/proofread.py" and module in {"http.client", "socket"}:
+                    continue  # explicit local-proofreader grant; pinned below, never core transport
                 if relative_path in HERMES_INTERPRETER_SCRIPTS:
                     continue  # runs on Hermes' interpreter only; `_hermes_script_violations` holds it to its names
                 self.fail(
@@ -1389,6 +1590,15 @@ class NoNetworkClientInSource(unittest.TestCase):
                     f"NETWORK_CLIENT_MODULES' documented exceptions in {THIS_TEST} and say why it "
                     f"cannot open a connection.",
                 )
+
+    def test_local_proofreader_import_surface_and_owner(self) -> None:
+        modules = dict(_source_modules())
+        path = "src/tui/proofread.py"
+        imports = {module for module, _names, _lineno in _imported_modules(modules[path])
+                   if module and module.split(".")[0] in NETWORK_CLIENT_MODULES}
+        self.assertEqual(imports, {"http.client", "socket"})
+        self.assertEqual({p for p, tree in modules.items()
+                          if p != path and _imports_module_named(tree, _module_stem(path))}, {"src/tui/app.py"})
 
     def test_urllib_request_is_imported_only_for_path_parsing(self) -> None:
         for relative_path, tree in _source_modules():
@@ -1659,6 +1869,11 @@ class NoNetworkClientInSource(unittest.TestCase):
             "def go(api):\n    url, protocols = api.grant()\n    return api.dial(url, proxy='http://evil:8080')":
             "without `proxy=None`",
             "def go(api, how):\n    url, protocols = api.grant()\n    return api.dial(url, proxy=how)": "without `proxy=None`",
+            # and no keepalive ping, as Hermes' loopback policy
+            "def go(api):\n    url, protocols = api.grant()\n    return api.dial(url, proxy=None)":
+            "without `ping_interval=None`",
+            "def go(api):\n    url, protocols = api.grant()\n    return api.dial(url, proxy=None, ping_interval=20)":
+            "without `ping_interval=None`",
             # the launch-policy removal: its constant is the pinned literal, bound once, and its loop name kept
             "LAUNCH_POLICY_ENV = ('PATH', 'HERMES_HOME')": "as the pinned literal tuple",
             "LAUNCH_POLICY_ENV = ('HERMES_MODEL',) + ('HERMES_HOME',)": "as the pinned literal tuple",
@@ -1710,7 +1925,7 @@ class NoNetworkClientInSource(unittest.TestCase):
             "receipt = object()\ngetattr(receipt, 'state', None)\n"
             "os.environ.get('X')\nos.environ['TERMINAL_CWD'] = '/w'\nos.environ.pop('TERMINAL_CWD', None)\n"
             "copy = dict(os.environ)\nfor name in LAUNCH_POLICY_ENV:\n    os.environ.pop(name, None)\n"
-            "def relay(api, url):\n    return api.dial(url, proxy=None)\n"
+            "def relay(api, url):\n    return api.dial(url, proxy=None, ping_interval=None)\n"
             "def main():\n    api = attach_api()\n    url, protocols = api.grant()\n    return relay(api, url)\n"
             "class C:\n    def m(self):\n        self._serial = 1\n        return lambda: self._serial\n"
         )
@@ -1979,6 +2194,12 @@ GIT_ARGV_ALLOWLIST: dict[tuple[str, tuple[str, ...]], str] = {
         "from rewritten content; same single-purpose fsmonitor isolation as the HEAD call above; "
         "read-only local object lookup, names no remote"
     ),
+    ("src/tui/git_status.py", ("core.fsmonitor=false", "status")): (
+        "`git -c core.fsmonitor=false --no-optional-locks status --porcelain=v2 --branch` in the session's own "
+        "directory reads the branch and how many files changed for the OMH TUI's row under the info line; the "
+        "fsmonitor override keeps a read nobody asked for from running a repository-configured hook, and "
+        "`--no-optional-locks` keeps it off the index lock. Read-only, names no remote, writes nothing"
+    ),
     ("src/maintenance/release_source_identity.py", ("core.fsmonitor=false", "status")): (
         "`git -c core.fsmonitor=false --no-optional-locks status --porcelain=v1 "
         "--untracked-files=all` reads whether the checkout is dirty so the recorded identity can say "
@@ -2071,10 +2292,12 @@ GIT_ARGV_ALLOWLIST: dict[tuple[str, tuple[str, ...]], str] = {
     ),
 }
 
-# The one executed forge invocation in `src/`. It is not repository authority:
-# it stars the project on the operator's own account, from an interactive
-# prompt in `omh setup`, and it can neither push code nor merge anything. It is
-# pinned by exact argv so that widening it to any other `gh` call fails here.
+# The executed forge invocations in `src/`. Neither is repository authority:
+# one stars the project on the operator's own account, from an interactive
+# prompt in `omh setup`; the other is the PR watch monitor's read-only
+# `gh pr view`, run only by the person's Hermes. Neither can push code or merge
+# anything. Each is pinned by exact argv so that widening it to any other `gh`
+# call fails here.
 GH_INVOCATION_EXCEPTIONS: dict[tuple[str, tuple[str, ...]], str] = {
     (
         "src/commands/setup.py",
@@ -2082,6 +2305,18 @@ GH_INVOCATION_EXCEPTIONS: dict[tuple[str, tuple[str, ...]], str] = {
     ): (
         "opt-in 'star the repo?' prompt during interactive `omh setup`; mutates the operator's "
         "own stars, never repository contents, and never runs unattended"
+    ),
+    (
+        "src/skills/pr_watch_toolkit/scripts/pr_watch.py",
+        (
+            "gh", "pr", "view", "--repo", "--json",
+            "state,headRefOid,mergeable,reviewDecision,reviews,statusCheckRollup,commits",
+        ),
+    ): (
+        "the PR watch monitor's one read of the PR it watches (the number and owner/name are validated "
+        "runtime values between the literals): `gh pr view` with a fixed `--json` field list, a read that "
+        "cannot push, comment, label, review, or merge. It runs only as a Hermes cron `--monitor-script` "
+        "the person installed, never from omh, and uses the gh CLI's own sign-in"
     ),
 }
 

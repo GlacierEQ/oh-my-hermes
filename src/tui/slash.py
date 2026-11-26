@@ -2,28 +2,46 @@
 
 Hermes' Ink app runs about sixty slash commands itself and sends the rest to
 the gateway. The gateway's `slash.exec` already answers most of them on its
-own (it runs a full Hermes CLI per session), so the OMH TUI only has to own
-four kinds:
+own, and the TUI's gateway child answers the ones a shared gateway's
+`slash.exec` refuses but serves through a verb of its own (`/compress`,
+`/undo`, `/stop`, ...: `attach/gateway_attach.py` SLASH_VERBS), so the OMH
+TUI only has to own five kinds:
 
-- `local`: commands about this terminal (help, quit, history, theme, the OMH
-  model picker), the ones whose screen is the TUI's own (attaching an image,
-  the session and model pickers, the plan as `/todos`), `/export`, which
+- `local`: commands about this terminal (help, quit, history, theme, the
+  clock times on the done lines, the OMH model picker), the ones whose
+  screen is the TUI's own (attaching an image, the session and model
+  pickers, the plan as `/todos`), `/export`, which
   says what Hermes exports before it runs, and `/reload-skills`, which has
   to reach the gateway itself: `slash.exec` runs commands in a separate
   per-session worker, so a rescan there would leave the gateway's skill
   commands as they were. The TUI handles them, calling the gateway method
-  underneath where there is one.
+  underneath where there is one. `/gateway restart` runs Hermes' own
+  `hermes gateway restart` once the person confirms, then reattaches
+  (`gateway_restart.py`); `/gateway` with anything else goes to Hermes as
+  typed, where it is Hermes' alias of `/platforms`.
 - `hermes`: commands whose surface is Ink-only (voice, the pet, the billing
   flows, overlays) or that would make the TUI persist raw prompts (`/save`,
   `/prompt`). The TUI names the Hermes door instead of half-supporting them.
 - `dropped`: Ink display preferences and debug widgets that mean nothing here.
 - `renamed`: Claude Code's name for a command Hermes has under another
-  (`/cost` is `/usage`); it runs Hermes' command under the name typed.
+  (`/cost` is `/usage`, `/compact` is `/compress`); it runs Hermes' command
+  under the name typed.
+- `classic`: Hermes commands that only its classic CLI runs (`hermes --cli`):
+  Hermes' shared gateway refuses them in a TUI session, with a pointer of
+  its own. They still go to Hermes as typed, so that pointer is what the
+  person reads, but completion and /help leave them out.
+
+`/yolo` and `/reasoning <level>` are `local` too, though they are Hermes'
+commands: `slash.exec` runs them in its separate per-session worker, and
+Hermes mirrors neither to the live agent, so `/reasoning high` would say it
+set the effort and change nothing, and `/yolo` would say approvals are off
+while they stayed on (and leave a flag a later resume turns them off by).
+Hermes' own clients send both as `config.set`; the TUI sends them through the
+paths Ctrl+T and Shift+Tab use (`/reasoning` with anything but a level still
+goes to Hermes as typed).
 
 Everything else goes to `slash.exec`, and a 4018 refusal from it falls back to
-`command.dispatch`, the order Ink uses. That includes `/yolo`, which turns off
-Hermes' approval prompts: the person typed it, and the TUI relays what the
-person types (`/help` says so). It also includes `/plan`, which plan mode
+`command.dispatch`, the order Ink uses. That includes `/plan`, which plan mode
 relies on: a prompt typed in plan mode goes out as `/plan <text>`
 (`plan_invocation`), so `/plan` must never be routed to `hermes` or `dropped`.
 """
@@ -34,12 +52,15 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 import re
 
+from .fuzzy import subsequence_score
+from .gateway_contract import REASONING_LEVELS
 from .style import Span, Style
 
 LOCAL = "local"
 HERMES = "hermes"
 DROPPED = "dropped"
 RENAMED = "renamed"
+CLASSIC = "classic"
 
 HERMES_DOOR = "hermes --tui"
 PLAN_COMMAND = "plan"  # Hermes' one-turn plan prompt; the TUI's plan mode sends every prompt through it
@@ -62,16 +83,22 @@ class SlashCommand:
     # prints nothing to attribute, so its echo would stand alone in scrollback as if it were a prompt; bare /model's
     # pick is echoed as the command it runs.
     echo_bare: bool = True
+    # The aliases the `/` menu offers under their own name, when what is typed starts one and is not in `name`:
+    # `/resume`, the name the launch card and the last-session line give /sessions. The rest still run, and are
+    # drawn as known, but get no row, so no alias ever displaces a command's own name.
+    menu_aliases: tuple[str, ...] = ()
 
 
 COMMANDS: tuple[SlashCommand, ...] = (
     # The terminal's own commands.
     SlashCommand("help", LOCAL, "Show commands"),
     SlashCommand("keys", LOCAL, "List every key (also ? on an empty composer)", echo_bare=False),
+    SlashCommand("whats-new", LOCAL, "Show what changed in this version of OMH (also said once after an update)",
+                 ("whatsnew",)),
     SlashCommand("quit", LOCAL, "Leave the OMH TUI", ("exit",)),
     SlashCommand("new", LOCAL, "Start a new session", ("clear", "reset")),
-    SlashCommand("sessions", LOCAL, "Switch to a stored session (a picker, or /sessions <id or title>)",
-                 ("switch", "session", "resume"), echo_bare=False),
+    SlashCommand("sessions", LOCAL, "Switch to a stored session (a picker; an id or exact title after it switches)",
+                 ("switch", "session", "resume"), echo_bare=False, menu_aliases=("resume",)),
     SlashCommand("redraw", LOCAL, "Repaint the screen", echo_bare=False),
     SlashCommand("history", LOCAL, "Page through this session's transcript", echo_bare=False),
     SlashCommand("rewind", LOCAL, "Go back to an earlier prompt, edit it, and send it again (also Esc Esc)",
@@ -79,25 +106,42 @@ COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("todos", LOCAL, "Show this session's whole plan"),
     SlashCommand("model", LOCAL, "Switch this session's model (a picker, or /model <name> [--provider <slug>])",
                  echo_bare=False),
-    SlashCommand("export", LOCAL, "Hermes' profile archive (config, skills, theme), not this transcript"),
+    SlashCommand("export", LOCAL,
+                 "Hermes' profile archive, not this transcript (`hermes profile export` on a shared gateway)"),
     SlashCommand("details", LOCAL, "Show or hide thinking and tool details", ("detail",)),
     SlashCommand("queue", LOCAL, "Show messages waiting for the current turn", ("q",)),
     SlashCommand("steer", LOCAL, "Add a message to the running turn (/steer <text>; Ctrl+Enter where it is a key)",
                  ("s",), echo=False),
     SlashCommand("effort", LOCAL, "Set this session's reasoning effort (/effort <level>; Ctrl+T steps through it)"),
+    SlashCommand("reasoning", LOCAL,
+                 "Hermes' /reasoning: a level sets this session's effort as /effort does; anything else goes to Hermes"),
+    SlashCommand("yolo", LOCAL,
+                 "Turn this session's approval prompts off or back on (/yolo [on|off]; Shift+Tab's accept all)"),
     SlashCommand("logs", LOCAL, "Show the gateway's recent stderr (kept in memory only)", echo_bare=False),
     SlashCommand("dag", LOCAL, "Show the delegation graph whole, with full boxes, in a pager", echo_bare=False),
+    SlashCommand("bots", LOCAL, "Watch this machine's Hermes profiles, gateways and sessions, read-only (also Ctrl+S)",
+                 echo_bare=False),
+    SlashCommand("gateway", LOCAL, "Restart Hermes' gateway and reattach to this session (/gateway restart)"),
     SlashCommand("copy", LOCAL, "Copy the last reply to the clipboard"),
     SlashCommand("image", LOCAL, "Attach an image file to the next message (/image <path>)"),
     SlashCommand("paste", LOCAL, "Attach the clipboard image to the next message (also Ctrl+V)"),
     SlashCommand("theme", LOCAL, "Pick the launch look (a picker), or /theme <look|palette|auto|light|dark>",
                  echo_bare=False),
+    SlashCommand("wallpaper", LOCAL,
+                 "Turn the look's background colour and its moving scene on or off (/wallpaper on|off)"),
+    SlashCommand("timestamps", LOCAL,
+                 "Show each turn's clock times on its done line for this run (/timestamps on|off|status)",
+                 ("ts",)),
     SlashCommand("omh-model", LOCAL, "Pick OMH model chains"),
+    SlashCommand("topup", LOCAL, "Nous credit balance and the top-up link (Hermes' /topup)"),
     SlashCommand("reload-skills", LOCAL, "Re-scan Hermes' skills, so one installed since the start runs as /<name>",
                  ("reload_skills",)),
     # Claude Code's names for Hermes' commands.
     SlashCommand("cost", RENAMED, "Token usage and rate limits (Hermes' /usage)", target="usage"),
     SlashCommand("permissions", RENAMED, "Show or set the persistent approval mode (Hermes' /approvals)", target="approvals"),
+    SlashCommand("compact", RENAMED,
+                 "Compress this session's context: [here [N] | <focus> | --preview] (Hermes' /compress)",
+                 target="compress"),
     # Surfaces that only Hermes' own terminal has.
     SlashCommand("update", HERMES, "Update Hermes"),
     SlashCommand("voice", HERMES, "Voice mode"),
@@ -108,7 +152,6 @@ COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("replay", HERMES, "Replay a spawn tree"),
     SlashCommand("replay-diff", HERMES, "Diff two spawn trees"),
     SlashCommand("agents", HERMES, "Spawn-tree dashboard", ("tasks",)),
-    SlashCommand("topup", HERMES, "Add credits"),
     SlashCommand("subscription", HERMES, "Change plan", ("upgrade",)),
     SlashCommand("setup", HERMES, "Run Hermes setup"),
     SlashCommand("skin", HERMES, "Hermes skin (the OMH TUI uses /theme)"),
@@ -131,6 +174,13 @@ COMMANDS: tuple[SlashCommand, ...] = (
     SlashCommand("dialog-test", DROPPED, "Demo widget"),
     SlashCommand("grid-test", DROPPED, "Demo widget"),
     SlashCommand("ticker", DROPPED, "Demo widget"),
+    # What only Hermes' classic CLI runs (`gateway/session_commands.py` REFUSAL_HINTS names the way to each).
+    SlashCommand("handoff", CLASSIC, "Hand the session to a messaging platform"),
+    SlashCommand("worktree", CLASSIC, "Start in a fresh git worktree"),
+    SlashCommand("snapshot", CLASSIC, "Back up or restore Hermes' state", ("snap",)),
+    SlashCommand("import", CLASSIC, "Import a profile archive"),
+    SlashCommand("hatch", CLASSIC, "Generate a pet", ("generate-pet",)),
+    SlashCommand("palette", CLASSIC, "Command palette"),
 )
 
 _BY_NAME: dict[str, SlashCommand] = {}
@@ -144,21 +194,20 @@ class SlashInvocation:
     """One slash command: `name` as typed (no slash), the rest as `arg`.
 
     `for_plan_mode` says the TUI wrote the command around a prompt the person
-    typed in plan mode, instead of the person typing the command. `held` says
-    a prompt the command sends waits for a running turn to end whatever the
-    busy mode: it is a steer Hermes did not take. `rewind` is the rewind the
-    person had picked when they sent it (the app's `Rewind`), or None: a
+    typed in plan mode, instead of the person typing the command. `rewind` is
+    the rewind the person had picked when they sent it (the app's `Rewind`), or None: a
     prompt it sends goes in place of the picked one while that very rewind is
     still picked. It is matched by identity, so it takes no part in `==` or
-    `hash()`.
+    `hash()`. `images` are the images typed with the command, which the
+    prompt it sends goes with; nor do they take part.
     """
 
     name: str
     arg: str
     command: SlashCommand | None
     for_plan_mode: bool = False
-    held: bool = False
     rewind: object | None = field(default=None, compare=False)
+    images: tuple[object, ...] = field(default=(), compare=False)  # the app's images a prompt it sends goes with
 
     @property
     def text(self) -> str:
@@ -198,6 +247,59 @@ def parse_slash(text: str) -> SlashInvocation | None:
     return SlashInvocation(head, arg.strip(), _BY_NAME.get(head.lower()))
 
 
+# The commands that run at once while a turn runs. Every other one (a skill's, Hermes' own, one Hermes adds later)
+# waits in the TUI's queue for the turn's end and runs then, in order, as a queued prompt goes (`App._run_slash`).
+# Closed: each name is here for the reason beside it, measured from what the command does.
+RUNS_DURING_TURN = frozenset({
+    "stop",  # Hermes' /stop: interrupts the running turn, which is what it is for
+    "steer",  # puts text into the running turn (Ctrl+Enter's command)
+    "queue",  # lists what waits for the running turn
+    "btw",  # Hermes' side question over a snapshot of the conversation (`prompt.btw`): its history stays untouched
+    "bg",  # Hermes' background prompt, run in a session of its own (`prompt.background`), not this one
+    "help",  # prints the command list
+    "keys",  # opens the key list in the pager
+    "whats-new",  # prints this version's What's new
+    "redraw",  # repaints this terminal
+    "history",  # pages through this transcript, in memory
+    "todos",  # prints the plan the panel already shows
+    "details",  # shows or hides thinking and tool detail on the screen
+    "logs",  # pages through the gateway's stderr, kept in memory
+    "dag",  # pages through the delegation graph the HUD already read
+    "bots",  # the read-only bot board
+    "copy",  # copies the last reply to the clipboard
+    "theme",  # this terminal's look
+    "wallpaper",  # this terminal's background and scene
+    "timestamps",  # whether a done line says its clock times, as its turn ends (the running one's too); this run only
+    "image",  # attaches an image to the draft, as a paste does during a turn; the turn gets nothing
+    "paste",  # attaches the clipboard image to the draft, as Ctrl+V does
+    "gateway",  # `/gateway restart` asks first, and Hermes' restart lets running turns, this one too, finish first
+    "quit",  # leaves the TUI, as Ctrl+C twice does during a turn: waiting would keep the person in it
+    "yolo",  # Shift+Tab's per-session approvals switch, typed: one `config.set`, which never starts or alters the turn
+    "effort",  # Ctrl+T's per-session reasoning effort, typed: one `config.set`, which never starts or alters the turn
+})
+# `/reasoning` runs at once only with a level, which sets the effort as `/effort` does (`App._reasoning_command`); bare,
+# or with anything else (`hide`, `show`, `--global`, ...), it is Hermes' own `/reasoning` and waits as Hermes' commands do.
+REASONING = "reasoning"
+
+
+def runs_during_turn(invocation: SlashInvocation) -> bool:
+    """Whether `invocation` runs at once while a turn runs (`RUNS_DURING_TURN`), instead of waiting for its end.
+
+    A command only Hermes' own terminal or its classic CLI runs, or one
+    dropped here, runs at once too: all it does is print a notice saying so
+    (Hermes' own pointer, for a classic one). An alias goes by the
+    command it names; a name the TUI does not know is Hermes' and queues
+    unless the list names it. `/reasoning` runs at once only with a level.
+    """
+    command = invocation.command
+    if command is not None and command.route in (HERMES, DROPPED, CLASSIC):
+        return True
+    name = command.name if command is not None else invocation.name.lower()
+    if name == REASONING:
+        return invocation.arg.strip().lower() in REASONING_LEVELS
+    return name in RUNS_DURING_TURN
+
+
 def plan_invocation(text: str) -> SlashInvocation:
     """`/plan <text>` for a prompt typed in plan mode, routed as a typed `/plan` is; the transcript shows the command."""
     return SlashInvocation(PLAN_COMMAND, text.strip(), _BY_NAME.get(PLAN_COMMAND), for_plan_mode=True)
@@ -208,8 +310,16 @@ def hermes_notice(command: SlashCommand) -> str:
     return f"/{command.name} runs in Hermes' own terminal: `{HERMES_DOOR}`."
 
 
+# What a dropped command's notice adds, where the OMH TUI has something near it.
+DROPPED_POINTERS = {
+    "statusbar": " The info line under the composer always shows; `display.show_cost: true` in Hermes' config.yaml "
+                 "adds the session's cost to it when Hermes reports one.",
+}
+
+
 def dropped_notice(command: SlashCommand) -> str:
-    return f"/{command.name} is an Ink display setting; the OMH TUI has no equivalent."
+    pointer = DROPPED_POINTERS.get(command.name, "")
+    return f"/{command.name} is an Ink display setting; the OMH TUI has no equivalent.{pointer}"
 
 
 @dataclass(frozen=True)
@@ -218,15 +328,33 @@ class Completion:
     summary: str
 
 
+def _offered_name(command: SlashCommand, key: str) -> str:
+    """The name the menu offers `command` under for the lowercased `key`: its own, unless `key` is not in it and
+    starts one of its `menu_aliases`, so `/res` and `/resu` offer `/resume` (which runs /sessions) among the names
+    that start with what is typed."""
+    if key in command.name:
+        return command.name
+    return next((alias for alias in command.menu_aliases if alias.startswith(key)), command.name)
+
+
 def completions(prefix: str, catalog_pairs: Iterable[tuple[str, str]] = ()) -> list[Completion]:
     """Commands starting with `prefix` (no slash), then the ones that only contain it.
 
     In each group the TUI's own come first, then the gateway catalog, so
     `/uml` still finds `omh-codebase-uml` after every name that starts with
-    it. Catalog entries the TUI routes to Hermes or drops are left out, so the
-    menu only offers what will run here. Case is ignored, as a typed name's is.
+    it. A TUI command whose name does not match is offered under a menu
+    alias that what is typed starts (`_offered_name`), after the TUI's own
+    names that start with it and before the catalog's: `/res` offers
+    `/resume` first. The alias completes to itself and runs as typed.
+    Catalog entries the TUI routes to Hermes or drops are left out, so the
+    menu only offers what will run here. Case is ignored, as a typed name's
+    is.
     """
-    local = [Completion(command.name, command.summary) for command in COMMANDS if command.route in (LOCAL, RENAMED)]
+    key = prefix.lower()
+    own = [command for command in COMMANDS if command.route in (LOCAL, RENAMED)]
+    named = [Completion(_offered_name(command, key), command.summary) for command in own]
+    aliased = [completion for completion, command in zip(named, own) if completion.name != command.name]
+    local = [completion for completion in named if completion not in aliased] + aliased
     seen = {completion.name for completion in local}
     gateway: list[Completion] = []
     for raw_name, summary in catalog_pairs:
@@ -236,11 +364,37 @@ def completions(prefix: str, catalog_pairs: Iterable[tuple[str, str]] = ()) -> l
         seen.add(name.lower())
         gateway.append(Completion(name, summary))
     offered = local + gateway
-    key = prefix.lower()
     leading = [completion for completion in offered if completion.name.lower().startswith(key)]
     inner = [
         completion for completion in offered if key in completion.name.lower() and not completion.name.lower().startswith(key)
     ]
+    near = {completion.name for completion in leading + inner}
+    scattered = [
+        (score, completion)
+        for completion in offered
+        if completion.name not in near and (score := subsequence_score(key, completion.name)) is not None
+    ]
+    scattered.sort(key=lambda item: (-item[0], item[1].name))
+    return leading + inner + [completion for _, completion in scattered]
+
+
+def skill_completions(prefix: str, catalog_pairs: Iterable[tuple[str, str]], skills: frozenset[str]) -> list[Completion]:
+    """The catalog's skills (`skills`, `catalog_skill_names`) whose name starts with `prefix`, then the ones that
+    only contain it; what a mid-line `/name` offers.
+
+    A `/skill` after other text names a skill for that message, as in Claude
+    Code; a built-in command means something only at the line's start, so
+    none is offered here, the TUI's own or Hermes'. No scattered matches:
+    a path word like `/opt` offers nothing unless a skill's name holds it.
+    """
+    key = prefix.lower()
+    offered = [
+        Completion(name.lstrip("/"), summary)
+        for name, summary in catalog_pairs
+        if name.lstrip("/").lower() in skills and name.lstrip("/").lower() not in _BY_NAME
+    ]
+    leading = [completion for completion in offered if completion.name.lower().startswith(key)]
+    inner = [completion for completion in offered if key in completion.name.lower() and completion not in leading]
     return leading + inner
 
 
@@ -248,13 +402,38 @@ def completions(prefix: str, catalog_pairs: Iterable[tuple[str, str]] = ()) -> l
 _SLASH_TOKEN = re.compile(r"(?<!\S)/([A-Za-z0-9][\w.:-]*)(?!\S)")
 
 
+def slash_token_at(text: str, caret: int) -> tuple[int, int, str] | None:
+    """(start, end, typed) of the `/name` being typed at `caret`, the one the `/` menu completes, or None.
+
+    Its `/` is at the input's start or right after whitespace (a newline too), and nothing between it and the caret
+    is whitespace or another `/`: `asdf /as` types `as`, a bare `/` after a space types "", and `./x`, `a/b`,
+    `~/x`, `http://x`, `//` and `/usr/bin` are no token. `typed` runs from the `/` to the caret, as Claude Code
+    filters; `end` is where the word under the caret ends, so a pick replaces the whole token and keeps the text on
+    both sides.
+    """
+    start = caret
+    while start > 0 and not text[start - 1].isspace():
+        start -= 1
+    word = text[start:caret]
+    if not word.startswith("/") or "/" in word[1:]:
+        return None
+    end = caret
+    while end < len(text) and not text[end].isspace():
+        end += 1
+    if "/" in text[caret:end]:
+        return None
+    return start, end, word[1:]
+
+
 def known_names(catalog_pairs: Iterable[tuple[str, str]] = ()) -> frozenset[str]:
-    """Every name a typed `/name` resolves to here: what completion offers, the TUI's commands and the catalog's.
+    """Every name a typed `/name` resolves to here: what completion offers, the TUI's commands (their aliases too)
+    and the catalog's.
 
     Lowercased: a typed name is matched whatever its case, as Hermes matches
     its commands and skills (`slash.exec` lowercases the name before it routes).
     """
-    return frozenset(completion.name.lower() for completion in completions("", catalog_pairs))
+    aliases = {alias for command in COMMANDS if command.route in (LOCAL, RENAMED) for alias in command.aliases}
+    return frozenset(completion.name.lower() for completion in completions("", catalog_pairs)) | aliases
 
 
 def slash_token_ranges(text: str, known: frozenset[str]) -> list[tuple[int, int]]:
@@ -287,6 +466,24 @@ def catalog_pairs(catalog: Mapping[str, object]) -> list[tuple[str, str]]:
         for pair in pairs
         if isinstance(pair, (list, tuple)) and len(pair) == 2 and all(isinstance(part, str) for part in pair)
     ]
+
+
+def catalog_skill_names(catalog: Mapping[str, object]) -> frozenset[str]:
+    """The lowercased names of the skills in a `commands.catalog` result: the pairs no category lists.
+
+    Hermes adds a skill to `pairs` alone and every command, quick command
+    and plugin command to a category too (`tui_gateway/command_discovery.py`),
+    so a name outside every category is a skill.
+    """
+    categories = catalog.get("categories")
+    listed = {
+        name.lstrip("/").lower()
+        for category in (categories if isinstance(categories, list) else [])
+        if isinstance(category, dict)
+        for name, _summary in catalog_pairs(category)
+    }
+    names = {name.lstrip("/").lower() for name, _summary in catalog_pairs(catalog)}
+    return frozenset(names - listed)
 
 
 def catalog_categories(catalog: Mapping[str, object]) -> list[tuple[str, list[str]]]:

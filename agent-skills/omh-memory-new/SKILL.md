@@ -1,6 +1,6 @@
 ---
 name: "omh-memory-new"
-description: "[omh] Project fact to remember across future sessions: capture one bounded durable project or product memory candidate through explicit remember, refuse, or defer review; for a past decision use decision-recall. Use when the user says: memory-new, new memory, project memory, product memory, remember this project, remember this product, do not save, do not save this token."
+description: "[omh] Project fact to remember across future sessions."
 license: MIT
 compatibility: "Requires the omh CLI on PATH (pip install oh-my-hermes)."
 metadata:
@@ -48,8 +48,9 @@ Bad example:
 
 ## Recovery Notes
 
-- If required context is missing, ask one blocking question or route back to the narrower workflow.
-- If runtime or wrapper evidence is unavailable, keep the status as not_observed and expose the next observable action.
+- If project versus user scope or lasting versus temporary retention is ambiguous, retain the bounded summary as a candidate, mark capture unresolved, and hand back one scope-or-durability question without claiming a write.
+- If `omh memory capture` is unavailable or fails, retain memory_new_candidate/v1 as prepared only, mark the write not_observed, and hand back the bounded summary, record_type, tags, scope, and retention_class. On Hermes the same applies when omh_memory returns error.
+- If capture returns pending_review with review_reason relative_time_phrase, restate the fact with an absolute date and capture it again in the same turn; for any other review_reason, retain the staged memory_new_candidate/v1, mark approval not_observed, and hand back the stated reason without treating it as an approved record.
 
 
 
@@ -57,7 +58,7 @@ Bad example:
 
 Use when the user wants to assess one new project, product, or context fact for OMH-local memory. Capture a clear durable fact directly, or refuse or defer it.
 
-    Strong routing signals: `memory-new`, `new memory`, `project memory`, `product memory`, `remember this project`, `remember this product`, `do not save`, `do not save this token`, `memory capture`, `capture memory`, `save project memory`, `save product memory`, `project context memory`, `product context memory`, `add memory candidate`, `프로젝트 메모리 저장`, `제품 메모리 저장`, `프로젝트 기억`, `제품 기억`, `새 기억`, `기억 추가`, `메모리 캡처`
+    Strong routing signals: `memory-new`, `new memory`, `project memory`, `product memory`, `remember this project`, `remember this product`, `do not save`, `do not save this token`, `memory capture`, `capture memory`, `save project memory`, `save product memory`, `project context memory`, `product context memory`, `add memory candidate`, `프로젝트 메모리 저장`, `제품 메모리 저장`, `프로젝트 기억`, `제품 기억`, `새 기억`, `기억 추가`, `메모리 캡처`, `запомни это`, `сохрани в память`, `добавь в память`, `запиши в память`, `запомни на будущее`
 
 ## Catalog Metadata
 

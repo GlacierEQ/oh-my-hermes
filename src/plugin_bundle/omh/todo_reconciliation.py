@@ -33,7 +33,8 @@ One more thing is counted rather than repeated. The reconciliation rule
 is the only sentence here that fired on every turn for as long as a plan
 existed, so it now spends a per-plan turn budget
 (`TODO_RECONCILIATION_FULL_TURNS`) and drops to its first clause once
-that is out, coming back in full on every write to the plan record. Both
+that is out, coming back in full on every write to the plan record. The
+answer-first rule spends the same budget (`TODO_ANSWER_FIRST_RULE_SHORT`). Both
 inputs are records -- the plan's `updated_at` and a per-session turn
 count in `hooks/nudge_budget` -- and a caller that is not a turn renders
 the rule whole.
@@ -285,6 +286,9 @@ TODO_DEFERRED_RULE = (
 # only fold available in it ("do not defer it, and do not ask to be asked
 # again" into one clause) is worth nine characters and deletes the phrase
 # `tests/test_person_turn_precedence.py` pins against the incident wording.
+# That holds for the turns right after a plan write. Past the reconciliation
+# budget it rides as `TODO_ANSWER_FIRST_RULE_SHORT` below, which keeps both
+# pinned phrases and the resume branch and drops the elaboration.
 TODO_ANSWER_FIRST_RULE = (
     "A message started this turn, so answering it completely is this turn's "
     "work, ahead of the next plan item. Investigate what it asks with the "
@@ -293,6 +297,30 @@ TODO_ANSWER_FIRST_RULE = (
     "checked -- check it, or say exactly what checking it would need. Then "
     "either record an omh_todo deferred_reason, if they steered the work "
     "elsewhere, or resume the plan."
+)
+
+# What the answer-first line carries once `TODO_RECONCILIATION_FULL_TURNS`
+# turns of one plan record have passed: the precedence, the two incident
+# guards in their pinned wording, and the record-first resume branch. Dropped
+# is the investigation sentence, which the unchecked-claim guard already
+# implies, and the "check it, or say exactly what checking it would need"
+# elaboration. The full rule comes back on every write to the plan record,
+# like the reconciliation rule's own budget, and every way of not knowing
+# renders the full rule.
+#
+# Measured before it shipped, not after: a live A/B (claude-haiku-5-5,
+# claude-sonnet-5-5, deepseek-v4.1-flash-ultrafast, deepseek-flash,
+# glm-5.3-ultrafast) put a factual claim the session could check into a
+# person's turn mid-plan, after 20 quiet turns on one plan. Unchecked
+# agreement or deferral: 1 of 119 with this line, 2 of 120 with the full rule,
+# 4 of 48 with the pre-#1705 drive. A long repeat was where the cost sat: on
+# the owner's machine the full rule had ridden 25 person turns in three days,
+# 11,125 characters kept in history until compaction.
+TODO_ANSWER_FIRST_RULE_SHORT = (
+    "A message started this turn: answer it ahead of the next plan item. Do "
+    "not agree with a claim you have not checked, and do not ask to be asked "
+    "again. Then either record an omh_todo deferred_reason, if they steered "
+    "the work elsewhere, or resume the plan."
 )
 
 # The instruction half of the reconciliation rule, split out because it is the
@@ -829,6 +857,19 @@ def plan_continuation_reading(
 ) -> tuple[str, str]:
     """The turn-end message for a session whose plan still has open work, and its stamp.
 
+    `plan_continuation_parts` without the open-item count.
+    """
+    message, stamp, _open_items = plan_continuation_parts(
+        omh_home=omh_home, hermes_home=hermes_home, session_ref=session_ref
+    )
+    return message, stamp
+
+
+def plan_continuation_parts(
+    *, omh_home: str = "", hermes_home: str = "", session_ref: str = ""
+) -> tuple[str, str, int]:
+    """The turn-end message, its stamp, and the open items its plan line names.
+
     ``TODO_CONTINUATION_RULE`` is already the right sentence delivered at the
     wrong moment: ``_open_plan_line`` renders it into the context of a turn
     that is already happening, so a turn that ends with open items ends
@@ -845,6 +886,11 @@ def plan_continuation_reading(
     different plan than the message does. It is returned even when the message
     is empty: a turn continued by something else still needs a baseline for the
     next attempt to measure against.
+
+    The third value is ``total - done`` from the plan line's own position, 0
+    when the message carries no plan line (no open plan, a blocked or deferred
+    next item, or only dispatch-outcome lines). It is the number the OMH TUI
+    words its catch row with, read from the same position the line printed.
     """
     # Dropping the dispatch lines with the plan is not a second F3:
     # `unacknowledged_outcomes` opens with this same `read_omh_todo` call and
@@ -855,9 +901,9 @@ def plan_continuation_reading(
     try:
         todo = read_omh_todo(omh_home or None, hermes_home or None, session_ref=session_ref)
     except _READ_FAILURES:
-        return "", ""
+        return "", "", 0
     if not isinstance(todo, dict):
-        return "", ""
+        return "", "", 0
     # Every write through `todo_store` restamps this, so it moves on any plan
     # edit rather than only on a completed item -- which is the notion of
     # progress the caller wants. Marking the next item active, re-scoping the
@@ -869,6 +915,7 @@ def plan_continuation_reading(
     position = open_plan_position(todo, unverified)
     item = next_open_item(todo, unverified) if position is not None else {}
     lines: list[str] = []
+    open_items = 0
     # The blocked item stops the PLAN line and nothing else. A finished
     # dispatch nobody wrote down is a separate obligation -- it is frequently
     # the thing that unblocks the item -- so gating both on one item's state
@@ -887,6 +934,7 @@ def plan_continuation_reading(
     # posture, attempt, final response and changed paths, and no message.
     if position is not None and not recorded_blocked_reason(item) and not plan_deferral_reason(todo):
         done, total = position
+        open_items = total - done
         head = f"[OMH plan todo] {done}/{total} done"
         text = item_display_text(item)
         if text:
@@ -909,9 +957,9 @@ def plan_continuation_reading(
         outcomes = []
     lines.extend(_dispatch_outcome_lines(outcomes))
     if not lines:
-        return "", stamp
+        return "", stamp, 0
     lines.append(PLAN_CONTINUATION_BOUNDARY)
-    return "\n".join(lines), stamp
+    return "\n".join(lines), stamp, open_items
 
 
 def _open_plan_line(
@@ -934,7 +982,7 @@ def _open_plan_line(
     position = open_plan_position(todo, unverified)
     if position is None:
         return "", False
-    reconciliation = _reconciliation_rule(
+    reconciliation, budget_spent = _reconciliation_rule(
         todo, session_ref=session_ref, count_turn=count_turn
     )
     done, total = position
@@ -977,7 +1025,8 @@ def _open_plan_line(
     # rule stays, being about a completion claim rather than about who is
     # owed the turn.
     if turn_opened_by_person(user_message, turn_display_kind):
-        return f"{head}. {TODO_ANSWER_FIRST_RULE} {reconciliation}", True
+        answer_first = TODO_ANSWER_FIRST_RULE_SHORT if budget_spent else TODO_ANSWER_FIRST_RULE
+        return f"{head}. {answer_first} {reconciliation}", True
     unchanged = todo_unchanged_text(todo)
     if not unchanged:
         return f"{head}. {drive} {reconciliation}", False
@@ -998,8 +1047,12 @@ def _open_plan_line(
 
 def _reconciliation_rule(
     todo: dict[str, Any], *, session_ref: str, count_turn: bool
-) -> str:
+) -> tuple[str, bool]:
     """The whole reconciliation rule, or its first clause once the budget is spent.
+
+    The flag says the budget is spent. The answer-first line reads it so the
+    two budgets cannot disagree about one turn: counting twice would advance
+    the per-session count by two.
 
     Two records decide it and nothing else: the plan's own ``updated_at``,
     which restarts the budget every time the plan is written, and a per-session
@@ -1012,12 +1065,12 @@ def _reconciliation_rule(
     repeating it, while losing a nudge costs nothing.
     """
     if not count_turn:
-        return TODO_RECONCILIATION_RULE
+        return TODO_RECONCILIATION_RULE, False
     stamp = todo.get("updated_at", "")
     already = plan_line_turns_on_record(session_ref, stamp if isinstance(stamp, str) else "")
     if already < TODO_RECONCILIATION_FULL_TURNS:
-        return TODO_RECONCILIATION_RULE
-    return TODO_RECONCILIATION_RULE_FIRST_CLAUSE
+        return TODO_RECONCILIATION_RULE, False
+    return TODO_RECONCILIATION_RULE_FIRST_CLAUSE, True
 
 
 def _dispatch_outcome_lines(

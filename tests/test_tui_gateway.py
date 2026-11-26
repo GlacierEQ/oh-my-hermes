@@ -88,6 +88,16 @@ class GatewaySpawnTests(unittest.TestCase):
     def test_import_path_is_just_the_hermes_root_when_nothing_was_handed_over(self) -> None:
         self.assertEqual(gateway_spawn(LAUNCHER_ENV).env["PYTHONPATH"], "/hermes/agent")
 
+    def test_herdrs_pane_id_stays_with_the_tui_and_the_rest_of_herdrs_environment_goes_on(self) -> None:
+        # herdr's Hermes plugin, loaded where the gateway runs, would report a `herdr:hermes` session for the pane,
+        # and herdr then refuses the TUI's own state reports (measured on herdr 0.9.5). The plugin needs the pane id;
+        # herdr's CLI and skill need the rest (its socket, `HERDR_ENV=1`), as for herdr's own pane-less popups.
+        herdr_env = {"HERDR_ENV": "1", "HERDR_SOCKET_PATH": "/run/herdr.sock", "HERDR_WORKSPACE_ID": "w1",
+                     "HERDR_TAB_ID": "w1:t1", "HERDR_BIN_PATH": "/opt/herdr"}
+        child = gateway_spawn({**LAUNCHER_ENV, **herdr_env, "HERDR_PANE_ID": "w1:p1"}).env
+        self.assertNotIn("HERDR_PANE_ID", child)
+        self.assertEqual({name: child.get(name) for name in herdr_env}, herdr_env)
+
     def test_sidecar_attach_and_frontend_names_are_removed_and_the_rest_kept(self) -> None:
         env = {
             **LAUNCHER_ENV,
@@ -263,7 +273,13 @@ class GatewayStartupTests(ReplayTestCase):
         # Far more than a pipe buffer: an undrained stderr would block the fake before ready.
         flood = tuple(f"warning {index}" for index in range(5000))
         client = self.started(Scenario("session", spans("session", "startup"), stderr=flood))
+        # Ready only proves the pipe never filled; the drain thread can still be a few
+        # thousand lines behind the fake's last write, so wait for it to catch up.
+        deadline = time.monotonic() + 10.0
         tail = client.stderr_tail()
+        while tail[-1:] != ["warning 4999"] and time.monotonic() < deadline:
+            time.sleep(0.02)
+            tail = client.stderr_tail()
         self.assertEqual(len(tail), STDERR_TAIL_LINES)
         self.assertEqual(tail[-1], "warning 4999")
 

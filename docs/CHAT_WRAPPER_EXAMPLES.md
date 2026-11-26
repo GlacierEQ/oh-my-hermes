@@ -60,11 +60,11 @@ the same vocabulary:
 - `omh chat interact ...` -> `coding_route_decision`, mirrored on
   `delegation.coding_route_decision`.
 
-Direct legacy `ultraprocess` invocations (now `ultrawork`'s delivery alias), broad coding delivery, and test-until-pass requests all
-report the same lane action, `prepare_one_cycle_delivery`. The lane action says
-which lane to prepare; it deliberately says nothing about who owns the code.
-Ownership is the separate `coding_route_decision.next_action`, which is always
-one of four states:
+Direct `ulw-work` invocations, broad coding delivery, and test-until-pass
+requests all report the same lane action, `prepare_one_cycle_delivery`. The lane
+action says which lane to prepare; it deliberately says nothing about who owns
+the code. Ownership is the separate `coding_route_decision.next_action`, which
+is always one of four states:
 
 | `next_action` | `source` | Meaning |
 | --- | --- | --- |
@@ -166,10 +166,24 @@ to approve a shell command. The backend form is:
 omh context brief --source discord --json "make an image card for this PR"
 ```
 
-The plugin-native form is the `omh_context` tool. Both return the same compact
-shape: OMH lanes, common cues, a generic-tool checkpoint, an optional route
-hint, catalog-question guidance, and the response contract. The raw prompt is
-represented by hash/length metadata only.
+The CLI returns the full brief. It contains OMH lanes, capability family cards,
+workflow context cards, common cues, a generic-tool checkpoint, an optional
+route hint, catalog-question guidance, and the response contract. The raw
+prompt is represented by hash/length metadata only.
+
+The plugin-native form is the `omh_context` tool, and it returns a compact view
+of the same brief. The tool's result rides every later model call of the
+session, so the view makes three changes:
+
+- It leaves out the capability family cards and workflow context cards.
+  `omh_capabilities` action=summary returns both unchanged.
+- It trims each checkpoint route to five fields: its tool family, workflow,
+  next action, fallback action, and not-evidence list.
+- It adds `view: "compact"` and an `expand` line saying where the dropped
+  parts are.
+
+The view keeps `schema_version: omh_context_brief/v1`, and every key it keeps
+has the full brief's value; `view` tells the two apart.
 
 When the message asks what OMH commands, workflows, or skills are available,
 the payload includes `catalog_question.schema_version ==
@@ -294,12 +308,12 @@ Example plan effect:
 
 ```text
 Hermes Agent  BOT
-[omh] ralplan - I routed this to `ulw-plan` because it needs a safe plan first.
+[omh] ulw-plan - I routed this to `ulw-plan` because it needs a safe plan first.
 
-Accept or revise the plan first; the handoff button stays disabled until
-acceptance. A draft plan is still only planning evidence.
+Accept or revise the plan first; choose the executor before handoff if needed.
+A draft plan is still only planning evidence.
 
-[ Accept plan ] [ Revise plan ] [ Prepare handoff disabled ]
+[ Accept plan ] [ Revise plan ] [ Choose coding agent ] [ Prepare handoff disabled ]
 ```
 
 These examples are locked by
@@ -530,8 +544,10 @@ This message needs no OMH workflow; Hermes can answer it directly in chat.
 
 The direct-answer card is chosen from `route_decision.reason_code`, a stable
 name for each of the router's answer-in-chat fallbacks. `direct_answer`,
-`host_command_turn`, `native_loop_cadence`, `typed_loop_goal`, and
-`loop_construct` give the direct-answer card; `file_lookup` keeps the no-hint
+`host_command_turn`, `native_loop_cadence`, `typed_loop_goal`,
+`loop_construct`, and `code_backlog` (a listed backlog of four or more code
+changes, made in the session without a workflow or child agents) give the
+direct-answer card; `file_lookup` keeps the no-hint
 card. The full route payload, `route` in both `omh chat route --json` and
 `omh chat interact --json`, carries the same `reason_code`. The key is
 additive: a route with none of these reasons has no `reason_code`, and
@@ -751,12 +767,15 @@ maintainer-1
 I want to safely add a feature to this repo
 
 Hermes Agent  BOT
-[omh] plan - I routed this to `omh-plan` because it needs a safe plan first.
+[omh] ulw-plan - I routed this to `ulw-plan` because it needs a safe plan first.
 
-Accept or revise the plan first; the handoff button stays disabled until
-acceptance. A draft plan is still only planning evidence.
+Accept or revise the plan first; choose the executor before handoff if needed.
+A draft plan is still only planning evidence.
 
-[ Accept plan ] [ Revise plan ] [ Prepare handoff ] disabled
+Prepared staged workflow: Interviewer -> Reviewer -> Builder -> Reviewer.
+Builder owner: executor choice required. Status: prepared_not_observed.
+
+[ Accept plan ] [ Revise plan ] [ Choose coding agent ] [ Prepare handoff ] disabled
 
 State
 - Phase: planning
@@ -769,7 +788,8 @@ User-facing effect:
 - The user does not need to know an `omh` command.
 - Hermes Agent explains why the request became a plan-first workflow and shows
   the visible OMH trace prefix on the first line.
-- The wrapper can show `Accept plan` and `Revise plan` immediately.
+- The wrapper can show `Accept plan`, `Revise plan`, and `Choose coding agent`
+  immediately.
 - `Prepare handoff` is visible but disabled until the plan is accepted.
 - The response names what is not evidence yet instead of sounding like coding
   already happened.
@@ -868,10 +888,10 @@ User-facing effect:
 - Prepared handoff is presented as ready to dispatch, not completed work.
 - If the selected profile is Codex, the wrapper can use the handoff's
   `$skill {message}` invocation, such as `$ai-slop-cleaner {message}`, rather
-  than asking the chat user to run it. Hermes/OMX/OMO/OMC profiles render a
-  runtime handoff with team/swarm, worker-protocol, and worktree guidance.
-  Claude Code and generic profiles render a copyable prompt handoff instead of
-  lifecycle evidence.
+  than asking the chat user to run it. Hermes, OMX, pi-family runtime, and
+  OMC profiles render a runtime handoff with team/swarm, worker-protocol, and
+  worktree guidance. Claude Code and generic profiles render a copyable prompt
+  handoff instead of lifecycle evidence.
 - `Start Codex session` and `Start Claude Code session` include an
   `executor_launch/v1` payload. The legacy v1 safety fields remain conservative:
   `ui_only`, `not_backend_execution`, and `execution_policy:
@@ -893,7 +913,7 @@ User-facing effect:
   to get `worktree_executor_binding/v1`. That payload contains resolved launch
   command templates and messenger actions such as `Open in Codex`,
   `Attach existing session`, and `Record opened`. For `claude-code`, it returns
-  Claude Code launch templates. For `hermes`, `omx-runtime`, `omo-runtime`, and
+  Claude Code launch templates. For `hermes`, `omx-runtime`, `pi-family-runtime`, and
   `omc-runtime`, it returns prompt/runtime guidance plus a separate runtime
   observation recipe. The bind payload is still not executor dispatch or result
   evidence.
@@ -929,7 +949,7 @@ then prepare investigation and reproduction questions. A coding handoff only
 follows after the signal is classified and reproduction or acceptance evidence
 exists.
 
-[ Triage signal ] [ Prepare triage report ] [ Show status ]
+[ Triage signal ] [ Prepare fix handoff ] disabled [ Prepare triage report ] [ Show status ]
 
 Claim boundary: Feedback triage is not a roadmap, implementation plan, or coding handoff by default.
 ```
@@ -1232,7 +1252,7 @@ operator
 쿠버네티스 장애 상황에서 Cloudy가 적절히 진단하나?
 
 Hermes Agent  BOT
-[omh] ultraqa - I can turn this into QA scenarios and observed checks.
+[omh] ulw-qa - I can turn this into QA scenarios and observed checks.
 
 I will prepare the QA lane: scenario list, expected behavior, cheap checks,
 expensive checks, known gaps, and follow-up handoff options. No product
@@ -1261,7 +1281,7 @@ pm
 온보딩을 더 부드럽게 만들고 싶어
 
 Hermes Agent  BOT
-[omh] deep-interview - This needs a clarification workflow before planning.
+[omh] ulw-interview - This needs a clarification workflow before planning.
 
 I will ask one blocking question at a time in this thread - at most 6 rounds -
 then hand off a clarified brief.

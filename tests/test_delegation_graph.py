@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -21,7 +22,10 @@ from omh.plugin_bundle.omh.delegation_graph import (  # noqa: E402
     build_delegation_graph,
     fanout_graph,
     graph_fingerprint,
+    RUN_USAGE_CHILD_LIMIT,
     graph_segments,
+    run_usage,
+    session_usage,
     team_unit_state,
 )
 from omh.plugin_bundle.omh.delegation_ledger import ledger_key  # noqa: E402
@@ -672,6 +676,295 @@ class OutputTokenTests(unittest.TestCase):
         self.assertNotIn("output_tokens", node(fanout_graph(record), "Core"))
 
 
+class UsageTests(unittest.TestCase):
+    """Each lane's `usage`: the input, cache and cost columns of its child's state.db row, absent where uncounted."""
+
+    @staticmethod
+    def with_columns(home) -> None:
+        """The `sessions` columns as Hermes declares them: counts default to 0, costs to NULL (no figure yet)."""
+        for column, kind in (("input_tokens", "INTEGER DEFAULT 0"), ("cache_read_tokens", "INTEGER DEFAULT 0"),
+                             ("cache_write_tokens", "INTEGER DEFAULT 0"), ("actual_cost_usd", "REAL"),
+                             ("estimated_cost_usd", "REAL")):
+            home.execute(f"ALTER TABLE sessions ADD COLUMN {column} {kind}")
+
+    @staticmethod
+    def with_usage_columns(home) -> None:
+        """`session_model_usage`'s counting columns as Hermes declares them: every one NOT NULL DEFAULT 0, and the
+        nullable `cost_status` only the main loop writes."""
+        for column, kind in (("task", "TEXT"), ("input_tokens", "INTEGER"), ("output_tokens", "INTEGER"),
+                             ("cache_read_tokens", "INTEGER"), ("cache_write_tokens", "INTEGER"),
+                             ("estimated_cost_usd", "REAL"), ("actual_cost_usd", "REAL")):
+            default = "''" if kind == "TEXT" else "0"
+            home.execute(f"ALTER TABLE session_model_usage ADD COLUMN {column} {kind} NOT NULL DEFAULT {default}")
+        home.execute("ALTER TABLE session_model_usage ADD COLUMN cost_status TEXT")
+
+    @staticmethod
+    def call(home, session: str, task: str, uncached: int, output: int, read: int = 0, write: int = 0, *,
+             estimated: float = 0.0, actual: float = 0.0, cost_status: str | None = None) -> None:
+        """One `session_model_usage` row: the main loop's (task ``''`` or a per-turn route's, with the `cost_status`
+        `turn_usage` always passes) or an auxiliary call's under its task (no `cost_status`)."""
+        home.execute("INSERT INTO session_model_usage (session_id, model, task, api_call_count, input_tokens, "
+                     "output_tokens, cache_read_tokens, cache_write_tokens, estimated_cost_usd, actual_cost_usd, "
+                     "cost_status, last_seen) VALUES (?, 'm', ?, 1, ?, ?, ?, ?, ?, ?, ?, 1)",
+                     (session, task, uncached, output, read, write, estimated, actual, cost_status))
+
+    @staticmethod
+    def count(home, session: str, uncached: int, read: int, write: int, *, actual: float | None = None,
+              estimated: float | None = None) -> None:
+        home.execute("UPDATE sessions SET input_tokens = ?, cache_read_tokens = ?, cache_write_tokens = ?, "
+                     "actual_cost_usd = ?, estimated_cost_usd = ? WHERE id = ?",
+                     (uncached, read, write, actual, estimated, session))
+
+    def test_a_lane_carries_its_childs_input_cache_and_cost(self) -> None:
+        with homes() as home:
+            three_lanes(home)
+            self.with_columns(home)
+            self.count(home, "child-0", 120, 4_000, 300, actual=0.5)
+            self.count(home, "child-1", 10, 0, 0, estimated=0.02)
+            graph = built(home)
+        self.assertEqual(node(graph, "Refresh HUD docs")["usage"],
+                         {"input": 120, "cache_read": 4_000, "cache_write": 300, "output": 0, "cost_usd": 0.5})
+        self.assertEqual(node(graph, "Polish HUD CLI")["usage"],
+                         {"input": 10, "cache_read": 0, "cache_write": 0, "output": 0, "cost_usd": 0.02,
+                          "cost_estimated": True})
+        self.assertNotIn("usage", node(graph, "Update HUD tests"), "a child that counted nothing has no usage")
+        self.assertNotIn("usage", graph["nodes"][0], "the root is the conversation, not a lane")
+
+    def test_tokens_hermes_did_not_price_stay_tokens(self) -> None:
+        with homes() as home:
+            three_lanes(home)
+            self.with_columns(home)
+            self.count(home, "child-0", 50, 900, 0)
+            usage = node(built(home), "Refresh HUD docs")["usage"]
+        self.assertEqual(usage, {"input": 50, "cache_read": 900, "cache_write": 0, "output": 0})
+
+    def test_a_provider_reported_zero_is_a_zero_cost_not_the_estimate(self) -> None:
+        """Mutation: read `actual_cost_usd` 0 as absent (the estimate takes over), or NULL as a reported 0."""
+        with homes() as home:
+            three_lanes(home)
+            self.with_columns(home)
+            self.count(home, "child-0", 50, 900, 0, actual=0.0, estimated=0.04)
+            self.count(home, "child-1", 50, 900, 0, estimated=0.04)
+            graph = built(home)
+        self.assertEqual(node(graph, "Refresh HUD docs")["usage"]["cost_usd"], 0.0)
+        self.assertNotIn("cost_estimated", node(graph, "Refresh HUD docs")["usage"])
+        self.assertEqual((node(graph, "Polish HUD CLI")["usage"]["cost_usd"],
+                          node(graph, "Polish HUD CLI")["usage"]["cost_estimated"]), (0.04, True))
+
+    def test_a_lane_counts_its_childs_auxiliary_calls(self) -> None:
+        """Mutation: read only the `sessions` row, or add the main loop's own usage rows on top of it."""
+        with homes() as home:
+            three_lanes(home)
+            self.with_columns(home)
+            self.with_usage_columns(home)
+            home.tokens("child-0", 200)
+            self.count(home, "child-0", 120, 4_000, 300, actual=0.5)
+            self.call(home, "child-0", "", 120, 200, 4_000, 300, actual=0.5,  # the main loop, already in the row
+                      cost_status="estimated")
+            self.call(home, "child-0", "compression", 2_000, 400, estimated=0.01)
+            usage = node(built(home), "Refresh HUD docs")["usage"]
+        self.assertEqual(usage, {"input": 2_120, "cache_read": 4_000, "cache_write": 300, "output": 600,
+                                 "cost_usd": 0.51, "cost_estimated": True})
+
+    def test_a_rotated_child_adds_its_segments_and_marks_a_cost_one_segment_lacks_as_a_floor(self) -> None:
+        with homes() as home:
+            start(home, "child-0", "sa-0", "Long lane", now=NOW)
+            home.session("child-0", "glm-5.3-flash", parent=PARENT, started=NOW)
+            home.usage("child-0", "glm-5.3-flash", last_seen=NOW + 20)
+            home.rotate("child-0", "child-0b", at=NOW + 30)
+            home.usage("child-0b", "glm-5.3-flash", last_seen=NOW + 90)
+            self.with_columns(home)
+            self.count(home, "child-0", 100, 1_000, 50, actual=0.25)
+            self.count(home, "child-0b", 40, 3_000, 0)
+            summed = node(built(home), "Long lane")["usage"]
+            self.count(home, "child-0b", 40, 3_000, 0, actual=0.5)
+            priced = node(built(home), "Long lane")["usage"]
+        self.assertEqual(summed, {"input": 140, "cache_read": 4_000, "cache_write": 50, "output": 0, "cost_usd": 0.25,
+                                  "cost_partial": True})
+        self.assertEqual(priced, {"input": 140, "cache_read": 4_000, "cache_write": 50, "output": 0, "cost_usd": 0.75})
+
+    def test_a_state_db_without_the_columns_gives_no_usage_and_the_rest_stands(self) -> None:
+        with homes() as home:
+            three_lanes(home)
+            home.tokens("child-0", 1_234)
+            graph = built(home)
+        self.assertNotIn("usage", node(graph, "Refresh HUD docs"))
+        self.assertEqual(node(graph, "Refresh HUD docs")["output_tokens"], 1_234)
+
+    def test_a_count_that_moves_does_not_move_the_fingerprint(self) -> None:
+        with homes() as home:
+            three_lanes(home)
+            self.with_columns(home)
+            self.count(home, "child-0", 1, 2, 3)
+            first = built(home)
+            self.count(home, "child-0", 9_000, 8_000, 7_000)
+            self.assertEqual(graph_fingerprint(first), graph_fingerprint(built(home)))
+
+
+class SessionUsageTests(unittest.TestCase):
+    """`session_usage`: the figures the pane's usage board shows for the chat itself, not for its children."""
+
+    def test_a_chat_carries_its_own_figures_and_not_its_childrens(self) -> None:
+        with homes() as home:
+            home.session(PARENT, "gpt-6-luna", started=NOW)
+            home.session("child-0", "glm-5.3-flash", parent=PARENT, started=NOW)
+            UsageTests.with_columns(home)
+            home.tokens(PARENT, 630)
+            UsageTests.count(home, PARENT, 120, 4_000, 300, actual=0.5)
+            UsageTests.count(home, "child-0", 9, 9, 9, actual=9.0)
+            usage = session_usage(home.hermes, PARENT)
+        self.assertEqual(usage, {"session_id": PARENT, "model": "gpt-6-luna", "output": 630, "input": 120,
+                                 "cache_read": 4_000, "cache_write": 300, "cost_usd": 0.5})
+
+    def test_a_chats_auxiliary_calls_count_once_beside_its_row(self) -> None:
+        """Mutation: drop the auxiliary rows, add the main loop's rows on top of the row, or price an unpriced call."""
+        with homes() as home:
+            home.session(PARENT, "gpt-6-luna", started=NOW)
+            UsageTests.with_columns(home)
+            UsageTests.with_usage_columns(home)
+            home.tokens(PARENT, 630)
+            UsageTests.count(home, PARENT, 120, 4_000, 300, actual=0.5)
+            UsageTests.call(home, PARENT, "", 120, 630, 4_000, 300, actual=0.5, cost_status="estimated")
+            UsageTests.call(home, PARENT, "title_generation", 300, 12, estimated=0.001)
+            UsageTests.call(home, PARENT, "compression", 5_000, 800, 1_000, estimated=0.02)
+            priced = session_usage(home.hermes, PARENT)
+            UsageTests.call(home, PARENT, "vision", 900, 40)
+            unpriced = session_usage(home.hermes, PARENT)
+        self.assertEqual(priced, {"session_id": PARENT, "model": "gpt-6-luna", "output": 1_442, "input": 5_420,
+                                  "cache_read": 5_000, "cache_write": 300, "cost_usd": 0.521, "cost_estimated": True})
+        self.assertEqual(unpriced, {"session_id": PARENT, "model": "gpt-6-luna", "output": 1_482, "input": 6_320,
+                                    "cache_read": 5_000, "cache_write": 300, "cost_usd": 0.521, "cost_estimated": True,
+                                    "cost_partial": True},
+                         "a call Hermes did not price keeps the priced sum, marked as a floor")
+
+    def test_a_voice_turn_counts_once_beside_an_auxiliary_call(self) -> None:
+        """Mutation: count a per-turn route's `voice_chat` rows (already in the `sessions` row) as auxiliary calls.
+
+        Hermes' `update_token_counts(task="voice_chat")` adds the turn to the row and writes it under that task too.
+        """
+        with homes() as home:
+            home.session(PARENT, "gpt-6-luna", started=NOW)
+            UsageTests.with_columns(home)
+            UsageTests.with_usage_columns(home)
+            home.tokens(PARENT, 700)
+            UsageTests.count(home, PARENT, 1_100, 4_000, 300, actual=0.6)  # the text turn and the voice turn
+            UsageTests.call(home, PARENT, "", 1_000, 600, 4_000, 300, actual=0.5, cost_status="estimated")
+            UsageTests.call(home, PARENT, "voice_chat", 100, 100, actual=0.1, cost_status="estimated")
+            UsageTests.call(home, PARENT, "compression", 2_000, 400, estimated=0.02)
+            counted = session_usage(home.hermes, PARENT)
+            # A route task named nowhere yet is still a main-loop row: `turn_usage` gave it a `cost_status`.
+            UsageTests.call(home, PARENT, "a_later_route", 50, 50, estimated=0.01, cost_status="estimated")
+            later = session_usage(home.hermes, PARENT)
+        self.assertEqual(counted, {"session_id": PARENT, "model": "gpt-6-luna", "output": 1_100, "input": 3_100,
+                                   "cache_read": 4_000, "cache_write": 300, "cost_usd": 0.62,
+                                   "cost_estimated": True})
+        self.assertEqual(later, counted)
+
+    def test_a_chat_whose_only_counts_are_auxiliary_or_whose_usage_table_is_older_reads_as_its_row(self) -> None:
+        with homes() as home:
+            home.session(PARENT, "gpt-6-luna", started=NOW)
+            UsageTests.with_columns(home)
+            UsageTests.with_usage_columns(home)
+            UsageTests.call(home, PARENT, "title_generation", 300, 12, estimated=0.001)
+            only_auxiliary = session_usage(home.hermes, PARENT)
+        with homes() as home:
+            # `session_model_usage` without `task`: no auxiliary call can be told from the main loop's, so the row.
+            home.session(PARENT, "gpt-6-luna", started=NOW)
+            UsageTests.with_columns(home)
+            home.tokens(PARENT, 630)
+            UsageTests.count(home, PARENT, 120, 4_000, 300, actual=0.5)
+            home.usage(PARENT, "gpt-6-luna", last_seen=NOW)
+            older = session_usage(home.hermes, PARENT)
+            home.execute("ALTER TABLE session_model_usage RENAME TO session_model_usage_gone")
+            missing = session_usage(home.hermes, PARENT)
+        self.assertEqual(only_auxiliary, {"session_id": PARENT, "model": "gpt-6-luna", "output": 12, "input": 300,
+                                          "cache_read": 0, "cache_write": 0, "cost_usd": 0.001,
+                                          "cost_estimated": True})
+        row = {"session_id": PARENT, "model": "gpt-6-luna", "output": 630, "input": 120, "cache_read": 4_000,
+               "cache_write": 300, "cost_usd": 0.5}
+        self.assertEqual((older, missing), (row, row))
+
+    def test_a_compacted_chat_adds_its_segments_and_marks_a_cost_one_segment_lacks_as_a_floor(self) -> None:
+        with homes() as home:
+            home.session(PARENT, "gpt-6-luna", started=NOW)
+            home.rotate(PARENT, f"{PARENT}b", at=NOW + 30)
+            UsageTests.with_columns(home)
+            home.tokens(PARENT, 100)
+            home.tokens(f"{PARENT}b", 50)
+            UsageTests.count(home, PARENT, 100, 1_000, 50, actual=0.25)
+            UsageTests.count(home, f"{PARENT}b", 40, 3_000, 0)
+            usage = session_usage(home.hermes, PARENT)
+        self.assertEqual(usage, {"session_id": PARENT, "model": "gpt-6-luna", "output": 150, "input": 140,
+                                 "cache_read": 4_000, "cache_write": 50, "cost_usd": 0.25, "cost_partial": True})
+
+    def test_an_estimated_cost_is_marked_and_an_unpriced_chat_has_none(self) -> None:
+        with homes() as home:
+            home.session(PARENT, "gpt-6-luna", started=NOW)
+            UsageTests.with_columns(home)
+            UsageTests.count(home, PARENT, 10, 20, 0, estimated=0.02)
+            estimated = session_usage(home.hermes, PARENT)
+            UsageTests.count(home, PARENT, 10, 20, 0)
+            unpriced = session_usage(home.hermes, PARENT)
+        self.assertEqual(estimated, {"session_id": PARENT, "model": "gpt-6-luna", "output": 0, "input": 10,
+                                     "cache_read": 20, "cache_write": 0, "cost_usd": 0.02, "cost_estimated": True})
+        self.assertEqual(unpriced, {"session_id": PARENT, "model": "gpt-6-luna", "output": 0, "input": 10,
+                                    "cache_read": 20, "cache_write": 0})
+
+    def test_a_state_db_without_the_columns_still_gives_the_output(self) -> None:
+        with homes() as home:
+            home.session(PARENT, "gpt-6-luna", started=NOW)
+            home.tokens(PARENT, 1_234)
+            usage = session_usage(home.hermes, PARENT)
+        self.assertEqual(usage, {"session_id": PARENT, "model": "gpt-6-luna", "output": 1_234})
+
+    def test_a_chat_with_no_row_or_no_count_or_no_database_has_no_figures(self) -> None:
+        with homes() as home:
+            self.assertIsNone(session_usage(home.hermes, "no-such-chat"))
+            home.session(PARENT, "gpt-6-luna", started=NOW)
+            self.assertIsNone(session_usage(home.hermes, PARENT))
+        self.assertIsNone(session_usage(Path("/nonexistent/hermes"), PARENT))
+
+
+class RunUsageTests(unittest.TestCase):
+    """`run_usage`: a dag run's children added up, each with its compaction segments and auxiliary calls (#2684)."""
+
+    def test_children_add_up_with_their_segments_and_a_repeated_id_counts_once(self) -> None:
+        """Mutation: drop a compacted child's later segment, or count a child named twice twice."""
+        with homes() as home:
+            home.session("child-0", "glm-5.3-flash", parent=PARENT, started=NOW)
+            home.rotate("child-0", "child-0b", at=NOW + 30)
+            home.session("child-1", "glm-5.3-flash", parent=PARENT, started=NOW)
+            UsageTests.with_columns(home)
+            home.tokens("child-0", 100)
+            home.tokens("child-0b", 50)
+            home.tokens("child-1", 10)
+            UsageTests.count(home, "child-0", 100, 1_000, 50, actual=0.25)
+            UsageTests.count(home, "child-0b", 40, 3_000, 0, actual=0.05)
+            UsageTests.count(home, "child-1", 5, 0, 0, actual=0.0)
+            usage = run_usage(home.hermes, ["child-0", "child-1", "child-0", "", "child-gone"])
+        self.assertEqual(usage, {"input": 145, "cache_read": 4_000, "cache_write": 50, "output": 160,
+                                 "cost_usd": 0.3, "children": 2, "children_unrecorded": 1, "priced": 2})
+
+    def test_children_past_the_cap_are_named_unread_and_the_cost_is_a_floor(self) -> None:
+        children = [f"child-{at}" for at in range(RUN_USAGE_CHILD_LIMIT + 2)]
+        with homes() as home:
+            UsageTests.with_columns(home)
+            for child in children:
+                home.session(child, "glm-5.3-flash", parent=PARENT, started=NOW)
+                UsageTests.count(home, child, 10, 0, 0, actual=0.01)
+            usage = run_usage(home.hermes, children)
+        self.assertEqual((usage["children"], usage["children_unread"], usage["priced"]),
+                         (RUN_USAGE_CHILD_LIMIT, 2, RUN_USAGE_CHILD_LIMIT))
+        self.assertTrue(usage["cost_partial"])
+
+    def test_no_child_no_count_or_no_database_is_no_usage(self) -> None:
+        with homes() as home:
+            self.assertIsNone(run_usage(home.hermes, []))
+            home.session("child-0", "glm-5.3-flash", parent=PARENT, started=NOW)
+            self.assertIsNone(run_usage(home.hermes, ["child-0"]))
+        self.assertIsNone(run_usage(Path("/nonexistent/hermes"), ["child-0"]))
+
+
 class NoRaiseTests(unittest.TestCase):
     def test_a_broken_database_or_record_leaves_the_graph_smaller_never_an_exception(self) -> None:
         with homes() as home:
@@ -709,6 +1002,407 @@ class NoRaiseTests(unittest.TestCase):
                     home.hermes.chmod(0o700)
                 self.assertIn(graph["status"], ("active", "inactive"))
                 self.assertEqual(segments, [PARENT])
+
+
+
+def _layered_graph(states: list[str], width: int = 3, summary: int = 400) -> dict:
+    """A run of `len(states)` layers of `width` lanes, each lane waiting on every lane of the layer above it."""
+    from omh.plugin_bundle.omh.delegation_graph import _finish
+
+    lanes, edges = [], []
+    for at, state in enumerate(states):
+        for index in range(width):
+            lane = f"L{at}-{index}"
+            lanes.append({"id": lane, "kind": "lane", "state": state, "order": at * width + index, "group": f"layer {at + 1}",
+                          "summary": "x" * summary})
+            edges += [{"from": f"L{at - 1}-{up}", "to": lane, "kind": "depends_on"} for up in range(width)] if at else [
+                {"from": "root", "to": lane, "kind": "dispatch"}]
+    return _finish("run", [{"id": "root", "kind": "root"}, *lanes], edges, "session", source="dag")
+
+
+def _tree_lane(index: int, state: str) -> dict:
+    return {"id": f"n{index}", "kind": "lane", "title": f"N{index}", "category": "deep", "model": "m", "effort": "",
+            "state": state, "status": state, "elapsed_seconds": None, "order": index + 1, "group": ""}
+
+
+def _tree_graph(parents: int, children: int) -> dict:
+    """A native tree: `parents` lanes under the root, `children` more spread across them."""
+    from omh.plugin_bundle.omh.delegation_graph import _finish
+
+    nodes = [{"id": "root", "kind": "root", "title": "main", "state": "root", "order": 0, "group": ""}]
+    edges = []
+    for index in range(parents + children):
+        nodes.append(_tree_lane(index, "done"))
+        edges.append({"from": "root" if index < parents else f"n{index % parents}", "to": f"n{index}", "kind": "dispatch"})
+    return _finish("tree", nodes, edges, "session")
+
+
+def _dag_ulw_graph() -> dict:
+    """A dag-ulw run at its 48-node cap, six layers of eight, long titles: the byte limit cuts it."""
+    from omh.plugin_bundle.omh.delegation_graph import _finish
+
+    nodes = [{"id": "root", "kind": "root", "title": "main", "state": "running", "order": 0, "group": ""}]
+    edges = []
+    for at in range(6):
+        for index in range(8):
+            node = f"n{at}{index}"
+            state = "done" if at < 2 else "running" if at == 2 and index < 3 else "dispatched" if at == 2 else "waiting"
+            nodes.append({"id": f"d:run:{node}", "kind": "lane", "title": f"Step {at}.{index} " + "t" * 100,
+                          "category": "quick", "model": "glm-5.3-flash", "effort": "low", "state": state,
+                          "status": state, "order": at * 8 + index + 1, "group": f"layer {at + 1}", "dag_node": node,
+                          "dag_origin": "define", "role": "build", "summary": "s" * 80, "waits_on": 2 if at else 0})
+            edges += ([{"from": "root", "to": f"d:run:{node}", "kind": "dispatch"}] if not at else
+                      [{"from": f"d:run:n{at - 1}{up}", "to": f"d:run:{node}", "kind": "depends_on"}
+                       for up in (index, (index + 1) % 8)])
+    graph = _finish("Export feature", nodes, edges, "session", source="dag")
+    graph["dag_open"] = True
+    graph["dag_topology"] = {"critical_path": [f"Step {at}.0 " + "t" * 100 for at in range(6)],
+                             "bottlenecks": [["Step 0.0 " + "t" * 100, 40]]}
+    return graph
+
+
+def _graph_of(nodes: list[dict], edges: list[tuple[str, str]]) -> dict:
+    from omh.plugin_bundle.omh.delegation_graph import _finish
+
+    return _finish("g", [{"id": "root", "kind": "root", "state": "running", "order": 0}, *nodes],
+                   [{"from": tail, "to": head, "kind": "depends_on"} for tail, head in edges], "session", source="dag")
+
+
+def _size(graph: dict) -> int:
+    return len(json.dumps(graph, sort_keys=True, default=str).encode("utf-8"))
+
+
+class MainReaderCutTests(unittest.TestCase):
+    """Every reader but the Desktop pane (the TUI block, the chat end post, `omh hud`) gets the cut main gave it.
+
+    The digests and figures were measured on main at 8dda65417 (`_bounded` before #2745), from these same graphs.
+    """
+
+    # name: (sha256 of the sorted-key JSON, nodes, edges, hidden_nodes)
+    MAIN = {
+        "small": ("e1b3cdc1858dd249e8b969852606eff3fdb297ac292d29dc17b8ebca449ccbdb", 4, 3, 0),
+        "tree5x50": ("a8edc824626960e8dc0bf9c5e771154f894817870d9d532deefc568909845d92", 53, 52, 3),
+        "dag": ("ea418616bffafddfe39dd46cbbf9b2a9de79b8fd5823e6f075b21ad7a60b8730", 37, 64, 12),
+    }
+
+    def test_the_tui_and_chat_readers_get_mains_cut_byte_for_byte(self) -> None:
+        """Mutation: send every reader the pane's layered cut, which draws a 5x50 tree as 47 lanes under the root."""
+        import hashlib
+
+        from omh.plugin_bundle.omh import delegation_graph
+
+        for name, graph in (("small", _tree_graph(3, 0)), ("tree5x50", _tree_graph(5, 50)), ("dag", _dag_ulw_graph())):
+            with self.subTest(name=name), patch.object(delegation_graph, "_build", return_value=graph):
+                out = build_delegation_graph(Path("omh"), Path("hermes"), "", now=NOW)
+                digest = hashlib.sha256(json.dumps(out, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+                self.assertEqual((digest, len(out["nodes"]), len(out["edges"]), out["hidden_nodes"]), self.MAIN[name])
+                self.assertFalse(any("layer" in node for node in out["nodes"]))
+
+    def test_only_the_panes_read_asks_for_the_layered_cut(self) -> None:
+        from omh.plugin_bundle.omh import runtime_reader
+
+        asked: list[bool] = []
+
+        def record(*args, **kwargs):
+            asked.append(kwargs.get("layered", False))
+            return {"status": "inactive", "reason": "none", "nodes": [], "edges": []}
+
+        with homes() as home, patch.object(runtime_reader, "build_delegation_graph", side_effect=record):
+            runtime_reader.read_omh_hud(home.omh, home.hermes, session_ref=PARENT, session_scoped=True,
+                                        tui_identity_expected=True)
+            runtime_reader.read_omh_hud(home.omh, home.hermes)
+            runtime_reader.read_omh_hud(home.omh, home.hermes, session_ref=PARENT, session_scoped=True, dag_run="")
+        self.assertEqual(asked, [False, False, True])
+
+
+class PaneSessionBindingTests(unittest.TestCase):
+    """The fanout record is the home's: a pane naming its chat is never drawn a fanout another chat dispatched.
+
+    The fanouts here are real records (`write_fanout_contract`), read the way the HUD reads them, with or without
+    the dispatch summary that names the origin chat when the dispatch ends.
+    """
+
+    QUIET = "20261110_000000_quiet"
+    OTHER = "20261110_000000_other"
+    READS = {
+        "pane, named chat without a graph": dict(session_ref=QUIET, session_scoped=True, tui_identity_expected=True,
+                                                 dag_run=""),
+        "pane, named chat with its own graph": dict(session_ref=PARENT, session_scoped=True,
+                                                    tui_identity_expected=True, dag_run=""),
+        "pane, no chat named": dict(session_ref="", session_scoped=True, dag_run=""),
+        "tui block, named": dict(session_ref=QUIET, session_scoped=True, tui_identity_expected=True),
+        "omh hud": {},
+    }
+
+    def _graphs(self, origin: str | None, *, fanout: bool = True) -> dict[str, tuple[str, str, str]]:
+        """Each reader's (status, source, scope), with another chat's native graph in the home; ``origin`` None is a
+        fanout whose dispatch has not ended (no summary), "" one whose summary names no origin."""
+        from omh.coding.fanout import build_fanout_contract
+        from omh.coding.fanout_artifacts import fanout_dispatch_summary_path, write_fanout_contract
+        from omh.plugin_bundle.omh import runtime_reader
+        from omh.system.paths import OmhPaths
+
+        out = {}
+        with homes() as home:
+            start(home, "child-0", "sa-0", "Another chat's lane", now=time.time())
+            if fanout:
+                paths = OmhPaths(omh_home=home.omh, hermes_home=home.hermes)
+                recorded = write_fanout_contract(paths, build_fanout_contract("Shared fanout", [
+                    {"unit_id": "api", "file_scope": ["src/api/"], "depends_on": []}]))
+                if origin is not None:
+                    unit = {"unit_id": "api", "status": "completed", **({"origin_session_id": origin} if origin else {})}
+                    summary = {"schema_version": "fanout_dispatch_summary/v1", "fanout_id": recorded["fanout_id"],
+                               "units": [unit], **({"origin_session_id": origin} if origin else {})}
+                    fanout_dispatch_summary_path(paths, str(recorded["fanout_id"])).write_text(
+                        json.dumps(summary), encoding="utf-8")
+            for name, kwargs in self.READS.items():
+                graph = runtime_reader.read_omh_hud(home.omh, home.hermes, **kwargs)["delegation_graph"]
+                out[name] = (graph["status"], graph.get("source", ""), graph.get("scope", ""))
+        return out
+
+    def test_a_named_chat_is_drawn_only_a_fanout_no_other_chat_dispatched(self) -> None:
+        """Mutation: offer every fanout to a named chat (another chat's run shows), or none (its own running one goes
+        blank until the dispatch ends)."""
+        fanout_home = ("active", "fanout", "global")
+        unchanged = {
+            "pane, named chat with its own graph": ("active", "native", "session"),
+            "pane, no chat named": fanout_home,
+            "tui block, named": fanout_home,
+            "omh hud": ("active", "native", "global"),
+        }
+        cases = {
+            # Still running: no summary yet, so no origin. Drawn, marked as the home's.
+            "running, no origin": (None, True, fanout_home),
+            # Ended, its summary naming no origin (dispatched outside Hermes, or before origins were recorded).
+            "ended, no origin": ("", True, fanout_home),
+            "ended, this chat's origin": (self.QUIET, True, ("active", "fanout", "session")),
+            "ended, another chat's origin": (self.OTHER, True, ("inactive", "", "session")),
+            "no fanout, another chat's native graph": (None, False, ("inactive", "", "session")),
+        }
+        for name, (origin, fanout, named) in cases.items():
+            with self.subTest(name=name):
+                expected = {"pane, named chat without a graph": named, **unchanged}
+                if not fanout:
+                    expected.update({"pane, no chat named": ("inactive", "", "session"),
+                                     "tui block, named": ("inactive", "", "session")})
+                self.assertEqual(self._graphs(origin, fanout=fanout), expected)
+
+
+class LayerBoundTests(unittest.TestCase):
+    """The pane's cut is by layer: work in hand and stopped lanes first, then outward from the frontier."""
+
+    def _layered(self, graph: dict, open_layers=(), byte_limit: int = 6_000) -> dict:
+        from omh.plugin_bundle.omh import delegation_graph
+
+        with patch.object(delegation_graph, "GRAPH_BYTE_LIMIT", byte_limit):
+            return delegation_graph._layered(graph, open_layers)
+
+    @staticmethod
+    def _kept_layers(graph: dict) -> list[int]:
+        return sorted({node["layer"] for node in graph["nodes"] if node.get("kind") != "root"})
+
+    def assertNoBetterLaneCut(self, graph: dict, cut: dict) -> None:
+        """No running/returned lane cut while a lane of a lower rank is kept, and no failed one cut while a done one is."""
+        kept = {node["id"] for node in cut["nodes"]}
+        lanes = [node for node in graph["nodes"] if node.get("kind") != "root"]
+        tier = {"running": 0, "dispatched": 0, "failed": 1, "stuck": 1, "interrupted": 1}
+        for wanted in (0, 1):
+            dropped = [node["id"] for node in lanes if tier.get(node["state"], 2) == wanted and node["id"] not in kept]
+            lower = [node["id"] for node in lanes if tier.get(node["state"], 2) > wanted and node["id"] in kept]
+            self.assertFalse(dropped and lower, f"tier {wanted} cut {dropped[:3]} while {lower[:3]} was kept")
+
+    def test_a_deep_run_keeps_the_layers_around_its_frontier_not_the_root_alone(self) -> None:
+        # Regression: every kept lane used to pull in all it waits on, so a deep run fell through to the root alone.
+        graph = self._layered(_layered_graph(["done"] * 5 + ["running"] + ["waiting"] * 6))
+        kept = self._kept_layers(graph)
+        self.assertIn(5, kept)
+        self.assertEqual(kept, list(range(kept[0], kept[-1] + 1)), "whole layers, outward from the frontier")
+        ids = {node["id"] for node in graph["nodes"]}
+        self.assertTrue(all(edge["from"] in ids and edge["to"] in ids for edge in graph["edges"]))
+        self.assertEqual(sum(row["count"] for row in graph["layer_hidden"]), graph["hidden_nodes"])
+        self.assertEqual(graph["layer_count"], 12)
+        self.assertTrue(all(row["count"] for row in graph["layer_hidden"]), "a layer that lost nothing has no row")
+        self.assertLessEqual(_size(graph), 6_000)
+
+    def test_an_open_layer_comes_whole_however_far_from_the_frontier(self) -> None:
+        graph = self._layered(_layered_graph(["done"] * 5 + ["running"] + ["waiting"] * 6), open_layers=(0, 11))
+        kept = self._kept_layers(graph)
+        self.assertIn(0, kept)
+        self.assertIn(11, kept)
+        self.assertFalse({0, 11} & {row["layer"] for row in graph["layer_hidden"]})
+
+    def test_a_graph_that_fits_is_unchanged_unless_the_pane_holds_layers_open(self) -> None:
+        small = _layered_graph(["done", "running"], width=2, summary=10)
+        self.assertIs(self._layered(small), small)
+        opened = self._layered(small, open_layers=(1,))
+        # Named open layers: every lane carries its layer and nothing is counted lost, so the pane asks the same again.
+        self.assertEqual([node.get("layer") for node in opened["nodes"]], [None, 0, 0, 1, 1])
+        self.assertEqual((opened["hidden_nodes"], opened["layer_hidden"], opened["layer_count"]), (0, [], 2))
+
+    def test_a_kept_lane_under_a_cut_parent_hangs_from_its_nearest_kept_ancestor_marked_elided(self) -> None:
+        """Mutation: keep only edges between kept nodes, so a 5x50 tree draws 47 grandchildren with no parent at all."""
+        tree = _tree_graph(5, 50)
+        cut = self._layered(tree, byte_limit=24_576)
+        kept = {node["id"] for node in cut["nodes"]}
+        self.assertLessEqual(len(kept), 48)
+        parent_of = {edge["to"]: edge["from"] for edge in tree["edges"]}
+        lanes = [node_id for node_id in kept if node_id != "root"]
+        into = {edge["to"] for edge in cut["edges"]}
+        self.assertEqual([lane for lane in lanes if lane not in into], [], "every kept lane hangs from something")
+        for edge in cut["edges"]:
+            if edge.get("elided"):
+                # The real parent was cut; the edge comes from the nearest ancestor kept.
+                self.assertNotIn(parent_of[edge["to"]], kept)
+                ancestor = parent_of[edge["to"]]
+                while ancestor not in kept:
+                    ancestor = parent_of.get(ancestor, "root")
+                self.assertEqual(edge["from"], ancestor)
+            else:
+                self.assertEqual(parent_of[edge["to"]], edge["from"], "a plain edge is the lane's own parent")
+        # A chain with its middle cut: the edge skips the cut lanes, from the nearest kept one.
+        from omh.plugin_bundle.omh.delegation_graph import _layered_cut
+
+        chain = _graph_of([{"id": name, "kind": "lane", "state": "done", "order": at} for at, name in enumerate("abcd")],
+                          [("root", "a"), ("a", "b"), ("b", "c"), ("c", "d")])
+        layer_ids = [["a"], ["b"], ["c"], ["d"]]
+        layer_of = {"a": 0, "b": 1, "c": 2, "d": 3}
+        parents = {"a": [("root", "depends_on")], "b": [("a", "depends_on")], "c": [("b", "depends_on")],
+                   "d": [("c", "depends_on")]}
+        walk = ["root", "a", "b", "c", "d"]
+        drawn = _layered_cut(chain, {"a", "d"}, layer_ids, layer_of, parents, walk)["edges"]
+        self.assertEqual(sorted((edge["from"], edge["to"], bool(edge.get("elided"))) for edge in drawn),
+                         [("a", "d", True), ("root", "a", False)])
+        drawn = _layered_cut(chain, {"d"}, layer_ids, layer_of, parents, walk)["edges"]
+        self.assertEqual([(edge["from"], edge["to"], edge.get("elided")) for edge in drawn], [("root", "d", True)])
+
+    def test_a_running_lane_far_from_the_frontier_is_kept_before_any_finished_one(self) -> None:
+        """Mutation: rank by distance from the frontier before state, which cut a long-running layer-0 child."""
+        lane = _tree_lane
+        nodes, edges = [lane(0, "running")], [("root", "n0")]
+        firsts = [f"n{index}" for index in range(1, 11)]
+        nodes += [lane(index, "done") for index in range(1, 11)]
+        edges += [("root", first) for first in firsts]
+        seconds = [f"n{index}" for index in range(11, 41)]
+        nodes += [lane(index, "done") for index in range(11, 41)]
+        edges += [(firsts[k % 10], name) for k, name in enumerate(seconds)]
+        thirds = [f"n{index}" for index in range(41, 71)]
+        nodes += [lane(index, "running" if index < 51 else "waiting") for index in range(41, 71)]
+        edges += [(seconds[k % 30], name) for k, name in enumerate(thirds)]
+        nodes += [lane(index, "waiting") for index in range(71, 81)]
+        edges += [(thirds[k % 30], f"n{index}") for k, index in enumerate(range(71, 81))]
+        graph = _graph_of([{**node, "summary": "s" * 60} for node in nodes], edges)
+        cut = self._layered(graph, byte_limit=24_576)
+        self.assertIn("n0", {node["id"] for node in cut["nodes"]})
+        self.assertNoBetterLaneCut(graph, cut)
+        # A failed lane beside a done one in the first layer, sixty done lanes below it, one running at the bottom.
+        nodes = [{"id": "f0", "kind": "lane", "state": "failed", "order": 1},
+                 {"id": "d0", "kind": "lane", "state": "done", "order": 2}]
+        nodes += [{"id": f"x{index}", "kind": "lane", "state": "done", "order": 3 + index} for index in range(60)]
+        nodes.append({"id": "run", "kind": "lane", "state": "running", "order": 100})
+        graph = _graph_of(nodes, [("d0", f"x{index}") for index in range(60)] + [("x0", "run")])
+        cut = self._layered(graph, byte_limit=24_576)
+        self.assertTrue({"f0", "run"} <= {node["id"] for node in cut["nodes"]})
+        self.assertNoBetterLaneCut(graph, cut)
+
+    @staticmethod
+    def _mixed_graph(inside_done: int, outside: int, *, summary: int = 400) -> dict:
+        """A running DAG lane fed by a chain of finished ones, beside an outside roster of finished ledger children."""
+        nodes = [{"id": "run", "kind": "lane", "state": "running", "order": 0, "group": "layer 2",
+                  "summary": "s" * summary}]
+        nodes += [{"id": f"d{index}", "kind": "lane", "state": "done", "order": 10 + index, "group": "layer 1",
+                   "summary": "s" * summary} for index in range(inside_done)]
+        nodes += [{"id": f"x{index}", "kind": "lane", "state": "done", "order": 10_000 + index, "outside_dag": True,
+                   "summary": "s" * summary} for index in range(outside)]
+        edges = [("root", "run"), ("root", "d0"), ("d0", "run")] + \
+                [(f"d{at}", f"d{at + 1}") for at in range(inside_done - 1)]
+        return _graph_of(nodes, edges)
+
+    def test_outside_lanes_join_the_bounded_selection_and_running_dag_work_beats_the_roster(self) -> None:
+        """Mutation: union the whole outside roster into the kept set ahead of the ranking, which let finished
+        outside lanes consume the node allowance the run's own work needs."""
+        for inside_done, outside in ((40, 45), (60, 45)):
+            with self.subTest(inside_done=inside_done, outside=outside):
+                graph = self._mixed_graph(inside_done, outside)
+                cut = self._layered(graph, byte_limit=24_576)
+                kept = {node["id"] for node in cut["nodes"]}
+                self.assertLessEqual(len(kept), GRAPH_NODE_LIMIT, "the outside roster consumed the node allowance")
+                self.assertIn("run", kept, "running DAG work is kept ahead of finished outside lanes")
+                outside_kept = [node for node in cut["nodes"] if node.get("outside_dag") is True]
+                cut_inside = inside_done - len([node_id for node_id in kept if node_id.startswith("d")])
+                self.assertFalse(len(outside_kept) and cut_inside,
+                                 "an outside lane was kept while the run's own finished lane was cut")
+                self.assertTrue(all("layer" not in node for node in outside_kept),
+                                "an outside lane carries no layer even when the selection keeps it")
+                self.assertTrue(all(isinstance(node.get("layer"), int) for node in cut["nodes"]
+                                    if node.get("outside_dag") is not True and node.get("kind") != "root"))
+                self.assertEqual(len(kept) + cut["hidden_nodes"], len(graph["nodes"]))
+                self.assertEqual(sum(cut["hidden_by_state"].values()), cut["hidden_nodes"])
+                # A layer row counts only the run lanes its layer lost; an omitted outside lane is counted in
+                # `hidden_nodes` without a layer of its own.
+                hidden_outside = outside - len(outside_kept)
+                self.assertEqual(sum(row["count"] for row in cut["layer_hidden"]),
+                                 cut["hidden_nodes"] - hidden_outside)
+                self.assertNoBetterLaneCut(graph, cut)
+                self.assertTrue(all(edge["from"] in kept and edge["to"] in kept for edge in cut["edges"]))
+
+    def test_the_byte_bound_holds_when_the_outside_roster_beside_the_run_overruns_it(self) -> None:
+        """Mutation: accept the cut when the bytes fit, which sent an over-allowance payload once the roster
+        outweighed the ranking; the selection has to stop at the bytes too."""
+        graph = self._mixed_graph(5, 20, summary=900)
+        cut = self._layered(graph, byte_limit=24_576)
+        kept = {node["id"] for node in cut["nodes"]}
+        self.assertLessEqual(_size(cut), 24_576, "an over-allowance payload went out unchecked")
+        self.assertLessEqual(len(kept), GRAPH_NODE_LIMIT)
+        self.assertIn("run", kept)
+        self.assertTrue({f"d{index}" for index in range(5)} <= kept,
+                        "no finished DAG lane is cut while an outside lane is kept")
+        self.assertLess(len(kept), len(graph["nodes"]), "the bytes really cut the roster")
+        self.assertNotIn("counts_only", cut, "a bounded mixed selection still has lanes to draw")
+        self.assertEqual(len(kept) + cut["hidden_nodes"], len(graph["nodes"]))
+        self.assertEqual(sum(cut["hidden_by_state"].values()), cut["hidden_nodes"])
+
+    def test_the_bytes_hold_for_deep_and_wide_runs_open_or_not(self) -> None:
+        """Mutation: keep a zero row per layer and send the cut when nothing fits, which overran the limit 13 times."""
+        from omh.plugin_bundle.omh import delegation_graph
+
+        def lane(index: int, state: str) -> dict:
+            return {"id": f"n{index}", "kind": "lane", "title": f"Node {index} " + "t" * 40, "state": state,
+                    "status": state, "order": index + 1, "summary": "s" * 60}
+
+        def chain(depth: int) -> dict:
+            states = ["running" if at in (0, depth - 30) else "done" if at < depth - 30 else "waiting"
+                      for at in range(depth)]
+            return _graph_of([lane(at, state) for at, state in enumerate(states)],
+                             [("root", "n0")] + [(f"n{at - 1}", f"n{at}") for at in range(1, depth)])
+
+        def one_layer(width: int) -> dict:
+            return _graph_of([lane(at, "running" if at % 50 == 0 else "done") for at in range(width)],
+                             [("root", f"n{at}") for at in range(width)])
+
+        for name, graph in (("deep500", chain(500)), ("deep5000", chain(5000)), ("layer5000", one_layer(5000))):
+            lanes = [node for node in graph["nodes"] if node.get("kind") != "root"]
+            for opened in ((), (0, 1, 2)):
+                with self.subTest(name=name, opened=opened):
+                    cut = delegation_graph._layered(graph, opened)
+                    limit = delegation_graph.GRAPH_OPEN_BYTE_LIMIT if opened else delegation_graph.GRAPH_BYTE_LIMIT
+                    self.assertLessEqual(_size(cut), limit)
+                    shown = [node for node in cut["nodes"] if node.get("kind") != "root"]
+                    # Something the pane can draw: lanes, or the run's counts by state when even the rows overrun.
+                    self.assertTrue(shown or cut.get("counts_only"))
+                    self.assertEqual(len(shown) + cut["hidden_nodes"], len(lanes))
+                    self.assertEqual(sum(cut["hidden_by_state"].values()), cut["hidden_nodes"])
+                    self.assertEqual(cut["layer_count"], 1 if name == "layer5000" else len(lanes))
+                    self.assertNoBetterLaneCut(graph, cut)
+
+    def test_open_layers_are_read_from_the_query_as_ascii_digits_only(self) -> None:
+        """Mutation: take `str.isdigit` alone, so `٣` opens layer 3 and `²` turns the HUD into an error record."""
+        from omh.plugin_bundle.omh.dashboard.plugin_api import OPEN_LAYER_LIMIT, open_layers
+
+        self.assertEqual(open_layers("3, 1,3,x,-2,1e3,"), (3, 1))
+        self.assertEqual(open_layers(""), ())
+        self.assertEqual(open_layers("٣,²,５,4"), (4,))
+        self.assertEqual(len(open_layers(",".join(str(at) for at in range(OPEN_LAYER_LIMIT + 9)))), OPEN_LAYER_LIMIT)
+        self.assertEqual(open_layers(",".join(["1"] + ["²"] * 100_000 + ["2"])), (1, 2))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 ---
 name: "omh-accessibility-audit"
-description: "[omh] Screen-reader or keyboard accessibility gaps: prepare WCAG, keyboard, focus, screen-reader, target-size, and reflow evidence gates for UI surfaces. Use when the user says: accessibility-audit, accessibility audit, a11y audit, a11y architect, wcag audit, wcag 2.2, wcag 2.2 aa, accessibility pass."
+description: "[omh] Screen-reader or keyboard accessibility gaps: prepare WCAG…"
 license: MIT
 metadata:
   hermes:
@@ -50,9 +50,9 @@ Bad example:
 
 ## Recovery Notes
 
-- If no rendered or DOM/accessibility-tree evidence exists, prepare the audit plan and mark verdict BLOCKED_BY_MISSING_ACCESSIBILITY_EVIDENCE.
+- If no rendered or DOM/accessibility-tree evidence exists, prepare the audit plan and return verdict BLOCK with blocker `missing_accessibility_evidence`.
 - If automated scan output exists without keyboard or screen-reader evidence, keep the verdict HOLD and request the smallest focus/announcement trace.
-- If the request is mostly visual layout or CJK clipping, route to visual-qa while preserving accessibility follow-up checks.
+- If the request is mostly visual layout or CJK clipping, route to `omh-visual-qa` while preserving accessibility follow-up checks.
 
 
 
@@ -60,7 +60,7 @@ Bad example:
 
 Use when Hermes must audit a UI or design system for WCAG 2.2 AA, keyboard reachability, focus flow, screen-reader semantics, target size, contrast, reflow, and accessibility evidence before claiming pass.
 
-    Strong routing signals: `accessibility-audit`, `accessibility audit`, `a11y audit`, `a11y architect`, `wcag audit`, `wcag 2.2`, `wcag 2.2 aa`, `accessibility pass`, `accessibility check`, `screen reader`, `screenreader`, `aria audit`, `keyboard navigation`, `focus order`, `focus appearance`, `focus trap`, `tab order`, `touch target`, `target size`, `color contrast`, `contrast ratio`, `reflow`, `400% zoom`, `accessible name`, `name role value`, `aria`, `アクセシビリティ監査`, `アクセシビリティ確認`, `スクリーンリーダー`, `キーボード操作`, `フォーカス順序`, `タッチターゲット`, `접근성 감사`, `접근성 검토`, `접근성 검사`, `스크린리더`, `키보드 내비게이션`, `포커스 순서`, `포커스 표시`, `터치 타깃`, `타깃 크기`, `색 대비`, `명도 대비`, `无障碍审查`, `无障碍检查`, `屏幕阅读器`, `键盘导航`, `焦点顺序`, `触控目标`, `audit aksesibilitas`, `tolong periksa aksesibilitas situs ini`, `cek kepatuhan WCAG`, `uji navigasi keyboard`, `cek urutan fokus`, `uji dengan pembaca layar`, `kiểm tra accessibility`, `kiểm thử WCAG`, `kiểm tra điều hướng với bàn phím`, `kiểm tra thứ tự tiêu điểm`, `kiểm tra screen reader`
+    Strong routing signals: `accessibility-audit`, `accessibility audit`, `a11y audit`, `a11y architect`, `wcag audit`, `wcag 2.2`, `wcag 2.2 aa`, `accessibility pass`, `accessibility check`, `screen reader`, `screenreader`, `aria audit`, `keyboard navigation`, `focus order`, `focus appearance`, `focus trap`, `tab order`, `touch target`, `target size`, `color contrast`, `contrast ratio`, `reflow`, `400% zoom`, `accessible name`, `name role value`, `aria`, `アクセシビリティ監査`, `アクセシビリティ確認`, `スクリーンリーダー`, `キーボード操作`, `フォーカス順序`, `タッチターゲット`, `접근성 감사`, `접근성 검토`, `접근성 검사`, `스크린리더`, `키보드 내비게이션`, `포커스 순서`, `포커스 표시`, `터치 타깃`, `타깃 크기`, `색 대비`, `명도 대비`, `аудит доступности`, `доступность сайта`, `доступность страницы`, `проверь контраст текста`, `доступность для скринридера`, `无障碍审查`, `无障碍检查`, `屏幕阅读器`, `键盘导航`, `焦点顺序`, `触控目标`, `audit aksesibilitas`, `tolong periksa aksesibilitas situs ini`, `cek kepatuhan WCAG`, `uji navigasi keyboard`, `cek urutan fokus`, `uji dengan pembaca layar`, `kiểm tra accessibility`, `kiểm thử WCAG`, `kiểm tra điều hướng với bàn phím`, `kiểm tra thứ tự tiêu điểm`, `kiểm tra screen reader`
 
 ## Catalog Metadata
 
@@ -78,7 +78,7 @@ Quality bar:
 - Give every finding a stable rule ID from `omh-accessibility-audit/references/a11y-rules.md` - category prefix plus number - beside its WCAG criterion and severity, so two audits of the same surface produce comparable findings and a rerun can say which are resolved, carried, or new.
 - Partition each fix by whether the markup determines the answer: `auto` when the correct output follows from the structure itself, `manual` whenever it requires knowing what the content means. A meaning-dependent fix marked `auto` is a defect - it produces confident, wrong alternative text - and a fix that is only half structural is split, never rounded to either side.
 - Read the surface fully and collect every finding before reporting one; report rule ID, severity, location, WCAG criterion, fix class, and the fix, so the `auto` rows can be handed to an executor as a batch while the `manual` rows go back carrying the question each one needs answered.
-- Route design-system or implementation changes back to frontend or the selected coding owner, then recheck with visual-qa/accessibility evidence.
+- Route design-system or implementation changes back to `omh-frontend` or the selected coding owner, then recheck with visual-qa/accessibility evidence.
 
 Required inputs:
 
@@ -107,9 +107,9 @@ Artifact expectations:
 - accessibility_audit_plan/v1 with platform, surfaces, critical tasks, standard level, supplied evidence, and missing observations
 - wcag_success_criteria_matrix/v1 covering perceivable, operable, understandable, robust requirements with PASS/HOLD/BLOCK per criterion
 - semantic_structure_review/v1 with labels, roles, names, headings, landmarks, form errors, live regions, and state semantics
-- focus_and_keyboard_trace/v1 only from observed keyboard navigation, tab order, focus appearance, skip/focus-trap checks, and critical interaction paths
+- focus_and_keyboard_trace/v1 only from observed keyboard navigation, tab order, focus indicator (2.4.7; 2.4.13 appearance is AAA, advisory), skip/focus-trap checks, and critical interaction paths
 - screen_reader_announcement_map/v1 only when announcements, accessible names, roles, values, hints, and dynamic updates are observed or supplied
-- target_size_and_pointer_review/v1 with 24x24 CSS px / 44x44 mobile target expectations and pointer gesture alternatives
+- target_size_and_pointer_review/v1 with 24x24 CSS px as the WCAG 2.2 AA criterion (2.5.8), 44x44 as AAA (2.5.5) or platform guidance reported as advisory, and pointer gesture alternatives
 - contrast_and_reflow_review/v1 with measured contrast, zoom/reflow risk, clipping, overflow, and CJK/localized text concerns
 - accessibility_audit_verdict/v1 returns PASS, HOLD, or BLOCK with missing evidence and remediation route
 

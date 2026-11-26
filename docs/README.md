@@ -43,19 +43,23 @@ references rather than normal user steps.
 | Move a configured profile to another machine or teammate | [Setup Profile Pack](SETUP-PROFILE-PACK.md) |
 | Block a Hermes tool call with a rule you wrote | [Toolcall Rules](TOOLCALL-RULES.md) |
 | See which of an unattended batch's calls the rules refuse, before it starts | [Toolcall Rules: Rehearsing a planned batch](TOOLCALL-RULES.md#rehearsing-a-planned-batch) |
+| Let one profile's bot push its branch and open its own PR when nobody can answer (operator) | [PR Delivery Grant](PR-DELIVERY-GRANT.md) |
 | See which coding work is running, in which session | [Coding Observability](CODING-OBSERVABILITY.md) |
+| See how warm a profile's prompt cache is and why it goes cold (`omh cache`) | [Prompt-Cache Report](PROMPT-CACHE.md) |
 | Understand measured and unproven impact claims | [Capability Impact](CAPABILITY_IMPACT.md) |
 | Browse all generated skills and harness metadata | [Workflow Reference](WORKFLOWS.md) |
 | Find opportunities, tailor truthful applications and track confirmed outcomes | [Career workflow](AI-JOB-SEARCH.md) |
 | Run optional polygon intersection, public biomedical reconciliation or prepared-input docking | [Domain science toolkits](domain-skills/README.md) |
 | Apply Apple UI design/review/improvement guidance | [Apple Design Guidance](APPLE-DESIGN.md) |
 | Track the external skill sources our skills reconstruct | [Skill Upstream Sources](SKILL-SOURCES.md) |
+| Check whether a skill folder loads in Hermes, Claude Code, Codex and other hosts, offline | [Skill Host-Fit Check](SKILL-EVAL.md) |
 | Prepare coding work for a selected executor | [Delegation-First Completeness](DELEGATION_FIRST_COMPLETENESS.md) |
 | Inspect an unattended handoff's advisory risk signals (agents/operators) | [Handoff Risk Scan](HANDOFF-RISK-SCAN.md) |
 | Integrate OMH into a Hermes wrapper | [Hermes Agent Integration Runbook](HERMES_AGENT_INTEGRATION_RUNBOOK.md) |
 | Capture and recall reviewed project context | [Project Memory](MEMORY.md) |
 | Find out which stage failed when a saved memory was not used | [Memory Recall Incident](MEMORY-RECALL-INCIDENT.md) |
 | Answer what a web page said as of a date, or compare then versus now | [Temporal Source Receipts](TEMPORAL-SOURCE-RECEIPTS.md) |
+| Compare existing HellaSwag results with reported paper conditions without running a model | [Research result audit](REPRO-AUDIT.md) |
 | Read a very large PDF, contract, or manual through Hermes in page ranges | [Long Document Reading](LONG-DOCUMENT-READING.md) |
 | Judge whether a realtime voice connector keeps whole spoken turns | [Realtime Voice Trial Receipts](REALTIME-VOICE-TRIAL-RECEIPTS.md) |
 | See which OMH workflow owns each plugin in the active host catalog | [Plugin Catalog Coverage](PLUGIN-CATALOG-COVERAGE.md) |
@@ -74,7 +78,7 @@ Hermes memory, skills, tools, gateway surfaces, and OMH's role, see the
 
 ## Six Capability Families
 
-The public front door groups **151 installable skills** by user intent. Exact
+The public front door groups the installable skills by user intent. Exact
 skill names remain available for deterministic routing, wrapper rendering, and
 operator control.
 
@@ -104,14 +108,17 @@ Use [Capabilities](CAPABILITIES.md) for the manifest contract and
 - Model recommendations and X/Grok affinity are editable editorial order, not
   benchmark or availability claims. Missing heads can use a confirmed compatible
   Qwen, Gemini, Grok, or other alternative; explicit unavailable choices pause.
-- `pi` and `senpi` are OMO runtime-family hosts. CCAPI and Apitopia are
-  user-declared editorial provider preferences, never probed integrations.
+- CCAPI for Claude is preferred provider-family metadata only; it is not a
+  bundled or probed integration and is considered only when the user declares
+  the corresponding local route active.
 - Wrapper sessions own chat continuity and plan decisions. Linked runtime runs
   own dispatch, execution, verification, review, CI, and merge evidence.
 - GitHub issue intake keeps raw content transient: only checked-in issue forms
   can authorize a connector request, each dispatch consumes one stable
   idempotency key, and connector read-back is the sole creation evidence.
-- Generated workflow docs come from `src/skills/catalog.py`; update the catalog
+- Generated workflow docs come from the skill catalog
+  (`src/skills/catalog_definitions.py` and the other `src/skills/catalog_*.py`
+  tables, with derivations in `src/skills/catalog.py`); update the catalog
   before refreshing generated references.
 - Project memory under `.omh/memory/` is reviewed OMH-local context. Recall packs
   are not opaque Hermes memory or execution evidence.
@@ -138,7 +145,6 @@ Use [Capabilities](CAPABILITIES.md) for the manifest contract and
 | Bind an image result to the route a producer attested, apart from the route requested | [Visual Generation Receipts](VISUAL-GENERATION-RECEIPTS.md) |
 | Common oh-my capability axes and gaps | [Parity Matrix](PARITY.md) |
 | Implemented application surfaces | [Application Cases](APPLICATION_CASES.md) |
-| Public roadmap | [Roadmap](ROADMAP.md) |
 | GitHub Pages source | [Website](../site/index.html) |
 
 ## Agent And Operator Contracts
@@ -158,22 +164,30 @@ findable only by knowing its filename.
 | Opt-in multi-unit work campaigns for the `ulw-work` engine | [Work Campaigns](WORK-CAMPAIGN.md) |
 | Bounded feedback rounds over a closed design-direction set | [Design Direction Iterations](DESIGN-DIRECTION-ITERATIONS.md) |
 | Deterministic comparison of submitted cross-harness machine facts | [Cross-Harness Benchmark](CROSS_HARNESS_BENCHMARK.md) |
+| What the vendors' own coding clients (Codex, Claude Code, Gemini CLI, Qwen Code, Kimi CLI, ZCode, DeepSeek Harness) say, and which of it OMH adopts | [Vendor Harness Review](VENDOR-HARNESS-REVIEW.md) |
 | Freshness identity behind `omh goal checkpoint` and quality-evidence assessment | [Working-Tree Fingerprint](WORKING-TREE-FINGERPRINT.md) |
 | Provider-neutral input fidelity and per-attempt sync receipts for an optional memory provider | [Memory Sync Fidelity](MEMORY-SYNC-FIDELITY.md) |
 | Bounded retry/replan/stop/escalate decisions for an observed error | [Failure Mender](failure-mender.md) |
 | What the OMH TUI and its gateway child send, answer, write, and may import | [OMH TUI Boundary](OMH-TUI-BOUNDARY.md) |
+| What the omher desktop app and its bridge send, write, and may import | [omher Boundary](OMHER-BOUNDARY.md) |
+| Full text of every scoped exception to core OMH's no-network rule (summarized in `AGENTS.md`) | [Implementation Boundaries](IMPLEMENTATION-BOUNDARIES.md) |
+| Long form of the engineering pitfalls `CLAUDE.md` lists one line each | [Engineering Pitfalls](ENGINEERING-PITFALLS.md) |
+| What fix commits that replaced another pull request's recent lines taught, and which of it became a review rule | [Lessons from re-fixed commits](LESSONS.md) |
 
 ## Documentation Checks
 
 When a public claim changes, check the README, site, capabilities, direction,
 architecture, generated workflow reference, and agent contract together.
 
+Run every `docs ... --check` gate in the Build & Test list of
+[`CLAUDE.md`](../CLAUDE.md), plus `uv run python -m omh.cli harness validate`
+and `git diff --check`; that list is the one maintained copy. For a page added,
+moved, or deleted under `docs/`, the gate that matters first is
+`uv run python -m omh.cli docs navigation --check`. The docs-content contract
+tests run with:
+
 ```sh
 PYTHONPATH=tests uv run python -m unittest tests/test_router_content.py -v
-uv run python -m omh.cli harness validate
-uv run python -m omh.cli docs workflows --check
-uv run python -m omh.cli docs navigation --check
-git diff --check
 ```
 
 Three separate evidence classes answer three different questions, and a failure

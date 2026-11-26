@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 from ..routing.localization import normalized_phrase, prepare_routing_text, routing_terms, routing_tokens
+from ..coding.pi_family_interop import RUNTIME_SHORT_NAME
 from ..skills.catalog import DEEP_INTERVIEW_MAX_ROUNDS
 
 
@@ -1503,7 +1504,7 @@ _PLAYBOOKS = (
                 "plan",
                 "Draft execution plan",
                 "hermes",
-                "Produce a reviewable plan and only expose handoff actions after acceptance.",
+                "Produce a reviewable plan and only expose handoff actions after acceptance; when its tasks form a graph with a verification task, name dag-ulw among them, started only on the user's go-ahead.",
                 "hermes_plan/v1",
                 ("accept_plan", "revise_plan"),
                 ("plan artifact",),
@@ -2208,7 +2209,7 @@ _SURFACE_PLAYBOOKS = (
             "헤르메스가 직접 코딩",
             "omx",
             "omc",
-            "omo",
+            RUNTIME_SHORT_NAME,
             "코덱스",
             "클로드",
         ),

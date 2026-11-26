@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from ..coding.hermes_model_config import providers_entry_remedy
 from ..coding.model_routing import MODEL_CATEGORIES
 
 
@@ -11,8 +12,8 @@ def recommendation_projections(
     catalog: dict[str, object],
     main: dict[str, object],
     resolve_model_recommendation: Callable,
-    omo_overrides: dict[str, object] | None,
-    omo_override_source: str,
+    imported_category_overrides: dict[str, object] | None,
+    category_override_source: str,
 ) -> dict[str, object]:
     return {
         "main": main,
@@ -35,10 +36,10 @@ def recommendation_projections(
                 resolve_model_recommendation=resolve_model_recommendation,
             ),
         },
-        "omo_category_overrides": {
-            "status": "imported" if omo_overrides else "not_imported",
-            "source": omo_override_source,
-            "categories": sorted((omo_overrides or {}).get("categories", {})),
+        "category_overrides": {
+            "status": "imported" if imported_category_overrides else "not_imported",
+            "source": category_override_source,
+            "categories": sorted((imported_category_overrides or {}).get("categories", {})),
         },
     }
 
@@ -58,6 +59,16 @@ def provider_next_actions(confirmed: set[str], inspection) -> list[dict[str, str
                     "provider": provider_id,
                     "status": "custom_provider_name_required",
                     "next_action": "use the configured custom provider name as the prefix: <name>/<model>",
+                }
+            )
+        elif provider is not None and not provider.auth_present and provider.provider_entry:
+            # A Hermes `providers:` entry has no login: `hermes auth login <id>`
+            # answers Unknown provider. Name the route that does make it observable.
+            actions.append(
+                {
+                    "provider": provider_id,
+                    "status": "credential_not_observable",
+                    "next_action": providers_entry_remedy(provider),
                 }
             )
         elif provider is None or not provider.auth_present:

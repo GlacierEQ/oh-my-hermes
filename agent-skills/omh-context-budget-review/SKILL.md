@@ -1,6 +1,6 @@
 ---
 name: "omh-context-budget-review"
-description: "[omh] Context window or token budget at risk: plan compact context, token/cost budgets, summarization checkpoints, and overflow recovery before long agent work. Use when the user says: context-budget-review, context budget review, context budget, token budget review, token budget, prompt budget, prompt caching, prompt cache."
+description: "[omh] Context window or token budget at risk: plan compact context…"
 license: MIT
 compatibility: "Requires the omh CLI on PATH (pip install oh-my-hermes)."
 metadata:
@@ -42,14 +42,16 @@ Bad example:
 
 ## Completion Checklist
 
-- The run or workflow scope, metric window, failure modes, and cost/latency boundary are named.
-- Local telemetry, provider truth, billing truth, and completion evidence are separate states.
-- Warnings name the next measurement or operator review action.
+- `context_budget_plan/v1` names the route (the wire model) and its usable budget with a class of observed, assumed, or unknown.
+- The must-keep pack lists its items under the closed classes prohibitions, decisions, open_questions, requirements, paths, pr_state, and verification_gaps, with a count for each.
+- The checkpoint gives a cadence and the exact `/compress <focus>` text, and compaction is reported only after Hermes' own reply to it.
+- Estimated, observed, and billed figures are stated apart; capacity nobody published is `capacity_unknown_hold`, never a number.
 
 ## Recovery Notes
 
-- If provider metrics are unavailable, report only local metadata and mark provider truth not_observed.
-- If cost or latency looks risky, surface a warning plus the next measurement rather than a completion claim.
+- If the previous must-keep pack has no item classes, retain its recorded contents, mark the class delta unresolved, and hand back must_keep_item_class_delta/v1 as comparison unavailable, never as zero items.
+- If a checkpoint is due but no Hermes /compress reply is observed, retain the must-keep context pack and checkpoint plan, mark compaction not_observed, and hand back /compress <focus> with the reply needed to verify continuity.
+- If the session has no published context_budget_plan/v1, retain the proposed budget plan, mark inherited capacity unresolved, and hand back the capacity_unknown_hold and session reference for publication or rebinding.
 
 
 
@@ -57,7 +59,7 @@ Bad example:
 
 Use before long-running research, coding, review, or multi-agent work when context, token, cost, or summary drift could break quality.
 
-    Strong routing signals: `context-budget-review`, `context budget review`, `context budget`, `token budget review`, `token budget`, `prompt budget`, `prompt caching`, `prompt cache`, `cache hygiene`, `context compaction`, `compact context`, `too much context`, `context window`, `running out of context`, `hand off to a new session`, `summarization checkpoint`, `budget this task`, `컨텍스트 예산`, `토큰 예산`, `컨텍스트 압축`, `요약 체크포인트`
+    Strong routing signals: `context-budget-review`, `context budget review`, `context budget`, `token budget review`, `token budget`, `prompt budget`, `prompt caching`, `prompt cache`, `cache hygiene`, `context compaction`, `compact context`, `too much context`, `context window`, `running out of context`, `hand off to a new session`, `summarization checkpoint`, `budget this task`, `컨텍스트 예산`, `토큰 예산`, `컨텍스트 압축`, `요약 체크포인트`, `что жрёт токены`, `бюджет токенов`, `контекст переполнен`, `сколько уходит токенов`, `на что уходят токены`, `на что тратятся токены`
 
 ## Catalog Metadata
 

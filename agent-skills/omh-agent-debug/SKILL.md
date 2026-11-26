@@ -1,6 +1,6 @@
 ---
 name: "omh-agent-debug"
-description: "[omh] Agent is stuck, looping, or drifting: capture a stuck, looping, drifting, or repeatedly failing agent run, diagnose the likely failure pattern, and prepare the smallest safe recovery action. Use when the user says: agent-debug, agent debug, agent debugging, agent introspection, agent self-debug, self-debug, self debugging, looping agent."
+description: "[omh] Agent is stuck, looping, or drifting: capture a stuck…"
 license: MIT
 metadata:
   hermes:
@@ -17,13 +17,13 @@ This is an OMH `agent-debug` workflow skill, projected for Agent Skills hosts (C
 
 ## Why This Exists
 
-`agent-debug` exists so Hermes users can ask for this workflow in chat and get a structured, checkable answer instead of an improvised one.
+`agent-debug` exists because an agent that loops, drifts, or burns tokens is explained by its session record (tool errors, identical retries, compaction boundaries, silent turn ends), not by the latest symptom or by memory of what happened.
 
 ## Do Not Use When
 
-- The request is already handled by a narrower explicit skill with stronger evidence.
-- The user asks OMH to secretly run external platforms, connectors, schedulers, file exports, or runtime agents.
-- The only safe answer is to ask for missing authority, credentials, target, or observed evidence first.
+- The misbehaving thing is application code the agent only called, not the agent's own run; use `omh-app-debugging`.
+- The request is install or gateway health rather than one agent run.
+- A diagnosis would need the user's session read, a rerun, or an export and they have not agreed; ask first.
 
 ## Examples
 
@@ -48,7 +48,7 @@ Bad example:
 ## Recovery Notes
 
 - If the request is install/setup health, it is outside this skill.
-- If the request is a manager status or throughput review, route to agent-ops-review.
+- If the request is a manager status or throughput review, route to `omh-agent-ops-review`.
 - If the request is a durable self-improvement record after diagnosis, it is outside this skill.
 
 
@@ -57,7 +57,7 @@ Bad example:
 
 Use when an agent run is stuck, looping on tools, burning tokens without progress, drifting from the objective, losing context, or failing on recoverable environment/tool assumptions.
 
-    Strong routing signals: `agent-debug`, `agent debug`, `agent debugging`, `agent introspection`, `agent self-debug`, `self-debug`, `self debugging`, `looping agent`, `agent loop failure`, `agent run stuck`, `agent failure capture`, `tool retry loop`, `repeated tool calls`, `context drift`, `prompt drift`, `token burn`, `에이전트 디버그`, `에이전트 실패`, `에이전트 반복 실패`, `반복 실패`, `도구 반복`, `컨텍스트 드리프트`, `토큰 낭비`
+    Strong routing signals: `agent-debug`, `agent debug`, `agent debugging`, `agent introspection`, `agent self-debug`, `self-debug`, `self debugging`, `looping agent`, `agent loop failure`, `agent run stuck`, `agent failure capture`, `tool retry loop`, `repeated tool calls`, `context drift`, `prompt drift`, `token burn`, `에이전트 디버그`, `에이전트 실패`, `에이전트 반복 실패`, `반복 실패`, `도구 반복`, `컨텍스트 드리프트`, `토큰 낭비`, `агент зациклился`, `агент завис`, `агент повторяет одно и то же`, `агент снова упал`
 
 ## Catalog Metadata
 
@@ -75,14 +75,13 @@ Quality bar:
 - Order probes cheapest-discriminating-first: run the cheapest check that splits the surviving hypotheses before any expensive capture, rerun, or restart.
 - When a run that used to work now fails, bisect from last-known-good to first-bad change (prompt, config, tool, model, or environment) instead of debugging the newest symptom.
 - Name a cause only after revert-verify: remove the suspect change and observe the failure disappear, or state that causation is unproven.
-- Reproduce the failure before preparing any recovery action; a fix without a reproduced failure first is a guess.
+- Reproduce the failure before preparing any recovery action; a fix without a reproduced failure first is a guess. An agent run is stochastic and a rerun costs money, so reproduced means the recorded failing step recurs when the same tool result is replayed, or the failure rate over N reruns (state N) is above the baseline; replay needs the user's go-ahead. When it is declined or too costly, report causes as supported by the record with causation unproven, keep the two competing hypotheses, and propose only the smallest reversible action.
 
 Required inputs:
 
-- user request
-- target context
-- delivery or status expectation
-- known missing evidence
+- session id or record path, and the turn range if known
+- what the user expected the run to do, and what they saw instead
+- the one thing to measure (the `--observable` kind: looping, repeated_work, goal_drift, context_loss, tool_stall, unexpected_cost)
 
 Expected outputs:
 
@@ -93,7 +92,7 @@ Expected outputs:
 
 Artifact expectations:
 
-- agent_debug_report/v1 from `omh quality-evidence agent-debug --hermes-session <id|latest> --observable <kind> --json` (or `--session-record <jsonl>`, `--turns N:M`): tool errors, identical retries after an error, background processes started without notify_on_complete, and compaction boundaries, each cited by session and message id or record line; treat a kind listed unavailable as unchecked
+- agent_debug_report/v1 from `omh quality-evidence agent-debug --hermes-session <id|latest> --observable <kind> --json` (or `--session-record <jsonl>`, `--turns N:M`): tool errors, identical retries after an error, background processes started without notify_on_complete, compaction boundaries, and silent turn ends (an empty assistant row right after a tool result that ended the turn), each cited by session and message id or record line; treat a kind listed unavailable as unchecked, and when a silent turn end leads, read the host's agent.log `Turn ended: reason=` line for its timestamp before changing anything
 - agent_failure_capture/v1 and agent_failure_pattern_hypothesis/v1 in that payload: observed finding ids, unavailable evidence, and at least two competing hypotheses with evidence for and against
 - contained_recovery_action/v1 proposing the smallest reversible step, never executed; sharing is the separate `agent-debug-export`, written only with --confirm-export
 

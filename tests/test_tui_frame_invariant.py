@@ -1,13 +1,13 @@
 """The region follows the content until the screen is full, then stays on the bottom rows.
 
-`build_frame` + `LiveRegion` driven into a VT screen model. The region (sticky
-prompt, streaming tail, slot, composer box, info line) is drawn right
+`build_frame` + `LiveRegion` driven into a VT screen model. The region (streaming
+tail, slot, composer box, info line) is drawn right
 under the output and is as tall as its content, the way Claude Code's input
 box follows what was printed: no blank rows between the transcript and the
 composer at the start, after a turn or around a question. Once its last row is
 the screen's last row (and the region knows it), the frame keeps the region's
-height, so what shrinks above the composer becomes blank pad rows at the
-region's top and the composer stays on the bottom rows (the owner's complaint
+height, so what shrinks above the composer becomes blank pad rows under the
+live block and the composer stays on the bottom rows (the owner's complaint
 about Hermes' Ink TUI: a closing list must not pull the prompt up). This file
 is the regression proof. It runs the frame helper and the live region the way
 the app loop does (`App._render`: build a frame, with the region's height as
@@ -64,7 +64,7 @@ from _vt_screen import VTScreen
 
 from _tui_lines import rule_edges
 from omh.tui.composer import PROMPT, SUBMIT, Composer
-from omh.tui.frame import MODE_ACCEPT, MODE_NORMAL, MODE_PLAN, build_frame, sticky_line
+from omh.tui.frame import MODE_ACCEPT, MODE_NORMAL, MODE_PLAN, build_frame
 from omh.tui.keys import BACKSPACE, CHAR, ENTER, ESCAPE, Key, Paste
 from omh.tui.layout import AGENT_VIEW_ROWS, agent_view_cap, choice_cap, composer_cap, slot_cap
 from omh.tui.modes import info_line
@@ -86,7 +86,8 @@ def rows_under_composer(rows: int) -> int:
 
 
 def info_row_of(screen: list[str]) -> int:
-    """The info line's screen row: the last row that is not blank, since every row under the region is."""
+    """The region's last screen row (the badge row under the info line, or the info line where the region has no
+    badge row): the last row that is not blank, since every row under the region is."""
     return max(index for index, row in enumerate(screen) if row)
 
 
@@ -121,7 +122,6 @@ class Session:
         self.region = LiveRegion(self.screen.feed, at_top=at_top)  # at_top: told it starts on row 0
         self.known_rows: list[int | None] = []  # what the region said its last row was, at every check
         self.composer = Composer()
-        self.sticky: Line | None = None
         self.tail: list[Line] = []
         self.slot: list[Line] = []
         self.flushed: list[str] = []
@@ -162,7 +162,6 @@ class Session:
             rows=self.rows,
             composer=None,
             info=self.info_row(),
-            sticky=self.sticky,
             tail=self.tail,
             slot=self.slot,
             mode=self.mode,
@@ -186,9 +185,6 @@ class Session:
     def info_row(self) -> Line:
         return info_line(
             mode=self.mode,
-            busy=self.sticky is not None,
-            queued=0,
-            keyboard_protocol=False,
             width=self.cols,
             theme=DEFAULT_THEME,
             right=INFO_RIGHT,
@@ -202,7 +198,6 @@ class Session:
             rows=self.rows,
             composer=self.composer,
             info=self.info_row(),
-            sticky=self.sticky,
             tail=self.tail,
             slot=self.slot,
             mode=self.mode,
@@ -297,7 +292,6 @@ def run_scenario(session: Session) -> None:
     session.keys("typing Hangul", typed("한글 입력"))
     action = session.composer.handle(Key(ENTER))
     assert action.kind == SUBMIT
-    session.sticky = sticky_line(action.text, session.cols)
     session.paint("submit flushes the user line", flush=[f"you: {action.text}"])
 
     # the streaming tail grows past the screen while stable lines flush
@@ -344,16 +338,14 @@ def run_scenario(session: Session) -> None:
     session.keys("multi-line paste", [Paste("first\nsecond\nthird\nfourth\nfifth")])
     session.keys("Ctrl+C clears", [Key(CHAR, "c", ctrl=True)])
 
-    # the turn ends: the tail flushes, the sticky prompt goes
+    # the turn ends: the tail flushes
     stable = [text_of(line) for line in session.tail]
     session.tail = []
-    session.sticky = None
     session.paint("turn complete flushes the tail", flush=stable)
     session.switch(MODE_NORMAL)
     session.paint("a big flush", flush=[f"history line {next(counter)}" for _ in range(rows + 5)])
 
     # a second turn with a panel, a shrink, and a small flush into the pad rows
-    session.sticky = sticky_line("second prompt", session.cols)
     session.tail = [plain(f"stream {next(counter)}") for _ in range(4)]
     session.slot = [plain(f"agent {n}") for n in range(slot_cap(rows, session.cols))]
     session.paint("second turn with a panel")
@@ -576,7 +568,7 @@ class AppBottomRowsTests(unittest.TestCase):
 
         def menu(app: object) -> None:
             type_text(app, "/")
-            self.assertTrue([row for row in drawn(app) if row.startswith(" /") or row.startswith("/")])
+            self.assertTrue([row for row in drawn(app) if row.startswith(("❯ /help", "  /keys"))])
             app._on_input(Key(BACKSPACE))
 
         def question(app: object) -> None:
@@ -601,8 +593,161 @@ class AppBottomRowsTests(unittest.TestCase):
                 # The freed rows stay above the composer; the approval's withdrawal notice is printed into them, and
                 # the agent list's rows came out of the turn's tail, so neither leaves more blank rows than before.
                 self.assertGreaterEqual(self.gap(after), self.gap(before))
-                if name in ("a picker", "a completion menu"):
+                if name == "a completion menu":
                     self.assertGreater(self.gap(after), self.gap(before))
+                if name == "a picker":
+                    # The `/resume` cards took most of the screen: closing gives those rows back to the transcript,
+                    # painted down over them, so no band of blank rows is left (`App._render`, `frame_tall`).
+                    self.assertEqual(after, before)
+
+    def test_an_approval_answered_mid_turn_leaves_the_live_calls_under_the_transcript(self) -> None:
+        # The owner's report (2026-10-25): after an approval in a long turn, 10 to 15 blank rows stood between the
+        # last settled call and the running ones, then filled in. The freed rows went to the region's top, so the
+        # live calls jumped down away from the transcript they continue. They go under the live calls now, above
+        # the working row and its tip, which stay on the composer; the composer and the rows under it stay put.
+        from test_tui_choice_ui import armed
+        from test_tui_modes import drawn
+
+        from omh.tui.gateway import Event, ServerRequest
+        from omh.tui.keys import DOWN
+
+        app, _ = self.at_the_bottom()
+
+        def event(kind: str, **payload: object) -> None:
+            app._on_event(Event(kind, app.sid, payload))
+
+        def call_row(screen: list[str], command: str) -> int:
+            return next(index for index, row in enumerate(screen) if f"terminal({command})" in row)
+
+        app.transcript.add_user("check the tree")
+        app.turn_pending = True
+        event("message.start")
+        event("reasoning.delta", text="look first\n")
+        event("tool.start", tool_id="c1", name="terminal", args={"command": "grep -rn x src"})
+        event("tool.complete", tool_id="c1", name="terminal", args={"command": "grep -rn x src"}, duration_s=3.0,
+              result={"output": "src/a.py:1: x", "exit_code": 0})
+        event("reasoning.delta", text="now the script\n")  # the first group settles above the region
+        event("tool.start", tool_id="c2", name="terminal", args={"command": "python3 check.py"})
+        before = drawn(app)
+        script = "python3 - <<'PY'\n" + "\n".join(f"print({n})" for n in range(9)) + "\nPY"
+        app._on_server_request(ServerRequest("srq-1", "approval", {"command": script, "description": "script execution",
+                                                                   "choices": ["once", "session", "deny"]}))
+        asking = drawn(app)
+        armed(app)
+        app._on_input(Key(DOWN))
+        app._on_input(Key(ENTER))  # allow once
+        after = drawn(app)
+        self.assertEqual(self.where(after), self.where(before))  # the composer holds its row
+        settled, live = call_row(after, "grep -rn x src"), call_row(after, "python3 check.py")
+        self.assertEqual(live, call_row(asking, "python3 check.py"))  # the running call did not jump down
+        between = after[settled:live]  # the settled call's output, the reasoning row, a spacer above each block
+        self.assertFalse([index for index in range(len(between) - 1) if not between[index] and not between[index + 1]],
+                         after)  # no two blank rows: no band
+        rule = self.where(after)[0]
+        self.assertIn("Tip:", after[rule - 1])  # the working row and its tip stay on the composer
+        self.assertTrue(after[rule - 2].strip())
+        self.assertFalse(any(after[live + 2 : rule - 2]), after)  # the freed rows: under the live calls only
+
+    def test_a_long_turn_ends_with_one_blank_row_between_its_done_line_and_the_composer(self) -> None:
+        # The owner's report (2026-10-28): after a long turn, blank rows stood between `✻ 7m 11s · 12 tools` and
+        # the composer. With the plan shown, the blank row over it went the same way in every turn, short or long:
+        # the running turn had it, and the idle tail's own spacer stands in for it. The region gives that row up as
+        # the turn ends: the composer rises by it, and the next turn's output takes it back down to the bottom rows.
+        # Without the plan nothing moves, long turn or short (no `↳ you:` echo since 2026-11-11).
+        from test_tui_agent_view import relay, STARTS
+        from test_tui_live_region_pass import PLAN
+        from test_tui_modes import drawn, make_app, type_text
+        from test_tui_panels import hud_payload
+
+        from omh.tui.gateway import Event
+        from omh.tui.panels import HudSnapshot
+
+        def blank_under_done(screen: list[str]) -> int:
+            done = max(index for index, row in enumerate(screen) if row.lstrip().startswith("✻ "))
+            return next(count for count in range(len(screen)) if screen[done + count + 1].strip())
+
+        for rows, cols in ((24, 80), (40, 120)):
+            for tools, extra in ((12, ""), (12, "plan"), (12, "agents"), (1, ""), (1, "plan")):
+                with self.subTest(size=f"{cols}x{rows}", tools=tools, extra=extra):
+                    app = make_app(rows=rows, cols=cols)[0]
+                    app._on_input(Key(CHAR, "l", ctrl=True))
+                    drawn(app)
+                    app.transcript.add_notice("\n".join(f"line {n}" for n in range(60)))
+                    drawn(app)
+                    if extra == "plan":
+                        app.hud = HudSnapshot(app.stored_id, hud_payload(PLAN), 0.0)
+                    type_text(app, "check the tree")
+                    app._on_input(Key(ENTER))
+
+                    def event(kind: str, **payload: object) -> None:
+                        app._on_event(Event(kind, app.sid, payload))
+
+                    event("message.start")
+                    if extra == "agents":
+                        relay(app, STARTS)
+                    for n in range(tools):
+                        args = {"command": f"ls {n}"}
+                        event("tool.start", tool_id=f"c{n}", name="terminal", args=args)
+                        drawn(app)
+                        event("tool.complete", tool_id=f"c{n}", name="terminal", args=args, duration_s=1.0,
+                              result={"output": "a", "exit_code": 0})
+                        drawn(app)
+                    event("message.delta", text="Every listing matched.")
+                    busy = drawn(app)
+                    self.assertFalse([row for row in busy if row.startswith("↳ you:")])  # no echo of the prompt
+                    self.assertEqual((app.frame_budget.slot > 0, app.frame_budget.agents > 0),
+                                     (extra == "plan", extra == "agents"))
+                    self.assertEqual(app.region.last_row(rows), rows - 1)
+                    event("message.complete", text="Every listing matched.", usage={})
+                    ended = drawn(app)
+                    self.assertEqual(blank_under_done(ended), 1, ended)  # the spacing between any two blocks
+                    rose = self.where(busy)[0] - self.where(ended)[0]
+                    # the plan's blank row, no more
+                    self.assertEqual(rose, int(extra == "plan"))
+                    self.assertFalse(any(ended[rows - rose :]), ended)  # the rows given up: under the region
+                    type_text(app, "and again")
+                    app._on_input(Key(ENTER))
+                    event("message.start")
+                    event("message.delta", text="Again.")
+                    drawn(app)
+                    self.assertEqual(app.region.last_row(rows), rows - 1)  # the next turn is on the bottom rows again
+
+    def test_a_menu_closing_mid_turn_leaves_the_composer_on_the_bottom_rows(self) -> None:
+        # Only the frame a turn ends with gives rows up (#2370 review): a running turn's frames keep the region's
+        # height whatever closes in them, so the composer never climbs mid-turn.
+        from test_tui_modes import drawn, make_app, type_text
+
+        from omh.tui.gateway import Event
+
+        app = make_app(rows=24, cols=80)[0]
+        app._on_input(Key(CHAR, "l", ctrl=True))
+        drawn(app)
+        app.transcript.add_notice("\n".join(f"line {n}" for n in range(60)))
+        drawn(app)
+        type_text(app, "check the tree")
+        app._on_input(Key(ENTER))
+
+        def event(kind: str, **payload: object) -> None:
+            app._on_event(Event(kind, app.sid, payload))
+
+        event("message.start")
+        for n in range(12):
+            args = {"command": f"ls {n}"}
+            event("tool.start", tool_id=f"c{n}", name="terminal", args=args)
+            drawn(app)
+            event("tool.complete", tool_id=f"c{n}", name="terminal", args=args, duration_s=1.0,
+                  result={"output": "a", "exit_code": 0})
+            drawn(app)
+        event("message.delta", text="Every listing matched so far.")
+        before = drawn(app)
+        self.assertEqual(app.region.last_row(24), 23)  # a long turn: the region is on the bottom rows
+        type_text(app, "/")  # the completion menu opens over the composer, then closes
+        drawn(app)
+        app._on_input(Key(BACKSPACE))
+        for _ in range(4):
+            after = drawn(app)
+            self.assertEqual(self.where(after), self.where(before), after)  # the composer did not climb
+            self.assertEqual(app.region.last_row(24), 23)  # the region stays on the bottom rows
 
     def test_the_next_output_fills_the_freed_rows_and_a_redraw_starts_under_the_output_again(self) -> None:
         from test_tui_modes import drawn, type_text
@@ -877,7 +1022,7 @@ class AgentViewBelowTests(unittest.TestCase):
                         self.assertGreaterEqual(top, rows - 1 - cap - 3)
                         self.assertGreaterEqual(top, rows - 1 - max(min(AGENT_VIEW_ROWS, rows // 4), rows // 3) - 3)
                         self.assertTrue(screen[top + 3].startswith("  "), screen)  # the info line, under the composer
-                        self.assertTrue(screen[rows - 1], "the view ends on the screen's last row")
+                        self.assertTrue(screen[rows - 1], "the region ends on the screen's last row")
 
     def test_the_usual_cap_measured(self) -> None:
         # A one-row composer's input row on the bottom rows, with a view at its usual cap, 1-based as a person

@@ -58,8 +58,10 @@ class ClientMethodTests(unittest.TestCase):
     def test_the_two_calls_this_phase_adds_carry_exactly_what_hermes_names(self) -> None:
         # Read from Hermes 6c61c3e27d's registry (tui_gateway/contracts/): ConfigSetParams is key, value,
         # session_id, scope, confirm_expensive_model, profile; SessionCorrectionParams is session_id, text, profile.
-        self.assertEqual(contract.CLIENT_METHODS["config.set"], {"key", "value", "session_id"})
+        # `confirm_expensive_model` goes only with a model the person said to switch to anyway.
+        self.assertEqual(contract.CLIENT_METHODS["config.set"], {"key", "value", "session_id", "confirm_expensive_model"})
         self.assertEqual(contract.CLIENT_METHODS["session.steer"], {"session_id", "text"})
+        self.assertEqual(contract.CLIENT_METHODS["session.redirect"], {"session_id", "text"})  # same params model
         self.assertEqual(set(contract.CONFIG_SET_VALUES), {"yolo", "reasoning"})
         self.assertEqual(contract.CONFIG_SET_VALUES["yolo"], {"on", "off"})
         # hermes_constants.VALID_REASONING_EFFORTS in 6c61c3e27d, plus none (parse_reasoning_effort: thinking off).
@@ -84,7 +86,8 @@ class ClientMethodTests(unittest.TestCase):
             "a yolo word Hermes also reads": {**good, "value": "1"},
             "an effort as a yolo value": {**good, "value": "high"},
             "another key": {**good, "key": "approvals.mode", "value": "off"},
-            "the model key": {**good, "key": "model", "value": "x"},
+            # A model value that could widen the switch: `--global` writes every new session's default.
+            "the model key with --global": {**good, "key": "model", "value": "x --global"},
             "no key": {"value": "on", "session_id": "live-1"},
         }
         for name, params in refused.items():
@@ -116,6 +119,26 @@ class ClientMethodTests(unittest.TestCase):
         self.assertEqual(contract.call_problem("prompt.submit", base), "")
         self.assertEqual(contract.CLIENT_METHODS["session.history"], {"session_id"})
 
+    def test_a_lazy_resume_is_sendable_only_as_true_with_a_session(self) -> None:
+        # The subagent session view's watch of a child on Hermes' stdio entry (`_resume_lazy`).
+        self.assertEqual(contract.call_problem("session.resume", {"session_id": "child-1", "lazy": True}), "")
+        self.assertEqual(contract.call_problem("session.resume", {"session_id": "s", "cols": 80}), "")
+        for bad in ({"session_id": "child-1", "lazy": False}, {"session_id": "child-1", "lazy": "yes"},
+                    {"session_id": "", "lazy": True}, {"lazy": True}):
+            self.assertIn("lazy only as true", contract.call_problem("session.resume", bad), bad)
+
+    def test_a_subagent_transcript_read_needs_its_subagent_and_a_string_cursor(self) -> None:
+        # A shared gateway's read of one child's rows, polled forward from `next_cursor`.
+        ok = {"session_id": "parent", "subagent_id": "sa-1", "order": "oldest", "limit": 200}
+        self.assertEqual(contract.call_problem("session.transcript", ok), "")
+        self.assertEqual(contract.call_problem("session.transcript", {**ok, "cursor": "c0"}), "")
+        self.assertEqual(contract.call_problem("session.transcript", {"session_id": "s", "order": "latest"}), "")
+        for bad in ({"session_id": "parent", "cursor": "c0"}, {**ok, "subagent_id": " "},
+                    {**ok, "subagent_id": None}):
+            self.assertIn("only with the subagent_id", contract.call_problem("session.transcript", bad), bad)
+        self.assertIn("cursor as the string", contract.call_problem("session.transcript", {**ok, "cursor": 3}))
+        self.assertIn("does not declare", contract.call_problem("session.transcript", {**ok, "child_session_id": "c"}))
+
     def test_a_reasoning_config_set_takes_effort_levels_only(self) -> None:
         # Under the same key Hermes reads these as display settings and writes them to config.yaml.
         effort = {"key": "reasoning", "session_id": "live-1"}
@@ -137,9 +160,25 @@ class ClientMethodTests(unittest.TestCase):
         self.assertEqual(contract.undeclared_params("voice.toggle", {"on": True}), ["on"])
 
     def test_only_the_calls_a_session_does_without_are_optional(self) -> None:
-        optional = {"commands.catalog", "config.get", "model.options", "session.list", "skills.reload"}
+        optional = {"commands.catalog", "config.get", "image.render", "model.options", "session.list", "skills.reload",
+                    "session.title", "session.delete",  # these two only rename or delete a picker row
+                    "session.transcript"}  # only reads a picker row Hermes lists as not resumable
         self.assertEqual(contract.OPTIONAL_METHODS, optional)
+        self.assertEqual(contract.CLIENT_METHODS["session.transcript"],
+                         {"session_id", "order", "limit", "subagent_id", "cursor"})
+        self.assertEqual(contract.CLIENT_METHODS["session.title"], {"session_id", "title"})
+        self.assertEqual(contract.CLIENT_METHODS["session.delete"], {"session_id"})
         self.assertLessEqual(contract.OPTIONAL_METHODS, set(contract.CLIENT_METHODS))
+
+    def test_image_render_is_declared_with_its_five_keys_and_is_optional(self) -> None:
+        self.assertEqual(
+            contract.CLIENT_METHODS["image.render"],
+            frozenset({"path", "cols", "rows", "graphics", "terminal"}),
+        )
+        self.assertIn("image.render", contract.OPTIONAL_METHODS)
+        params = {"path": "/p.png", "cols": 40, "rows": 8, "graphics": True, "terminal": "kitty"}
+        self.assertEqual(contract.call_problem("image.render", params), "")
+        self.assertIn("session_id", contract.call_problem("image.render", {**params, "session_id": "live-1"}))
 
     def test_drift_errors_are_param_rejection_and_unknown_method_only(self) -> None:
         self.assertTrue(contract.is_drift_error({"code": 4000, "message": "extra fields"}))
@@ -255,9 +294,10 @@ class InboundTests(unittest.TestCase):
                 self.assertEqual(folded == [], event_type in contract.APP_EVENTS)
 
     def test_every_event_type_is_declared_once_and_every_recorded_one_is_declared(self) -> None:
-        # 77: `len(tui_gateway.contracts.registry.EVENTS)` in Hermes 6c61c3e27d.
+        # 77: `len(tui_gateway.contracts.registry.EVENTS)` in Hermes 6c61c3e27d, plus the two newer ones the app takes
+        # (`skills.changed`, `session.replay_gap`).
         self.assertEqual(contract.HANDLED_EVENTS & contract.UNREAD_EVENTS, frozenset())
-        self.assertEqual(len(contract.HANDLED_EVENTS | contract.UNREAD_EVENTS), 77)
+        self.assertEqual(len(contract.HANDLED_EVENTS | contract.UNREAD_EVENTS), 77 + 2)
         recorded = {
             kind
             for name in ("session", "approval", "subagent_relay", "notifications", "parity")

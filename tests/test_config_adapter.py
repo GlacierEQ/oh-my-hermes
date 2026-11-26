@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import unittest
+from unittest import mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -9,13 +10,22 @@ from _local_package import load_local_package
 
 load_local_package()
 from omh.config_adapter import (
+    anchor_external_dir_entry,
     display_key_named_twice,
     display_skin_selection,
     external_dir_registered,
     ensure_external_dir,
     external_dirs,
+    ensure_plugin_omh_home,
+    memory_provider_selection,
+    plugin_omh_home_setting,
     remove_external_dir,
+    remove_memory_provider,
+    remove_plugin_enabled,
+    section_edit_guard,
+    set_memory_provider,
 )
+from omh.install.config_reversal import config_names_key
 
 
 class ConfigAdapterTests(unittest.TestCase):
@@ -177,6 +187,27 @@ class ConfigAdapterTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertFalse(display_key_named_twice(text, "skin"))
 
+    def test_a_column_zero_comment_does_not_end_the_skills_node(self) -> None:
+        # A comment carries no structure; `external_dirs:` below it is still
+        # a child of `skills:`, so setup extends it rather than adding a
+        # second key Hermes would refuse (#2304).
+        original = "skills:\n  disabled: []\n# =====\n# Skills\n# =====\n  external_dirs:\n    - /keep\n"
+
+        self.assertEqual(external_dirs(original), ["/keep"])
+        change = ensure_external_dir(original, "/tmp/omh/skills")
+
+        self.assertEqual(change.message, "added external dir")
+        self.assertEqual(change.text.count("external_dirs:"), 1)
+        self.assertEqual(external_dirs(change.text), ["/keep", "/tmp/omh/skills"])
+
+    def test_a_column_zero_comment_does_not_end_the_memory_node(self) -> None:
+        original = "memory:\n  memory_enabled: true\n\n# =====\n# Provider\n# =====\n  provider: ''\nother: 1\n"
+        change = set_memory_provider(original, "omh")
+
+        self.assertEqual(change.message, "set memory.provider")
+        self.assertEqual(change.text.count("provider:"), 1)
+        self.assertEqual(memory_provider_selection(change.text), "omh")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -200,6 +231,334 @@ class ExternalDirRegistrationTests(unittest.TestCase):
             self.assertFalse(external_dir_registered(dirs, root / "generations" / "g2" / "skills"))
             self.assertFalse(external_dir_registered([], generation / "skills"))
 
+    def test_an_entry_is_expanded_the_way_hermes_expands_it(self) -> None:
+        # Hermes expands `${VAR}` and then `~` before it resolves an entry,
+        # so this spelling is the pointer to it; an unset variable stays as
+        # written there and names nothing of OMH's. The order is pinned by a
+        # value that starts with `~`: expanded the other way round, the `~`
+        # it brings in would stay literal.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pointer = root / "managed" / "current" / "skills"
+            pointer.mkdir(parents=True)
+            # USERPROFILE beside HOME: ntpath.expanduser ignores HOME.
+            environment = {
+                "HOME": str(root),
+                "USERPROFILE": str(root),
+                "OMH_TEST_MANAGED_ROOT": (root / "managed").as_posix(),
+                "OMH_TEST_TILDE_ROOT": "~/managed",
+            }
+            with mock.patch.dict(os.environ, environment):
+                os.environ.pop("OMH_TEST_UNSET_ROOT", None)
+                self.assertTrue(external_dir_registered(["${OMH_TEST_MANAGED_ROOT}/current/skills"], pointer))
+                self.assertTrue(external_dir_registered(["${OMH_TEST_TILDE_ROOT}/current/skills"], pointer))
+                self.assertFalse(external_dir_registered(["${OMH_TEST_UNSET_ROOT}/current/skills"], pointer))
+
+    def test_a_relative_entry_is_never_resolved_against_the_working_directory(self) -> None:
+        # Hermes reads `current/skills` as `$HERMES_HOME/current/skills`. Run
+        # from the managed root, the same text resolves to the pointer; it
+        # must not make a home read as registered there, or a home that names
+        # no managed directory is refreshed instead of left as the opt-out.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pointer = root / "current" / "skills"
+            pointer.mkdir(parents=True)
+            cwd = os.getcwd()
+            os.chdir(root)
+            try:
+                self.assertTrue(Path("current/skills").resolve().samefile(pointer))
+                self.assertFalse(external_dir_registered(["current/skills"], pointer))
+                self.assertFalse(external_dir_registered(["./current/skills/"], pointer))
+                self.assertTrue(external_dir_registered([pointer.as_posix()], pointer))
+            finally:
+                os.chdir(cwd)
+
+    def test_with_the_home_a_relative_entry_is_read_under_it(self) -> None:
+        # Hermes reads `../m/current/skills` in `<root>/.hermes` as the
+        # pointer, whatever directory this command runs from: it registers
+        # the home, and registration does not add the pointer beside it.
+        with TemporaryDirectory() as tmp, TemporaryDirectory() as unrelated:
+            root = Path(tmp)
+            home = root / ".hermes"
+            pointer = root / "m" / "current" / "skills"
+            for directory in (home, pointer):
+                directory.mkdir(parents=True)
+            text = "skills:\n  external_dirs:\n    - ../m/current/skills\n"
+            cwd = os.getcwd()
+            os.chdir(unrelated)
+            try:
+                self.assertTrue(external_dir_registered(["../m/current/skills"], pointer, hermes_home=home))
+                self.assertFalse(external_dir_registered(["m/current/skills"], pointer, hermes_home=home))
+                self.assertEqual(ensure_external_dir(text, pointer, hermes_home=home).text, text)
+                with mock.patch.dict(os.environ, {"OMH_TEST_MANAGED_ROOT": (root / "m").as_posix()}):
+                    spelled = "skills:\n  external_dirs:\n    - ${OMH_TEST_MANAGED_ROOT}/current/skills/\n"
+                    self.assertFalse(ensure_external_dir(spelled, pointer, hermes_home=home).changed)
+                # Without the home the text compare is the whole contract.
+                self.assertTrue(ensure_external_dir(text, pointer).changed)
+            finally:
+                os.chdir(cwd)
+
+    def test_registration_never_takes_a_generation_s_pack_for_the_pointer(self) -> None:
+        # The pointer resolves to the generation it points at; a real-path
+        # match would read that generation's pack as the pointer, and the
+        # migration that retires the pack would leave the home with neither.
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            generation = root / "generations" / "g1"
+            (generation / "skills").mkdir(parents=True)
+            os.symlink(generation, root / "current", target_is_directory=True)
+            text = f"skills:\n  external_dirs:\n    - {(generation / 'skills').as_posix()}\n"
+            change = ensure_external_dir(text, root / "current" / "skills", hermes_home=root / ".hermes")
+            self.assertEqual(external_dirs(change.text), [(generation / "skills").as_posix(), (root / "current" / "skills").as_posix()])
+
+    def test_an_entry_is_anchored_at_the_home_the_way_hermes_anchors_it(self) -> None:
+        home = Path("/hermes-home")
+        with mock.patch.dict(os.environ, {"OMH_TEST_MANAGED_ROOT": "/managed"}):
+            self.assertEqual(anchor_external_dir_entry("${OMH_TEST_MANAGED_ROOT}/skills", home), Path("/managed/skills"))
+        self.assertEqual(anchor_external_dir_entry("/managed/skills", home), Path("/managed/skills"))
+        self.assertEqual(anchor_external_dir_entry("skills", home), home / "skills")
+
     def test_a_textual_match_needs_no_directory_on_disk(self) -> None:
         self.assertTrue(external_dir_registered(["/nowhere/skills"], "/nowhere/skills"))
         self.assertFalse(external_dir_registered(["/nowhere/skills"], "/elsewhere/skills"))
+
+
+class NestedSectionGuardTests(unittest.TestCase):
+    """A nested `skills:` is not a second top-level `skills` section (#2829).
+
+    The shape guard counted every line whose text mentioned the section as a
+    mapping key, and its pattern let `\\s*` eat indentation. A webhook route
+    carrying its own `skills:` list, a block-scalar prompt line that reads
+    like one, and a column-0 flow mapping of another section were all read as
+    duplicate top-level sections, so `omh update` refused a valid config and
+    left that profile's OMH skills stale.
+
+    Each positive below was refused on the parent commit. A `section:` key
+    that appears only indented is a child of another section when the root
+    mapping sits at column 0; only a document whose whole root is indented
+    stays user-owned.
+    """
+
+    ISSUE_CONFIG = """skills:
+  external_dirs:
+    - /home/u/.omh/skills
+
+webhooks:
+  routes:
+    github-pr:
+      skills:
+        - github
+"""
+
+    NESTED_SHAPES = {
+        "memory": """memory:
+  provider: omh
+
+webhooks:
+  routes:
+    pr:
+      memory:
+        - long-term
+""",
+        "plugins": """plugins:
+  enabled:
+    - omh
+
+webhooks:
+  routes:
+    pr:
+      plugins:
+        - omh
+""",
+        "display": """display:
+  skin: omh
+
+webhooks:
+  routes:
+    pr:
+      display:
+        - compact
+""",
+        "auxiliary": """auxiliary:
+  compression:
+    enabled: true
+
+webhooks:
+  routes:
+    pr:
+      auxiliary:
+        - compression
+""",
+    }
+
+    BLOCK_SCALAR_CONFIG = """skills:
+  external_dirs:
+    - /home/u/.omh/skills
+
+webhooks:
+  routes:
+    github-pr:
+      prompt: |
+        skills: are listed below
+        memory: as well
+"""
+
+    FLOW_OTHER_SECTION_CONFIG = """skills:
+  external_dirs:
+    - /home/u/.omh/skills
+
+webhooks: {routes: {a: {skills: [x]}}}
+"""
+
+    def test_the_issue_config_is_one_skills_section(self) -> None:
+        self.assertEqual(section_edit_guard(self.ISSUE_CONFIG.splitlines(), "skills"), "")
+
+    def test_a_nested_section_key_is_not_a_second_top_level_section(self) -> None:
+        for section, text in self.NESTED_SHAPES.items():
+            with self.subTest(section=section):
+                self.assertEqual(section_edit_guard(text.splitlines(), section), "")
+
+    def test_a_block_scalar_content_line_is_not_a_section(self) -> None:
+        self.assertEqual(section_edit_guard(self.BLOCK_SCALAR_CONFIG.splitlines(), "skills"), "")
+
+    def test_a_flow_mapping_of_another_section_is_not_a_section(self) -> None:
+        self.assertEqual(section_edit_guard(self.FLOW_OTHER_SECTION_CONFIG.splitlines(), "skills"), "")
+        # With no top-level `skills` block at all, the nested name is still
+        # only another root key's child.
+        self.assertEqual(
+            section_edit_guard(["webhooks: {routes: {a: {skills: [x]}}}"], "skills"),
+            "",
+        )
+
+    def test_the_skills_writer_registers_the_dir_and_leaves_the_route_alone(self) -> None:
+        change = ensure_external_dir(self.ISSUE_CONFIG, "/home/u/.omh/skills/omh")
+
+        self.assertTrue(change.changed)
+        self.assertEqual(change.message, "added external dir")
+        self.assertEqual(
+            external_dirs(change.text), ["/home/u/.omh/skills", "/home/u/.omh/skills/omh"]
+        )
+        self.assertIn("      skills:\n        - github\n", change.text)
+
+    def test_two_top_level_blocks_stay_refused(self) -> None:
+        two = "skills:\n  external_dirs:\n    - /a\nskills:\n  external_dirs:\n    - /b\n"
+        self.assertIn("duplicate skills sections", section_edit_guard(two.splitlines(), "skills"))
+
+    def test_a_column_zero_flow_section_stays_refused_as_noncanonical(self) -> None:
+        self.assertIn(
+            "noncanonical skills configuration",
+            section_edit_guard(["skills: {external_dirs: []}"], "skills"),
+        )
+
+    def test_an_indented_root_document_stays_refused(self) -> None:
+        # With no key at column 0 the whole root mapping is indented, so an
+        # indented `skills:` is the root key itself and this editor cannot
+        # locate it by its column-0 line.
+        self.assertNotEqual(section_edit_guard(["  model: x", "  skills:", "    e: []"], "skills"), "")
+
+    def test_a_profile_without_skills_gets_its_first_block_beside_a_route_skills_list(self) -> None:
+        # The other half of #2829: no top-level `skills:` yet, and a webhook
+        # route carries its own. The nested key is the route's child, not a
+        # noncanonical `skills`, so the writer appends the first block.
+        text = "model: x\nwebhooks:\n  routes:\n    a:\n      skills:\n        - github\n"
+        self.assertEqual(section_edit_guard(text.splitlines(), "skills"), "")
+        change = ensure_external_dir(text, "/home/u/.omh/skills/omh")
+        self.assertTrue(change.changed)
+        self.assertEqual(external_dirs(change.text), ["/home/u/.omh/skills/omh"])
+        self.assertTrue(change.text.startswith(text))
+        for section in ("memory", "plugins", "display", "auxiliary"):
+            nested = f"model: x\nwebhooks:\n  routes:\n    a:\n      {section}:\n        - x\n"
+            with self.subTest(section=section):
+                self.assertEqual(section_edit_guard(nested.splitlines(), section), "")
+
+    def test_a_column_zero_explicit_key_stays_refused(self) -> None:
+        text = "skills:\n  external_dirs:\n    - /a\n? skills\n: {external_dirs: [/b]}\n"
+        self.assertNotEqual(section_edit_guard(text.splitlines(), "skills"), "")
+
+    def test_the_top_level_test_reads_only_column_zero_root_keys(self) -> None:
+        # Imported here so the rest of this class runs against a checkout
+        # that predates the helper, which is how the positives below were
+        # shown to be refused.
+        from omh.config_adapter import references_top_level_section
+
+        for line in ("skills:", '"skills":', "'skills':", "? skills", "skills: {external_dirs: []}"):
+            with self.subTest(line=line):
+                self.assertTrue(references_top_level_section(line, "skills"))
+        for line in (
+            "  skills:",
+            "        skills: are listed below",
+            "webhooks: {routes: {a: {skills: [x]}}}",
+            "webhooks:",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(references_top_level_section(line, "skills"))
+
+    def test_a_section_named_only_inside_another_flow_mapping_is_not_reported(self) -> None:
+        # The uninstall report read the section's own name inside another
+        # root key's braces as an opened section, so it named a
+        # `skills.external_dirs` no root block carries.
+        nested_flow = "webhooks: {routes: {a: {skills: {external_dirs: [/home/u/test]}}}}\n"
+        self.assertFalse(config_names_key(nested_flow, "skills.external_dirs"))
+        nested_block = "webhooks:\n  routes:\n    a:\n      skills:\n        external_dirs:\n          - /home/u/test\n"
+        self.assertFalse(config_names_key(nested_block, "skills.external_dirs"))
+        self.assertTrue(config_names_key("skills:\n  external_dirs:\n    - /home/u/test\n", "skills.external_dirs"))
+        # A flow mapping on the section's own line still names its child.
+        self.assertTrue(config_names_key("display: {skin: omh}\n", "display.skin"))
+
+
+class CommentedQuotesTests(unittest.TestCase):
+    """A quote inside a YAML comment is not a quoted mapping key.
+
+    Hermes' own config template (`cli-config.yaml.example`, which its
+    installer copies to `config.yaml`) carries comments such as
+    `# order: ["anthropic", "google"]` and `journal_mode: "wal"  # Supported
+    values: "wal", "delete"`. The syntax guard read those as quoted keys, so on
+    a Hermes installed a minute earlier setup could not record
+    `plugins.entries.omh.settings.omh_home` and uninstall could not take back
+    `plugins.enabled` or `memory.provider`.
+    """
+
+    FRESH_HERMES = (
+        "storage:\n"
+        '  journal_mode: "wal"  # Supported values: "wal", "delete"\n'
+        "provider_routing:\n"
+        '#   # order: ["anthropic", "google", "together"]\n'
+        '  client_env_passthrough: []  # e.g. ["GEM_HOME", "POETRY_HOME"]\n'
+        "memory:\n"
+        "  provider: omh\n"
+        "plugins:\n"
+        "  enabled:\n"
+        "    - omh\n"
+        "  clone_timeout_seconds: 300\n"
+        "display:\n"
+        '  #     waiting_faces: ["(⚔)", "(⛨)"]       # Faces shown while waiting\n'
+        '  # removes the tool-progress bubble, "⏳ Still working..." notices, and\n'
+    )
+
+    def test_quotes_in_comments_leave_every_section_editable(self) -> None:
+        lines = self.FRESH_HERMES.splitlines()
+        for section, key in (("plugins", "entries"), ("plugins", "enabled"), ("memory", "provider"), ("display", "")):
+            with self.subTest(section=section):
+                self.assertEqual(section_edit_guard(lines, section, key), "")
+
+    def test_setup_and_uninstall_edit_a_fresh_hermes_config(self) -> None:
+        bound = ensure_plugin_omh_home(self.FRESH_HERMES, "/home/u/.omh")
+        self.assertTrue(bound.changed, bound.message)
+        self.assertEqual(plugin_omh_home_setting(bound.text), "/home/u/.omh")
+        self.assertTrue(remove_plugin_enabled(self.FRESH_HERMES, "omh").changed)
+        self.assertTrue(remove_memory_provider(self.FRESH_HERMES, "omh").changed)
+
+    def test_a_quoted_key_or_node_property_outside_a_comment_is_still_refused(self) -> None:
+        for text in (
+            '"plugins":\n  enabled:\n    - omh\n',
+            "plugins:\n  enabled: [omh, 'x']  # a 'quote' after\n  {'a': 1}\n",
+            "plugins:\n  enabled: &p  # anchored\n    - omh\n",
+            "plugins:\n  enabled:\n    - omh\nother: {'k': v}  # trailing\n",
+        ):
+            with self.subTest(text=text):
+                self.assertNotEqual(section_edit_guard(text.splitlines(), "plugins", "enabled"), "")
+
+    def test_a_hash_inside_a_quoted_value_does_not_start_a_comment(self) -> None:
+        # `"a #b"` is one scalar: what follows it is still code and still guarded.
+        text = 'note: "a #b", "c"\nplugins:\n  enabled:\n    - omh\n'
+        self.assertNotEqual(section_edit_guard(text.splitlines(), "plugins", "enabled"), "")

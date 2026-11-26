@@ -14,6 +14,7 @@ TARGETS = frozenset(
         "geospatial-analysis",
         "biomedical-evidence",
         "molecular-docking",
+        "sprite-forge",
     }
 )
 
@@ -57,19 +58,28 @@ DOMAIN_REVIEW_CONTRACTS = {
             "docking_execution_check": {"backend_identity", "pose_score_readback", "hashes", "replay", "claim_boundary"},
         },
     },
+    "sprite-forge": {
+        "outputs": ("aligned equal-size frames and sheet", "sprite_forge_qc/v1 receipt", "character art-direction record"),
+        "steps": ("sprite_direct", "sprite_process", "sprite_verify"),
+        "checks": {
+            "sprite_input_check": {"grid_layout", "background_key", "cell_division", "source_record"},
+            "sprite_backend_check": {"pillow_version", "command", "exit_code", "script_sha256"},
+            "sprite_qc_check": {"body_scale_cv", "anchor_y_max_dev", "free_frames", "verdict", "output_hashes"},
+        },
+    },
     "show-reel": {
         "outputs": ("show_reel_brief/v1", "show_reel_source_asset_register/v1", "show_reel_concept_selection/v1", "show_reel_storyboard/v1", "show_reel_timing_map/v1", "show_reel_renderer_handoff/v1", "show_reel_preview_review/v1", "show_reel_export_manifest/v1", "show_reel_qa_report/v1", "show_reel_delivery_manifest/v1"),
         "steps": ("reel_brief", "reel_verify_sources", "reel_select_concept", "reel_direct_segments", "reel_measure_timing", "reel_author_motion", "reel_review_revise", "reel_export", "reel_validate", "reel_deliver"),
         "checks": {
             "reel_brief_check": {"objective", "audience_channel", "format_duration_budget", "locale_precedence", "language_tracks", "literal_tokens", "unknowns"},
-            "reel_source_check": {"claim_source_version", "evidence_class", "brand_verification", "asset_rights", "consent", "conflicts"},
+            "reel_source_check": {"claim_source_version", "evidence_class", "brand_verification", "asset_rights", "consent", "conflicts", "product_capture_source", "literal_fact_citations"},
             "reel_concept_check": {"candidates", "shared_rubric", "selection", "rejected_alternatives", "revision_budget"},
-            "reel_story_check": {"segments", "source_asset_ids", "art_direction", "motion_intent", "locale_runs", "distinct_compositions"},
+            "reel_story_check": {"segments", "source_asset_ids", "art_direction", "motion_intent", "locale_runs", "distinct_compositions", "frame_fill", "clear_space", "decorative_text", "palette_families"},
             "reel_timing_check": {"audio_mode", "measured_cues", "reading_time", "pronunciation_approval", "voice_rights", "sync_status"},
             "reel_adapter_check": {"selected_executor", "capabilities", "workspace_scope", "deterministic_time", "commands_timeout_cancel", "partial_resume", "font_readiness", "toolkit_provenance", "source_bound_run"},
-            "reel_preview_check": {"style_frames", "draft", "transition_strips", "keep_fix_rebuild", "weakest_scene", "revision_spend", "delivery_size_review", "strongest_scene", "anti_slide_review", "composition_variety", "before_after_and_boundaries"},
+            "reel_preview_check": {"style_frames", "draft", "transition_strips", "keep_fix_rebuild", "weakest_scene", "revision_spend", "delivery_size_review", "strongest_scene", "anti_slide_review", "composition_variety", "before_after_and_boundaries", "product_gap"},
             "reel_export_check": {"files_hashes", "codec_dimensions_fps_duration", "color_metadata", "filesize_cap", "audio_metrics", "av_sync"},
-            "reel_qa_check": {"content_brand", "locale_font_bidi", "cut_motion", "delivery_size_legibility", "temporal_audio", "critical_defects", "disposition", "evidence_refs", "technical_verdict", "artistic_verdict", "playback_verdict", "listening_verdict"},
+            "reel_qa_check": {"content_brand", "locale_font_bidi", "cut_motion", "delivery_size_legibility", "temporal_audio", "critical_defects", "disposition", "evidence_refs", "technical_verdict", "artistic_verdict", "playback_verdict", "listening_verdict", "literal_copy"},
             "reel_delivery_check": {"generated_files", "attachment_receipt", "recipient_state", "publication_approval", "source_package", "missing_evidence"},
         },
     },
@@ -184,7 +194,7 @@ DOMAIN_REVIEW_CONTRACTS = {
             "lifecycle_target_behavior_check": {"evidence_refs", "lifecycle_stage", "hypotheses", "owner", "baseline_value", "baseline_window", "target_behavior", "disposition", "non_goals"},
             "lifecycle_audience_eligibility_check": {"entry_conditions", "exit_conditions", "event_semantics_status", "idempotency_key", "reentry_policy", "collision_policy", "denominator_status", "canonical_events", "disposition", "exclusions", "identity_key"},
             "lifecycle_safety_eligibility_check": {"consent_basis", "locale", "global_frequency_budget", "suppression_precedence", "user_preferences", "disposition", "quiet_hours", "channel_eligibility", "campaign_frequency_budget", "legal_tenant_constraints", "throttle_grouping", "workflow_content_state", "promotion_decision"},
-            "lifecycle_experiment_validity_check": {"primary_metric", "exposure_definition", "assignment_unit", "treatment_control", "exposure_unit", "guardrail_metrics", "pause_rollback_conditions", "assignment_stickiness", "data_health_checks", "approval_state", "holdout_rationale", "minimum_runtime"},
+            "lifecycle_experiment_validity_check": {"baseline_rate", "minimum_detectable_effect", "required_sample_per_arm", "expected_eligible_in_window", "primary_metric", "exposure_definition", "assignment_unit", "treatment_control", "exposure_unit", "guardrail_metrics", "pause_rollback_conditions", "assignment_stickiness", "data_health_checks", "approval_state", "holdout_rationale", "minimum_runtime"},
             "lifecycle_readout_evidence_check": {"evidence_refs", "cross_exposure_status", "displayed_count", "overlap_status", "freshness_status", "causal_claim_status", "delivered_count", "instrumentation_status", "denominator_status", "sample_ratio_status", "acted_count", "eligible_count", "disposition", "attempted_count", "outcome_count", "step_outcomes", "step_trace_status", "analysis_run_state", "analysis_observed_at", "analysis_delay_status", "exposure_evidence", "assigned_count", "repeated_contact_count", "contact_pressure_state", "channels"},
             "lifecycle_handoff_boundary_check": {"approver", "evidence_refs", "action_class", "target_owner", "readiness", "disposition", "timing", "stop_conditions", "approval_state", "analysis_cancellation"},
         },
@@ -233,7 +243,7 @@ DOMAIN_REVIEW_CONTRACTS = {
         "checks": {
             "sales_pipeline_scope_check": {"data_quality_gaps", "currency_conversion_basis", "freshness_status", "forecast_category_definitions", "amount_semantics", "included_motions_owners", "stage_definitions", "review_horizon_cohort", "source_reference", "duplicate_status", "disposition", "as_of_time", "missing_owner_status"},
             "sales_pipeline_health_check": {"concentration", "duplicates", "missing_ownership", "exit_criteria_evidence", "aging_stalls", "stage_movement", "next_step_quality", "slipped_close_dates", "record_evidence_refs", "deal_exceptions"},
-            "sales_forecast_state_check": {"evidence_limits", "confidence", "scenario_range", "observed_buyer_commitment", "prior_forecast_actual_comparison", "supplied_probability", "calibration_status", "supplied_seller_category"},
+            "sales_forecast_state_check": {"target_source", "coverage_ratio", "evidence_limits", "confidence", "scenario_range", "observed_buyer_commitment", "prior_forecast_actual_comparison", "supplied_probability", "calibration_status", "supplied_seller_category"},
             "sales_outcome_learning_check": {"unqualified_reasons", "contradictions", "cohort_bounds", "observed_lost_reasons", "annex_status", "research_followups", "missing_evidence", "observed_won_reasons"},
             "sales_renewal_risk_check": {"support_signal", "owner", "budget_signal", "health_signal", "staffing_signal", "open_risks", "annex_status", "utilization_signal", "expansion_hypotheses", "renewal_horizon"},
             "sales_pipeline_handoff_check": {"exit_criterion", "owner", "crm_object_field_value_proposals", "due_date", "evidence_ref", "sibling_routes", "disposition", "approval_state", "mutation_status", "selected_account_followups"},

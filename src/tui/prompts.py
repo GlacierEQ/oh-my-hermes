@@ -8,10 +8,10 @@ or withdrawn by the gateway. Three rules shape this module:
   they pressed or text they submitted; Esc or Ctrl+C sends the contract's
   decline frame (an explicit deny for approvals). Every deny the person gives
   an approval (Esc, Ctrl+C, `d`, `n`, Enter on deny) also asks the app to stop
-  the running turn (`Answer.stops`). Allowing a command takes
-  the arrows and then Enter: deny is the first row and selected, the
-  narrowest allow sits under it, the selection does not wrap, no digit picks
-  a choice, and a letter can only deny. An approval's last row denies too,
+  the running turn (`Answer.stops`). An approval opens on allow once
+  (`APPROVAL_DEFAULT`), so Enter allows that one command: deny is the first
+  row, just above it, the broader allows sit under it, the selection does not
+  wrap, no digit picks a choice, and a letter can only deny. An approval's last row denies too,
   but stops nothing: it asks the app to give the composer to what the person
   tells Hermes instead (`Answer.tell`). The app ignores every key for a
   moment after any slot opens, or its next question appears. A request the gateway
@@ -26,32 +26,58 @@ or withdrawn by the gateway. Three rules shape this module:
 A question answered by picking (`PromptSlot.picking`: an approval, or a
 clarify question with choices) lists its choices, each from a row of its own
 and wrapped when long, the highlighted one marked `❯`, and the app hides the
-composer while it is open. A clarify
-question's last row opens a text field for an answer of the person's own
-(Hermes' wording, "Other (type your answer)"); while that field is open the
-composer is the field. Every slot row hangs off a `▌` bar, in the warn colour
-for an approval and grey for anything else, so a question Hermes asked
-never reads as panel or transcript text. The command an approval would run is
-drawn in the code style; the choices are plain text, the highlighted one also
-highlighted.
+composer while it is open. A clarify question with choices is drawn the way
+Claude Code draws AskUserQuestion (`_framed_lines`): between two rules across
+the width, its asked sentence bold under the context Hermes wrote before it
+(dim, capped), a `label — description` choice as its label with the
+description dim under it, a last row that opens a text field for an answer of
+the person's own ("Type something."; while that field is open the composer
+takes its keys undrawn, and what it holds shows on that row with the caret
+there, `inline_field`), and its keys on its own row under the bottom rule rather than on
+the info line. The picker's own words (the keys, "Type something.", Hermes'
+"(Recommended)") are English whatever language the question is in, as in
+Claude Code. What a pick sends back is Hermes' own string. Every other slot row hangs
+off a `▌` bar, in the warn colour for an approval and grey for anything else,
+so a question Hermes asked never reads as panel or transcript text.
+
+An approval shows its command one command per row (`command_risk`), the
+ones that destroy something in full after a `▲`. Every command is listed when
+they all fit. Only when they do not, and only when Hermes' description names a
+risk `command_risk` found (so what Hermes flagged is one of the `▲` rows), do
+the commands that change nothing (`Segment.foldable`, a closed allowlist) fold
+into one `+ N other commands` row; every other one stays while rows allow, the
+directory changes and assignments that aim a risky one first among them, and
+no `▲` row is cut while another command's row shows. `command_risk` knows
+far fewer patterns than Hermes, so when Hermes flagged something it does not
+know, every command is listed and `_fit` cuts from the end with its marker.
+Risks Hermes did not name get a `✦ OMH also sees:` row under its header.
+Ctrl+O shows the command whole, as Hermes sent it (`whole_lines`). Each choice
+has its icon and its tone (deny red, an allow green, always amber), and the
+highlighted one sits on a band of its tone (`Theme.pick_*`). When rows run
+short the spacing goes first, then the listing folds, then `_fit` cuts the
+body from its end.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field, replace
 import json
+import os
+import re
 import sys
 from typing import Any
 
+from . import command_risk
 from . import gateway_contract as contract
-from .keys import CHAR, DOWN, ENTER, ESCAPE, LEFT, RIGHT, UP, Key, Paste
+from .keys import CHAR, ENTER, ESCAPE, LEFT, RIGHT, Key, Paste, list_nav_step
 from .markdown import wrap_prefixed
-from .style import Line, Span, Style
-from .theme import Theme
-from .width import cell_width, line_width, truncate_line, wrap_line
+from .style import Line, Span, Style, fill, is_fill
+from .theme import CATCH_MARK, Theme
+from .width import cell_width, line_width, truncate, truncate_left, truncate_line, wrap_line
 
-# The order is the distance from safe: deny first (and selected), then the
-# narrowest allow, then the broadest. `always` is Hermes' permanent allow:
+# The order is the distance from safe: deny first, then the narrowest allow
+# (selected as the slot opens, `APPROVAL_DEFAULT`), then the broadest. `always` is Hermes' permanent allow:
 # Hermes saves the command's pattern in its config (`command_allowlist`), so
 # later commands like it run without asking. It is offered only when Hermes
 # lists it (Hermes leaves it out where a permanent allow is refused, such as a
@@ -60,6 +86,9 @@ from .width import cell_width, line_width, truncate_line, wrap_line
 # this session.
 APPROVAL_ORDER = ("deny", "once", "session", "always")
 APPROVAL_CHOICES = ("deny", "once", "session")
+# The row an approval opens on (owner, 2026-11-15: allow once, not deny). The keys typed for the composer as the
+# slot opens still land nowhere: every key is ignored for a moment after a slot opens (`App._slot_arming`).
+APPROVAL_DEFAULT = "once"
 # Last on every approval, as Claude Code puts its "No, and tell Claude" row last: it sends the explicit deny, and the
 # app then gives the composer to what the person tells Hermes instead (`App._open_tell`).
 APPROVAL_TELL = "tell"
@@ -71,13 +100,51 @@ _APPROVAL_LABELS = {
     APPROVAL_TELL: "no, and tell Hermes what to do instead",
 }
 ALWAYS_WHAT = "commands like this"  # `always`'s label for a request with no description
+# Each choice's icon and tone: the theme role its row is drawn in, and `pick_<tone>` when highlighted.
+APPROVAL_TONES = dict(zip((*APPROVAL_ORDER, APPROVAL_TELL),
+                          (("✗", "error"), ("✓", "ok"), ("✓", "ok"), ("★", "warn"), ("✎", "muted"))))
+RISK_MARK = "▲ "
+ALSO_SEES = " also sees: "
+OTHER_COMMANDS = "    + {count} other command{s} "
+OTHER_HINT = " · ctrl+o shows all"
+# How many steps an approval's `+ N other commands` row folds by, each more when rows run short (`_command_bodies`).
+FOLD_STEPS = 4
+RULE_CELLS = 60  # the faint rule between the command and the choices, at most
 # A letter can only deny. Allowing takes the arrows and Enter, so a key typed
 # for the composer as the slot opens can never run a command.
 _DENY_KEYS = frozenset("dn")
 # The keys that pick a clarify choice. `str.isdigit` also admits "²" or "٣", which `int` rejects.
 CHOICE_DIGITS = "123456789"
-# The last row of a clarify question's choices: it opens a text field (Hermes' Ink TUI, `prompt.clarify.other`).
-CLARIFY_OTHER = "Other (type your answer)"
+# The last row of a clarify question's choices: it opens a text field (Claude Code's AskUserQuestion wording).
+CLARIFY_OTHER = "Type something."
+# A multi-select question's last row, under the text field's: Enter there sends the ticked choices. Ticking never
+# sends (Claude Code's AskUserQuestion): `Next` while questions follow this one, `Submit` on the last.
+CLARIFY_SUBMIT, CLARIFY_NEXT = "Submit", "Next"
+# A choice written `label — description` shows the label on its numbered row and the description dim under it
+# (`_choice_parts`). One separator, spaces included, so a dash inside a word or a range never splits a choice.
+CHOICE_DESCRIPTION = " — "
+# The rule above and below a clarify question with choices (`_framed_lines`), across the whole width.
+FRAME_RULE = "─"
+# How many rows the context before a clarify question's asked sentence keeps, dim, before Ctrl+O shows the rest.
+LEAD_ROWS = 3
+# A framed question keeps its key row from this many slot rows on; below that the info line says its keys
+# (`PromptSlot.keys_while`), since a question with choices always has two rows of its own to keep.
+FRAMED_FOOTER_MIN_ROWS = 3
+# The framed question's own key row, under its bottom rule, for what the keys do now, in Claude Code's terse
+# wording: longest form that fits first. Digits and typing still pick and answer; the row names the three keys
+# every question takes. The info line says nothing then (`framed`).
+CLARIFY_FOOTERS = {
+    "choice": ("Enter to select · ↑↓ to navigate · Esc to cancel", "Enter to select · Esc to cancel", "Esc to cancel"),
+    "multi": ("Enter to tick · Enter on {send} to send · ↑↓ to navigate · Esc to cancel",
+              "Enter to tick · ↓ {send} to send · Esc to cancel", "Enter to tick · Esc to cancel", "Esc to cancel"),
+    "send": ("Enter to send · ↑↓ to navigate · Esc to cancel", "Enter to send · Esc to cancel", "Esc to cancel"),
+    # The Submit row with nothing ticked and nothing typed: it sends "", which Hermes reads as skipped.
+    "skip": ("Enter to skip · ↑↓ to navigate · Esc to cancel", "Enter to skip · Esc to cancel", "Esc to cancel"),
+    "field": ("Enter to send · ↑↓ back to the choices · Esc to cancel", "Enter to send · Esc to cancel", "Esc to cancel"),
+}
+# A question the TUI asks itself (the app's model confirmation) sets this to True: its choices are the only answers,
+# so it has no text field's row. Hermes' own questions never carry it.
+CLOSED_CHOICES = "omh_closed_choices"
 # A multi-select question (`multi_select`): a box before each choice, and a note after the question.
 TICKED, UNTICKED = "[x] ", "[ ] "
 MULTI_NOTE = " (choose one or more)"
@@ -95,14 +162,15 @@ APPROVAL_IDLE_KEYS = tuple(form.removesuffix(" and stops") for form in APPROVAL_
 CLARIFY_CHOICE_KEYS = (
     "↑↓ or 1-9 · enter picks · type to answer · esc cancels", "↑↓ enter picks · esc cancels", "esc cancels"
 )
+CLARIFY_CLOSED_KEYS = ("↑↓ or 1-9 · enter picks · esc cancels", "↑↓ enter picks · esc cancels", "esc cancels")
 CLARIFY_FIELD_KEYS = (
     "type your answer · enter sends · ↑↓ back to the choices · esc cancels",
     "enter sends · ↑↓ choices · esc cancels",
     "esc cancels",
 )
 CLARIFY_MULTI_KEYS = (
-    "↑↓ · space or 1-9 ticks · enter sends · type to answer · esc cancels",
-    "space ticks · enter sends · esc cancels",
+    "↑↓ · enter, space or 1-9 ticks · enter on {send} sends · type to answer · esc cancels",
+    "enter ticks · {send} sends · esc cancels",
     "esc cancels",
 )
 CLARIFY_TEXT_KEYS = ("type an answer · enter sends · esc cancels",)
@@ -181,6 +249,24 @@ class PromptSlot:
     answers: dict[str, str | None] = field(default_factory=dict)
     typing: bool = False  # a clarify question's text field is open: the composer is the field
     ticked: list[str] = field(default_factory=list)  # a multi-select question's ticked choices, in the order ticked
+    # The text field's words (the app's composer, set before each key and frame), kept while the arrows leave the
+    # field: as its row shows them (a paste chip, an image token, as its label), and as Enter in the field would send
+    # them (`Composer.expanded`), which a multi-select question's Submit row sends with the ticked choices.
+    draft: str = ""
+    draft_sent: str = ""
+    # The field's words before the composer's caret, as `draft` shows them: where the caret stands on the field's row.
+    draft_before: str = ""
+    draft_marks: tuple[tuple[int, int], ...] = ()
+    # What the model wrote only into its reasoning before asking a clarify with no reply text (`silent_lead`),
+    # drawn dim above the first question as its context; "" when the reply said it, or nothing could be read.
+    silent_lead: str = ""
+    # Where the open text field's caret is drawn, (row, col) within the slot's last rows (`_framed_lines`); None when
+    # no field is open on a framed question's row, or its row was cut.
+    caret: tuple[int, int] | None = field(default=None, init=False, repr=False, compare=False)
+    # An approval's command and its `command_risk.segments`, read once instead of on every frame.
+    _segments: tuple[str, list[command_risk.Segment]] | None = field(
+        default=None, init=False, repr=False, compare=False,
+    )
 
     @property
     def masked(self) -> bool:
@@ -205,8 +291,21 @@ class PromptSlot:
         return self.method == "clarify" and bool(self._current_choices()) and not self.typing
 
     @property
+    def inline_field(self) -> bool:
+        """Whether the open text field is typed on its own row of the list (`Type something.`), as Claude Code's
+        AskUserQuestion does: a framed question with its field open. The composer takes the keys and is not drawn."""
+        return self.framed and self.typing
+
+    @property
+    def framed(self) -> bool:
+        """Whether the slot draws a clarify question with choices between two rules, with its keys on its own row
+        under them (`_framed_lines`), so the info line says none."""
+        return self.method == "clarify" and bool(self._current_choices())
+
+    @property
     def keys(self) -> tuple[str, ...]:
-        """The keys this question takes now, longest form first, said on the info line."""
+        """The keys this question takes now, longest form first, said on the info line (a framed question's are on
+        its own footer instead, `CLARIFY_FOOTERS`)."""
         if self.method == "approval":
             return APPROVAL_KEYS
         if self.method == "clarify":
@@ -214,7 +313,11 @@ class PromptSlot:
                 return CLARIFY_TEXT_KEYS
             if self.typing:
                 return CLARIFY_FIELD_KEYS
-            return CLARIFY_MULTI_KEYS if self._multi() else CLARIFY_CHOICE_KEYS
+            if not self._other_row():
+                return CLARIFY_CLOSED_KEYS
+            if self._multi():
+                return tuple(form.format(send=self._submit_label().lower()) for form in CLARIFY_MULTI_KEYS)
+            return CLARIFY_CHOICE_KEYS
         return VALUE_KEYS
 
     def keys_while(self, turn_runs: bool) -> tuple[str, ...]:
@@ -252,10 +355,24 @@ class PromptSlot:
         question = self._current_question()
         return _string_choices(question) if question else []
 
+    def _other_row(self) -> bool:
+        """Whether the current question ends with the text field's row (`CLARIFY_OTHER`); not one `CLOSED_CHOICES` closes."""
+        question = self._current_question()
+        return not (question and question.get(CLOSED_CHOICES) is True)
+
     def _multi(self) -> bool:
         """Whether the current question takes several choices (Hermes' `multi_select`, on a question with choices)."""
         question = self._current_question()
         return bool(question and question.get("multi_select") is True and self._current_choices())
+
+    def _submit_row(self) -> int | None:
+        """The index of a multi-select question's `Submit` row, after its choices and the text field's row; None on a
+        question that sends as it is picked."""
+        return len(self._current_choices()) + self._other_row() if self._multi() else None
+
+    def _submit_label(self) -> str:
+        """The `Submit` row's words: `Next` while questions follow this one."""
+        return CLARIFY_NEXT if self.question_index + 1 < len(self._questions()) else CLARIFY_SUBMIT
 
     def _record_answer(self, value: str | None) -> Answer | None:
         question = self._current_question()
@@ -273,15 +390,21 @@ class PromptSlot:
     def _pick(self, index: int) -> Answer | None:
         """Choice `index` answers the question; the row after the choices opens the text field instead.
 
-        On a multi-select question the answer is the ticked choices, or choice
-        `index` alone when none is ticked (`_ticked_answer`).
+        On a multi-select question a choice is ticked or unticked and nothing
+        is sent: the `Submit` row sends the ticked choices and the text the
+        field holds (`_ticked_answer`; with neither it reads as skipped), and
+        Enter in the open field still sends (`submit_text`).
         """
         choices = self._current_choices()
+        if index == self._submit_row():
+            return self._record_answer(_ticked_answer([*self.ticked, self.draft_sent.strip()]))
         if index < len(choices):
             if self._multi():
-                return self._record_answer(_ticked_answer(self.ticked or [choices[index]]))
+                self._tick(index)
+                return None
             return self._record_answer(choices[index])
-        self.selected, self.typing = len(choices), True
+        if self._other_row():
+            self.selected, self.typing = len(choices), True
         return None
 
     def _tick(self, index: int) -> None:
@@ -311,16 +434,16 @@ class PromptSlot:
     def _approval_key(self, key: Key) -> Answer | None:
         """Up and Down (Left and Right too) move and stop at either end; Enter answers the highlighted choice.
 
-        Deny is the first row and selected as the slot opens, so Up then Enter,
-        the composer's recall-and-resend typed as the slot opened, still
-        denies: Up moves nothing off the first row. No digit picks a choice,
-        and the only letters that answer deny. Every deny stops the turn
+        Allow once is selected as the slot opens and deny is the row above it,
+        so Up then Enter denies and Enter alone allows that one command; keys
+        typed for the composer as the slot opened are ignored (`App._slot_arming`).
+        No digit picks a choice, and the only letters that answer deny. Every deny stops the turn
         (`_denied`) but the tell row's.
         """
         choices = self.approval_choices()
-        if key.name in (UP, LEFT):
+        if list_nav_step(key) == -1 or key.name == LEFT:
             self.selected = max(self.selected - 1, 0)
-        elif key.name in (DOWN, RIGHT):
+        elif list_nav_step(key) == 1 or key.name == RIGHT:
             self.selected = min(self.selected + 1, len(choices) - 1)
         elif key.name == ENTER and choices[self.selected] == APPROVAL_TELL:
             return replace(self.decline(), tell=True)
@@ -343,20 +466,23 @@ class PromptSlot:
         and stop at either end; Enter picks the highlighted row; a digit picks
         that choice, or opens the field when it numbers the field's row. Any
         other character, or a paste, opens the field and is its first text.
-        On a multi-select question Space ticks the highlighted choice (and
-        does nothing on the field's row), and a digit ticks its choice. With
-        the field open, Up and Down go back to the list, and what was typed
-        stays in the field.
+        On a multi-select question Enter, Space and a digit on a choice tick
+        it and never send; the list ends with the `Submit` row (no digit),
+        where Enter sends (`_pick`), and Space does nothing on the field's row
+        or that one. With the field open, Up and Down go back to the list, and
+        what was typed stays in the field (`draft`).
         """
         choices = self._current_choices()
         if not choices:
             return None
+        numbered = len(choices) if self._other_row() else len(choices) - 1
+        submit = self._submit_row()
+        last = numbered if submit is None else submit
         if isinstance(key, Paste):
-            return None if self.typing else self._open_field(key)
-        if key.name in (UP, DOWN):
+            return None if self.typing or not self._other_row() else self._open_field(key)
+        if (step := list_nav_step(key)) != 0:
             self.typing = False
-            step = -1 if key.name == UP else 1
-            self.selected = min(max(self.selected + step, 0), len(choices))
+            self.selected = min(max(self.selected + step, 0), last)
             return None
         if self.typing:
             return None
@@ -369,12 +495,9 @@ class PromptSlot:
             if self.selected < len(choices):
                 self._tick(self.selected)
             return None
-        if len(key.char) == 1 and key.char in CHOICE_DIGITS and int(key.char) - 1 <= len(choices):
-            if multi and int(key.char) - 1 < len(choices):
-                self._tick(int(key.char) - 1)
-                return None
+        if len(key.char) == 1 and key.char in CHOICE_DIGITS and int(key.char) - 1 <= numbered:
             return self._pick(int(key.char) - 1)
-        return self._open_field(key)
+        return self._open_field(key) if self._other_row() else None
 
     def _open_field(self, key: Key | Paste) -> TypeIt:
         self.selected, self.typing = len(self._current_choices()), True
@@ -422,7 +545,9 @@ class PromptSlot:
         A clarify question answered says the label (the ticked labels, joined)
         or the text the person typed, as Hermes reads it, without the
         `(Recommended)` tag it adds to a choice (`_without_recommended`);
-        `skipped` for an empty answer, and one cancelled says `cancelled`. A
+        `skipped` for an empty answer, and one cancelled says `cancelled`; the
+        TUI's own question (`CLOSED_CHOICES`) says only the choice, whose label
+        names what it does. A
         value prompt says only `answered` or
         `declined`, never the value. An approval's answer is the app's to say.
         """
@@ -440,6 +565,9 @@ class PromptSlot:
             if question["qid"] not in answers:
                 continue
             value, asked = answers[question["qid"]], _one_line(question.get("question"))
+            if question.get(CLOSED_CHOICES) is True and isinstance(value, str) and value:
+                rows.append((True, value))
+                continue
             if not isinstance(value, str) or not value:
                 rows.append((False, f"{OUTCOME_SKIPPED} · {asked}"))
                 continue
@@ -467,42 +595,63 @@ class PromptSlot:
 
     # -- rendering --------------------------------------------------------------------------
 
-    def lines(self, width: int, theme: Theme, max_rows: int, waiting: int = 0) -> list[Line]:
-        """The slot's rows, at most `max_rows`; the question's keys are the info line's (`keys_while`).
+    def lines(
+        self, width: int, theme: Theme, max_rows: int, waiting: int = 0, whole: bool = False, waited: str = "",
+    ) -> list[Line]:
+        """The slot's rows, at most `max_rows`; the question's keys are the info line's (`keys_while`), or a framed
+        question's own (`_framed_lines`).
 
         A list keeps the highlighted row whatever the budget (`_fit`). A
         question with no list keeps its first row and its last ones. Whatever
         is cut, a marker says Ctrl+O shows the question whole. `waiting`
         questions queued behind this one are counted after its first words.
+        `whole` draws an approval's command as Hermes sent it instead of by
+        command, and a clarify question's context uncut (`whole_lines`).
+        `waited` is how long the person has been asked, said on a framed
+        question's key row.
         """
         if max_rows <= 0:
             return []
+        self.caret = None  # until a framed question's open field draws it (`_framed_lines`)
         inner = max(width - len(SLOT_BAR), 1)
         queued: Line = (Span(WAITING.format(count=waiting, s="s" if waiting != 1 else ""), theme.muted),) if waiting else ()
+        if self.framed:
+            return self._framed_lines(width, theme, max_rows, queued, whole, waited)
         if self.method == "approval":
-            rows = self._approval_lines(inner, theme, max_rows, queued)
+            rows = self._approval_lines(inner, theme, max_rows, queued, whole)
         elif self.method == "clarify":
             rows = self._clarify_lines(inner, theme, max_rows, queued)
         else:
             # The header and the hint matter most; the body is what gets cut.
             rows = _keep_ends(self._value_lines(inner, theme, queued), max_rows, inner, theme)
         bar = Span(SLOT_BAR, theme.warn if self.method == "approval" else theme.muted)
-        return [truncate_line((bar, *truncate_line(row, inner)), width) for row in rows]
+        return [_barred(row, bar, width) for row in rows]
 
     def whole_lines(self, width: int, theme: Theme, waiting: int = 0) -> list[Line]:
-        """Every row of the question, nothing cut: what Ctrl+O pages while it is open (the pager has its own keys)."""
-        return self.lines(width, theme, sys.maxsize, waiting=waiting)
+        """Every row of the question, nothing cut, an approval's command whole as Hermes sent it: what Ctrl+O pages
+        while it is open (the pager has its own keys)."""
+        return self.lines(width, theme, sys.maxsize, waiting=waiting, whole=True)
 
-    def _choice_rows(self, labels: list[tuple[str, str]], width: int, theme: Theme, mark_style: Style) -> list[list[Line]]:
-        """Each `(lead, label)` as its rows: the label wrapped under its lead (a number), whole, so a tag at its end
-        (Hermes' `(Recommended)`) shows; the highlighted one marked `❯` and highlighted."""
+    def _choice_rows(
+        self, labels: list[tuple[str, str, str]], width: int, theme: Theme, mark_style: Style, control: int | None = None,
+    ) -> list[list[Line]]:
+        """Each `(lead, label, description)` as its rows: the label wrapped under its lead (a number), whole, so a tag
+        at its end (`(Recommended)`) shows, and the description dim under the label; the highlighted one marked `❯`
+        and highlighted. The row at `control` (a multi-select question's Submit) is the picker's own, no text of the
+        question: a gutter (`_framing`) a drag never copies."""
         rows: list[list[Line]] = []
-        for index, (lead, label) in enumerate(labels):
+        for index, (lead, label, description) in enumerate(labels):
             current = index == self.selected
             style = theme.menu_current if current else theme.text
-            first: Line = (Span(CHOICE_MARK if current else " " * len(CHOICE_MARK), mark_style), Span(lead, style))
-            rest: Line = (Span(" " * (len(CHOICE_MARK) + cell_width(lead))),)
-            rows.append(wrap_prefixed((Span(label, style),), first, rest, width))
+            if index == control:
+                style = _framing(style)
+            first: Line = (Span(CHOICE_MARK if current else " " * len(CHOICE_MARK), _framing(mark_style)),
+                           Span(lead, style))
+            rest: Line = (Span(" " * (len(CHOICE_MARK) + cell_width(lead)), _framing(Style())),)
+            wrapped = wrap_prefixed((Span(label, style),), first, rest, width)
+            if description:
+                wrapped += wrap_prefixed((Span(description, theme.muted),), rest, rest, width)
+            rows.append(wrapped)
         return rows
 
     def _span(self, choices: list[list[Line]], room: int) -> tuple[int, int]:
@@ -543,7 +692,9 @@ class PromptSlot:
         forms = list(MORE_APPROVAL_CHOICES) if self.method == "approval" else [form.format(**said) for form in MORE_CHOICES]
         if ticked:
             forms[-1] = f"  … {ticked} ticked · ctrl+o"
-        marker: Line = (Span(next((form for form in forms if cell_width(form) <= width), forms[-1]), theme.muted),)
+        # The marker says what the picker left out: no text of the question, so a gutter (`_framing`) a drag never copies.
+        marker: Line = (Span(next((form for form in forms if cell_width(form) <= width), forms[-1]),
+                             _framing(theme.muted)),)
         return ([*rows, marker] if last < len(choices) - 1 else [marker, *rows]), False
 
     def _is_ticked(self, index: int) -> bool:
@@ -554,7 +705,14 @@ class PromptSlot:
     def _fit(
         self, head: list[Line], body: list[Line], choices: list[list[Line]], max_rows: int, width: int, theme: Theme,
     ) -> list[Line]:
-        """`head`, `body` and the `choices` (each one's rows), in that order, within `max_rows`.
+        """`head`, `body` and the `choices` within `max_rows` (`_fitted`)."""
+        return self._fitted(head, body, choices, max_rows, width, theme)[0]
+
+    def _fitted(
+        self, head: list[Line], body: list[Line], choices: list[list[Line]], max_rows: int, width: int, theme: Theme,
+    ) -> tuple[list[Line], int]:
+        """`head`, `body` and the `choices` (each one's rows), in that order, within `max_rows`, and how many of the
+        body's rows show, from its first.
 
         Rows are counted, not choices. Everything is drawn when it fits.
         Otherwise the highlighted choice always shows, whole when it can, and
@@ -572,9 +730,9 @@ class PromptSlot:
         """
         listed = sum(len(choice) for choice in choices)
         if len(head) + len(body) + listed <= max_rows:
-            return [*head, *body, *(row for choice in choices for row in choice)]
+            return [*head, *body, *(row for choice in choices for row in choice)], len(body)
         if max_rows == 1:
-            return [_ends_with_more(choices[self.selected][0], width, theme)]
+            return [_ends_with_more(choices[self.selected][0], width, theme)], 0
         left = max_rows - 1 - min(len(choices[self.selected]), max_rows - 1)  # beside the head's first row and it
         reserved = min(1, left) if body else 0  # the command's first row says what it does
         rest = head[1 : 1 + left - reserved]
@@ -593,52 +751,321 @@ class PromptSlot:
             above.append((Span(next((form for form in forms if cell_width(form) <= width), forms[-1]), theme.muted),))
         else:
             above[-1] = _ends_with_more(above[-1], width, theme)
-        return [*above, *shown]
+        return [*above, *shown], len(kept)
 
-    def _approval_lines(self, width: int, theme: Theme, max_rows: int, queued: Line) -> list[Line]:
-        """The header (wrapped), the command's rows from its first, then the choices (`_fit`).
+    def _approval_lines(self, width: int, theme: Theme, max_rows: int, queued: Line, whole: bool) -> list[Line]:
+        """The header, the risks Hermes did not name, the command by command, then the choices (`_fit`).
 
-        The beginning of a command is what says what it does, so a long one is
-        cut from the end.
+        Every command is listed, its risky ones marked, when that fits; else,
+        when Hermes' description names a risk found, its risky ones in full and
+        one row for the rest (`_command_bodies`). `whole` draws the command as
+        Hermes sent it instead (`whole_lines`). Each fold step's body is drawn
+        spaced, then with its rule alone, then bare, and cut from its end by
+        `_fit`; a cut that leaves out a `▲` row while another command's row
+        shows is not drawn, nor a step that saves no row over the one before
+        unless cut. Of the rest, the one that shows the most `▲` rows, then the
+        most commands that may change something, is drawn. On a tie a layout
+        that fits beats a cut, the less folded and then the better spaced
+        first; of two cuts, the one that shows fewer commands that change
+        nothing wins, so a row more never trades a listed command for a fold.
+
+        When Hermes' description names no risk found, nothing folds: the slot
+        lists every command and, short of rows, cuts from the end, risky rows
+        too, as it did before the fold steps.
         """
         description = str(self.params.get("description") or "dangerous command")
         command = str(self.params.get("command") or "")
-        header = wrap_prefixed(
-            (Span(f"Hermes asks to run {description}", theme.warn), *queued), (Span("⚠ ", theme.warn),), (Span("  "),),
-            width,
+        if self._segments is None or self._segments[0] != command:
+            self._segments = (command, command_risk.segments(command))
+        found = self._segments[1]
+        count: Line = (Span(f" · {len(found)} commands", theme.muted),) if len(found) > 1 else ()
+        head = wrap_prefixed(
+            (Span(f"Hermes asks to run {description}", theme.warn), *count, *queued), (Span("⚠ ", theme.warn),),
+            (Span("  "),), width,
         )
-        labels = [("", self.approval_label(choice)) for choice in self.approval_choices()]
-        choices = self._choice_rows(labels, width, theme, theme.warn)
-        indent: Line = (Span("  ", theme.code),)  # every row of the command under one indent
-        command_rows = wrap_prefixed((Span(command, theme.code),), indent, indent, width) if command else []
-        return self._fit(header, command_rows, choices, max_rows, width, theme)
+        unnamed = command_risk.unnamed_risks(found, description)
+        if unnamed:
+            steps = theme.catch_mark or (theme.brand,)
+            mark = tuple(Span(cell, steps[min(index, len(steps) - 1)]) for index, cell in enumerate(CATCH_MARK))
+            words = (*mark, Span(ALSO_SEES, theme.catch_words if theme.catch_mark else theme.muted),
+                     Span(" · ".join(unnamed), replace(theme.warn, bold=True)))
+            head.extend(wrap_prefixed(words, (Span("  "),), (Span("  "),), width))
+        indent: Line = (Span("  ", theme.code),)
+        if whole:
+            rows = wrap_prefixed((Span(command, theme.code),), indent, indent, width) if command else []
+            bodies = [(rows, [("!", 0)] * len(rows))]
+        else:
+            # Folding hides commands, so only when what Hermes flagged is one of the risky rows that stay.
+            folds = FOLD_STEPS if command_risk.names_a_found_risk(found, description) else 0
+            bodies = self._command_bodies(found, width, theme, folds)
+        rule: Line = (Span("  " + "─" * max(min(width - 4, RULE_CELLS), 1), theme.faint),)
+        blank: Line = ()
+        choices = self._approval_choice_rows(width, theme)
+        listed = [row for choice in choices for row in choice]
+        def scored(kinds: list[tuple[str, int]], kept: int, fits: bool) -> tuple[int, int, bool, int] | None:
+            shown: dict[str, set[int]] = {kind: set() for kind in (RISK_MARK, "…", "!", "", "+")}
+            for kind, index in kinds[:kept]:
+                shown[kind].add(index)
+            if (shown["!"] or shown[""] or shown["+"]) and any(kind in (RISK_MARK, "…") for kind, _ in kinds[kept:]):
+                return None  # a `▲` row would go while another command's row shows
+            return len(shown[RISK_MARK]), len(shown["!"]), fits, 0 if fits else -len(shown[""])
+
+        best: tuple[tuple[int, int, bool, int], list[Line]] | None = None
+        built: list[tuple[list[Line], list[tuple[str, int]]]] = []  # the steps' bodies, built only as far as needed
+        for body, kinds in bodies:
+            built.append((body, kinds))
+            if len(built) == 1:
+                everything = (sum(1 for kind, _ in kinds if kind == RISK_MARK),
+                              len({index for kind, index in kinds if kind == "!"}), True, 0)
+            elif len(body) >= min(len(earlier) for earlier, _ in built[:-1]):
+                continue  # a fold that saves no row hides a command for nothing
+            for framed in ([*head, blank, *body, blank, rule, blank], [*head, *body, rule], [*head, *body]):
+                score = scored(kinds, len(body), True) if len(framed) + len(listed) <= max_rows else None
+                if score is not None and (best is None or score > best[0]):
+                    best = (score, [*framed, *listed])
+            if best is not None and best[0] == everything:
+                return best[1]  # nothing a cut could show more of
+        tried: set[tuple[tuple[str, int], ...]] = set()
+        for body, kinds in built:
+            if tuple(kinds) in tried:
+                continue  # a step that folds nothing more draws the same cut
+            tried.add(tuple(kinds))
+            drawn, kept = self._fitted(head, body, choices, max_rows, width, theme)
+            score = scored(kinds, kept, False)
+            if score is not None and (best is None or score > best[0]):
+                best = (score, drawn)
+        return best[1] if best else self._fit(head, built[-1][0], choices, max_rows, width, theme)
+
+    def _command_bodies(self, found: list[command_risk.Segment], width: int, theme: Theme,
+                        folds: int) -> Iterator[tuple[list[Line], list[tuple[str, int]]]]:
+        """The command's rows at each fold step from 0 to `folds`, built as asked for, each with what every row is
+        and the index of its command: `RISK_MARK` for a risky command's first row and `…` for the rest of it, `!` for
+        a command that may change something, `""` for one that changes nothing (`Segment.foldable`), and `+` for the
+        folded row (-1).
+        Each command in order: a risky one after a `▲` (on one line, wrapped, never cut), any other as written
+        (its own line breaks kept), wrapped; each command is wrapped once. From step 1, other commands give way to one
+        `+ N other commands` row naming their programs: at 1 those that change nothing (`Segment.foldable`); at 2 also
+        a directory change or an assignment (`Segment.sets_state`) other than the last one before each risky command;
+        at 3 every one of those; at 4 every command not risky. With none risky, every command is listed as written."""
+        if not any(segment.risks for segment in found):
+            indent: Line = (Span("  ", theme.code),)
+            rows, kinds = [], []
+            for index, segment in enumerate(found):
+                wrapped_rows = wrap_prefixed((Span(segment.text, theme.code),), indent, indent, width)
+                rows.extend(wrapped_rows)
+                kinds.extend([("!", index)] * len(wrapped_rows))
+            yield rows, kinds
+            return
+        home = os.path.expanduser("~")
+        # A risky command is never cut at the width: on a narrow slot it wraps under its mark.
+        mark: Line = (Span("  "), Span(RISK_MARK, replace(theme.error, bold=True)))
+        under: Line = (Span(" " * (2 + cell_width(RISK_MARK))),)
+        plain: Line = (Span(" " * (2 + cell_width(RISK_MARK)), theme.code),)
+        wrapped = [
+            wrap_prefixed((Span(_home_short(_joined(segment.text), home), replace(theme.warn, bold=True)),), mark,
+                          under, width)
+            if segment.risks else wrap_prefixed((Span(segment.text, theme.code),), plain, plain, width)
+            for segment in found
+        ]
+        aiming: set[int] = set()  # the last directory change or assignment before each risky command
+        last = -1
+        for index, segment in enumerate(found):
+            last = index if segment.sets_state else last
+            if segment.risks and last >= 0:
+                aiming.add(last)
+                last = -1
+        for fold in range(folds + 1):
+            rows = []
+            kinds = []
+            others: list[command_risk.Segment] = []
+            for index, segment in enumerate(found):
+                if not segment.risks and (
+                        (fold >= 1 and segment.foldable) or (fold == 2 and segment.sets_state and index not in aiming)
+                        or (fold >= 3 and segment.sets_state) or fold >= 4):
+                    others.append(segment)
+                else:
+                    rows.extend(wrapped[index])
+                    kind = "" if segment.foldable else "!"
+                    kinds.extend([(RISK_MARK, index), *[("…", index)] * (len(wrapped[index]) - 1)] if segment.risks
+                                 else [(kind, index)] * len(wrapped[index]))
+            if others:
+                lead = Span(OTHER_COMMANDS.format(count=len(others), s="s" if len(others) != 1 else ""), theme.muted)
+                names = truncate("(" + ", ".join(dict.fromkeys(segment.head for segment in others)) + ")",
+                                 max(width - cell_width(lead.text) - cell_width(OTHER_HINT), 0))
+                rows.append(truncate_line((lead, Span(names, theme.faint), Span(OTHER_HINT, theme.hint)), width))
+                kinds.append(("+", -1))
+            yield rows, kinds
+
+    def _approval_choice_rows(self, width: int, theme: Theme) -> list[list[Line]]:
+        """Each choice as its rows: its icon and label in its tone (`APPROVAL_TONES`), wrapped under the icon; the
+        highlighted one marked `❯`, bold, on its tone's band to the right edge."""
+        rows: list[list[Line]] = []
+        for index, choice in enumerate(self.approval_choices()):
+            icon, tone = APPROVAL_TONES[choice]
+            current = index == self.selected
+            style = getattr(theme, f"pick_{tone}") if current else getattr(theme, tone)
+            first: Line = (Span(CHOICE_MARK if current else " " * len(CHOICE_MARK), style), Span(f"{icon} ", style))
+            rest: Line = (Span(" " * (len(CHOICE_MARK) + 2), style),)
+            wrapped = wrap_prefixed((Span(self.approval_label(choice), style),), first, rest, width)
+            rows.append([(*row, fill(style)) for row in wrapped] if current and style.bg is not None else wrapped)
+        return rows
 
     def _clarify_lines(self, width: int, theme: Theme, max_rows: int, queued: Line) -> list[Line]:
-        """The question (its counter when there are several), then its choices and the text field's row.
-
-        A question with no choices says how to answer under it instead.
-        """
+        """A clarify question with no choices: the question, and how to answer it under it (one with choices is
+        `_framed_lines`)."""
         question = self._current_question()
         if question is None:
             return []
         total = len(self._questions())
         counter = f" ({self.question_index + 1}/{total})" if total > 1 else ""
+        lead_rows = [row for part in self._with_silent_lead("").splitlines() if part.strip()
+                     for row in wrap_line((Span(part.strip(), theme.muted),), width)]
+        if len(lead_rows) > LEAD_ROWS:
+            lead_rows = [*lead_rows[: LEAD_ROWS - 1], _ends_with_more(lead_rows[LEAD_ROWS - 1], width, theme)]
+        head: list[Line] = [*lead_rows, *wrap_line(
+            (Span("? ", theme.user), Span(str(question.get("question", "")) + counter, theme.text), *queued), width)]
+        return _keep_ends([*head, (Span("  type an answer and press enter · esc cancels", theme.hint),)], max_rows,
+                          width, theme)
+
+    def _with_silent_lead(self, lead: str) -> str:
+        """`lead` (the context Hermes wrote before the asked sentence) after the reasoning the model wrote in place of
+        a reply (`silent_lead`), on the first question only: the later ones follow from the first."""
+        if not self.silent_lead.strip() or self.question_index != 0:
+            return lead
+        return f"{self.silent_lead.strip()}\n{lead}" if lead.strip() else self.silent_lead.strip()
+
+    def _framed_lines(
+        self, width: int, theme: Theme, max_rows: int, queued: Line, whole: bool, waited: str,
+    ) -> list[Line]:
+        """A clarify question with choices, as Claude Code draws AskUserQuestion: a rule across the width, the
+        question, its choices, a rule, and a row saying the keys.
+
+        The question's asked sentence is bold, and the context Hermes wrote
+        before it dim above it, at most `LEAD_ROWS` rows unless `whole`
+        (`question_parts`); a choice's description is dim under its label
+        (`_choice_parts`). The picker's own words (the keys, `Type
+        something.`, Hermes' `(Recommended)`) are English whatever language
+        the question is in. When rows run short the
+        blank row goes first, then the two rules; the key row stays while two
+        rows of the question are left, the context gives way before the asked
+        sentence, and `_fit` cuts the rest as it cuts any question.
+        """
+        question = self._current_question() or {}
+        text = str(question.get("question", ""))
+        inner = max(width - len(SLOT_BAR), 1)
+        total = len(self._questions())
+        counter = f" ({self.question_index + 1}/{total})" if total > 1 else ""
         note: Line = (Span(MULTI_NOTE, theme.muted),) if self._multi() else ()
-        head: list[Line] = list(
-            wrap_line(
-                (Span("? ", theme.user), Span(str(question.get("question", "")) + counter, theme.text), *note, *queued),
-                width,
-            )
-        )
+        lead, asked = question_parts(text)
+        lead = self._with_silent_lead(lead)
+        lead_rows = [row for part in lead.splitlines() if part.strip()
+                     for row in wrap_line((Span(part.strip(), theme.muted),), inner)]
+        if not whole and len(lead_rows) > LEAD_ROWS:
+            lead_rows = [*lead_rows[: LEAD_ROWS - 1], _ends_with_more(lead_rows[LEAD_ROWS - 1], inner, theme)]
+        asked_parts = [part.strip() for part in asked.splitlines() if part.strip()] or [""]
+        asked_rows: list[Line] = []
+        for index, part in enumerate(asked_parts):
+            tail: Line = (Span(counter, theme.user), *note, *queued) if index == len(asked_parts) - 1 else ()
+            asked_rows += wrap_line((Span(part, theme.user), *tail), inner)
         choices = self._current_choices()
-        if not choices:
-            return _keep_ends([*head, (Span("  type an answer and press enter · esc cancels", theme.hint),)], max_rows,
-                              width, theme)
-        labels = [(f"{number}. ", choice) for number, choice in enumerate([*choices, CLARIFY_OTHER], start=1)]
+        entries = [_choice_parts(choice) for choice in choices]
+        field_at = len(entries)  # the text field's row, when the question has one
+        typed = self.typing and not whole and self._other_row()
+        if self._other_row():
+            # The field's row shows what was typed in it: with the field open, as it is typed, the caret on it (one
+            # row, scrolled to keep the caret in view: `_field_window`), and while the list has focus too, which
+            # Submit sends.
+            entries.append((_one_line(self.draft) if self.draft.strip() and not self.typing else CLARIFY_OTHER, ""))
+        leads = [f"{number}. " for number in range(1, len(entries) + 1)]
         if self._multi():
             boxes = [TICKED if choice in self.ticked else UNTICKED for choice in choices] + [" " * len(UNTICKED)]
-            labels = [(box + lead, label) for box, (lead, label) in zip(boxes, labels)]
-        return self._fit(head, [], self._choice_rows(labels, width, theme, theme.user), max_rows, width, theme)
+            leads = [box + lead for box, lead in zip(boxes, leads)]
+            leads.append(" " * cell_width(leads[-1]))  # under the labels: the Submit row has no box and no number
+            entries.append((self._submit_label(), ""))
+        choice_rows = self._choice_rows(
+            [(lead, label, description) for lead, (label, description) in zip(leads, entries)], inner, theme, theme.user,
+            control=self._submit_row(),
+        )
+        field_row: Line | None = None
+        caret_col = 0
+        if typed:
+            field_row, caret_col = self._field_row(leads[field_at], inner, theme)
+            choice_rows[field_at] = [field_row]
+        listed = sum(len(choice) for choice in choice_rows)
+        natural = len(lead_rows) + len(asked_rows) + listed
+        # The key row first: the info line says none of them while the question is framed. The rules and the blank
+        # row between the question and its choices only when nothing is cut for them.
+        # Ctrl+O's view (`whole`) is a pager with keys of its own: no key row there, and no rules.
+        room = max_rows
+        footer = not whole and max_rows >= FRAMED_FOOTER_MIN_ROWS
+        room -= footer
+        ruled = not whole and room - 2 >= natural
+        room -= 2 * ruled
+        blank = room - 1 >= natural  # a row of the head below, so `room` keeps it
+        # Rows run short: the context gives way before the asked sentence does, and Ctrl+O still shows it.
+        keep = max(room - len(asked_rows) - listed, 0)
+        if lead_rows and keep < len(lead_rows):
+            lead_rows = [*lead_rows[: keep - 1], _ends_with_more(lead_rows[keep - 1], inner, theme)] if keep else []
+            if not keep:
+                asked_rows[-1] = _ends_with_more(asked_rows[-1], inner, theme)
+        head = [*lead_rows, *asked_rows, *([()] if blank else [])]
+        # The bar, the rules, a choice's mark and the key row frame the question and are no text of it: gutters
+        # (`style.gutter`), which a drag on the main screen never highlights or copies.
+        bar = Span(SLOT_BAR, _framing(theme.muted))
+        rule: Line = (Span(FRAME_RULE * width, _framing(theme.faint)),)
+        fitted = self._fit(head, [], choice_rows, room, inner, theme)
+        body = [_barred(row, bar, width) for row in fitted]
+        rows = [rule, *body, rule] if ruled else body
+        # The caret stands on the field's row, where the person types (the composer takes the keys, undrawn).
+        at = next((index for index, row in enumerate(fitted) if row is field_row), None) if field_row else None
+        self.caret = None if at is None else (at + ruled, len(SLOT_BAR) + caret_col)
+        if footer:
+            kind = "field" if self.typing else "choice" if not self._multi() else "multi" if (
+                self.selected != self._submit_row()) else "send" if self.ticked or self.draft_sent.strip() else "skip"
+            forms = tuple(form.format(send=self._submit_label()) for form in CLARIFY_FOOTERS[kind])
+            said = [f"{form} · {waited}" for form in forms] + list(forms) if waited else list(forms)
+            indent = " " * len(SLOT_BAR)
+            fits = [form for form in said if cell_width(indent + form) <= width]
+            rows.append(truncate_line((Span(indent + (fits[0] if fits else said[-1]), _framing(theme.hint)),), width))
+        return rows
+
+    def _field_row(self, lead: str, width: int, theme: Theme) -> tuple[Line, int]:
+        """The open text field's row on the list, in `Type something.`'s place: the `❯` mark and its number, then what
+        is typed (`draft`, one line), or the dim `Type something.` while it is empty; and the caret's column in it,
+        after the words before the composer's caret (`draft_before`). A field wider than the row shows its part
+        around the caret, cut with `…` at the end or ends that fall outside."""
+        mark = (Span(CHOICE_MARK, _framing(theme.user)), Span(lead, theme.menu_current))
+        start = cell_width(CHOICE_MARK) + cell_width(lead)
+        room = max(width - start - 1, 1)  # a cell after the words for the caret
+        words, before = _one_line_keep(self.draft), _one_line_keep(self.draft_before)
+        if not words:
+            return (*mark, Span(CLARIFY_OTHER, _framing(theme.hint))), start
+
+        def styled(text: str, offset: int = 0) -> tuple[Span, ...]:
+            # Ranges refer to the labelled one-line draft, not to screen cells.
+            spans: list[Span] = []
+            at = 0
+            for left, right in self.draft_marks if not self.masked else ():
+                left, right = max(left - offset, 0), min(right - offset, len(text))
+                if right <= left:
+                    continue
+                spans.extend((Span(text[at:left], theme.text),
+                              Span(text[left:right], replace(theme.text, underline=True))))
+                at = right
+            spans.append(Span(text[at:], theme.text))
+            return tuple(spans)
+        if cell_width(words) <= room:
+            return (*mark, *styled(words)), start + cell_width(before)
+        # Scroll: the caret's words end the row, unless it stands near the start.
+        head = cell_width(before)
+        if head < room:
+            return (*mark, *truncate_line(styled(words), room)), start + head
+        shown = truncate_left(before, room)
+        # Words after the caret that the row cannot show: a dim `…` where they start, under the caret.
+        rest = (Span("…", theme.muted),) if len(before) < len(words) else ()
+        cut = len(before) - len(shown) + 1
+        body = (Span("…", theme.text), *styled(shown[1:], cut)) if shown != before else styled(shown)
+        return (*mark, *body, *rest), start + cell_width(shown)
 
     def _value_lines(self, width: int, theme: Theme, queued: Line) -> list[Line]:
         label = {
@@ -676,9 +1103,119 @@ def _without_recommended(text: object) -> str:
     return stripped
 
 
+def _framing(style: Style) -> Style:
+    """`style` as a gutter: a cell that frames the question, never highlighted or copied by a drag, painted as one run
+    with a neighbour of its look (`style.joins`), as it was before it was a gutter."""
+    return replace(style, gutter=True, joins=True)
+
+
+def _barred(row: Line, bar: Span, width: int) -> Line:
+    """A slot row behind its bar, cut to `width`; a highlighted choice's band (a fill span) runs on to the right edge
+    past the cut."""
+    return (*truncate_line((bar, *truncate_line(row, max(width - len(SLOT_BAR), 1))), width),
+            *(row[-1:] if row and is_fill(row[-1]) else ()))
+
+
+def _choice_parts(choice: str) -> tuple[str, str]:
+    """A clarify choice as `(label, description)`: split at its first `CHOICE_DESCRIPTION` when text stands on both
+    sides, else the whole choice and no description; Hermes' `(Recommended)` at its end goes on the label. Display
+    only."""
+    bare = _without_recommended(choice)
+    label, separator, description = bare.partition(CHOICE_DESCRIPTION)
+    if not (separator and label.strip() and description.strip()):
+        label, description = bare, ""
+    if bare != choice.strip():
+        label = f"{label.strip()} {RECOMMENDED_TAG}"
+    return label.strip(), description.strip()
+
+
+# Where a sentence ends: after `.`, `!` or `?` (or their full-width forms) and the space after it, or a line break.
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?。！？])\s+|\n+")
+
+
+def question_parts(text: str) -> tuple[str, str]:
+    """A clarify question as `(context, asked)`: the asked part from its last sentence ending in `?` (with what
+    follows it), else its last paragraph, else all of it; the context is everything before. Nothing is dropped:
+    the two parts, joined, are the question."""
+    text = text.strip()
+    starts = [0, *(match.end() for match in _SENTENCE_BREAK.finditer(text))]
+    sentences = [(start, text[start:end].strip()) for start, end in zip(starts, [*starts[1:], len(text)])]
+    asking = [start for start, sentence in sentences if sentence.endswith(("?", "？"))]
+    if asking:
+        cut = asking[-1]
+    else:
+        paragraphs = [match.end() for match in re.finditer(r"\n\s*\n", text)]
+        cut = paragraphs[-1] if paragraphs else 0
+    return text[:cut].strip(), text[cut:].strip()
+
+
+def _home_short(text: str, home: str) -> str:
+    """`text` with the home directory `home` written `~` where the shell would read `~` as it: unquoted, starting a
+    word, and a whole path part (`/Users/a` in `/Users/a/x`, not in `/Users/ab` or `"/Users/a"`)."""
+    if len(home) <= 1 or home not in text:
+        return text
+    shown: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote != "'" and char == "\\":
+            shown.append(text[index : index + 2])
+            index += 2
+            continue
+        if quote:
+            quote = "" if char == quote else quote
+        elif char in "'\"":
+            quote = char
+        elif text.startswith(home, index) and (index == 0 or text[index - 1].isspace() or text[index - 1] in ";&|(<>"):
+            after = text[index + len(home) : index + len(home) + 1]
+            if not after or after.isspace() or after in "/\\;&|)<>":
+                shown.append("~")
+                index += len(home)
+                continue
+        shown.append(char)
+        index += 1
+    return "".join(shown)
+
+
+def _joined(text: str) -> str:
+    """`text` on one line: each line break outside quotes, with a `\\` continuation before it and the indentation
+    around it, as one space; a line break inside quotes, and every other space, as written."""
+    shown: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if not quote and (char == "\n" or text.startswith("\\\n", index)):
+            while shown and shown[-1] in (" ", "\t"):
+                shown.pop()
+            index += 1 if char == "\n" else 2
+            while index < len(text) and text[index] in " \t":
+                index += 1
+            shown.append(" ")
+            continue
+        if quote != "'" and char == "\\":
+            shown.append(text[index : index + 2])
+            index += 2
+            continue
+        if quote:
+            quote = "" if char == quote else quote
+        elif char in "'\"":
+            quote = char
+        shown.append(char)
+        index += 1
+    return "".join(shown).strip()
+
+
 def _one_line(value: object) -> str:
     """`value` as one line of text: its whitespace, line breaks included, collapsed to single spaces."""
     return " ".join(str(value or "").split())
+
+
+def _one_line_keep(value: str) -> str:
+    """`value` as one line, each line break a space and nothing else changed: the open text field's words as typed,
+    so the caret's column (the words before it, the same way) stays where it is."""
+    return value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
 
 
 def _ticked_answer(choices: list[str]) -> str:
@@ -714,6 +1251,8 @@ def open_request(request_id: str, method: str, params: dict[str, Any]) -> Prompt
         # An empty slot would wait on a question nobody can see; answer it now, visibly.
         return ImmediateAnswer(slot.decline(), "Hermes sent a clarify request with no question in it; declined.")
     if method == "approval":
-        # Enter on an untouched approval denies: allowing takes the arrows, then Enter.
-        slot.selected = slot.approval_choices().index("deny")
+        # Allow once is highlighted as the slot opens (owner, 2026-11-15), so Enter on an untouched approval allows
+        # this one command; Up then Enter denies. A request that does not offer allow once opens on deny.
+        choices = slot.approval_choices()
+        slot.selected = choices.index(APPROVAL_DEFAULT if APPROVAL_DEFAULT in choices else "deny")
     return slot

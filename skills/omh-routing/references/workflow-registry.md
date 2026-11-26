@@ -22,12 +22,12 @@ These surfaces are generated command references, not installed Hermes workflow s
 
 ## Role Registry
 
-- `guide`: `oh-my-hermes`, `meta-router`, `model-setup`, `parallel-tools`, `websearch-setup`, `morning-brief`, `spend-gate`, `jev-ask`, `jev-route`, `gateway-intent-card`, `voice-operator`, `browser-operator`, `workspace-file-operator`, `command-operator`, `connector-operator`, `live-info-operator`, `external-connector-readiness`, `prompt-import-readiness`, `content-operator`, `media-input-operator`, `data-analysis`
+- `guide`: `oh-my-hermes`, `meta-router`, `model-setup`, `parallel-tools`, `websearch-setup`, `morning-brief`, `spend-gate`, `jev-ask`, `jev-route`, `app-work-intake`, `gateway-intent-card`, `voice-operator`, `browser-operator`, `workspace-file-operator`, `command-operator`, `connector-operator`, `live-info-operator`, `external-connector-readiness`, `prompt-import-readiness`, `content-operator`, `media-input-operator`, `data-analysis`
 - `handoff-guide`: `ultrawork`, `maestro`, `frontend-refactor`, `ai-slop-cleaner`, `executor-runtime-readiness`
 - `memory-keeper`: `rules-distill`, `wiki`, `memory-new`, `memory-sync`, `decision-recall`
-- `operator`: `strategy-brief`, `meeting-brief`, `feedback-triage`, `finance-analysis`, `people-ops`, `support-operations`, `sales-development`, `ops-review`, `operating-rhythm`, `report-package`, `materials-package`, `img-summary`, `apple-design`, `design-orchestration`, `design-quality-gate`, `award-bar-score`, `frontend`, `visual-qa`, `workspace-audit`, `agent-evaluation`, `automation-blueprint`, `reliability-review`, `idea-to-deploy`, `llm-app-dev`, `cto-loop`, `deploy-and-monitor`, `inference-serving`, `github-issue-intake`, `live-incident-response`, `lifecycle-growth`, `sales-pipeline-review`, `show-reel`, `geospatial-analysis`, `biomedical-evidence`, `molecular-docking`, `ai-job-search`, `github-event-ops`, `deliverable-package`, `physical-device-readiness`, `agent-debug`, `skill-scout`, `skill-health`, `provider-profile-posture`
-- `planner`: `loop`, `context`, `deep-interview`, `curriculum-design`, `product-brief`, `backend`, `rust`, `codebase-onboarding`, `codegraph-refresh`, `codebase-uml`, `plan`, `ralplan`, `adversarial-consensus`, `refactor-plan`, `relational-db`, `agent-instructions`, `iac-change`, `data-pipelines`, `model-finetuning`, `mobile-release`, `release-cut`, `decision-prototype`, `product-discovery-validation`
-- `researcher`: `jit-learn`, `research`, `web-research`, `product-docs`, `source-finder`, `research-brief`, `research-department`, `paper-learning`, `long-document-reading`, `market-research`
+- `operator`: `strategy-brief`, `meeting-brief`, `feedback-triage`, `finance-analysis`, `people-ops`, `support-operations`, `sales-development`, `ops-review`, `operating-rhythm`, `report-package`, `materials-package`, `img-summary`, `apple-design`, `design-orchestration`, `design-quality-gate`, `award-bar-score`, `frontend`, `visual-qa`, `workspace-audit`, `agent-evaluation`, `automation-blueprint`, `reliability-review`, `idea-to-deploy`, `llm-app-dev`, `cto-loop`, `deploy-and-monitor`, `inference-serving`, `github-issue-intake`, `live-incident-response`, `lifecycle-growth`, `sales-pipeline-review`, `show-reel`, `skill-eval`, `bot-template`, `geospatial-analysis`, `sprite-forge`, `biomedical-evidence`, `molecular-docking`, `ai-job-search`, `github-event-ops`, `deliverable-package`, `physical-device-readiness`, `agent-debug`, `skill-scout`, `skill-health`, `provider-profile-posture`
+- `planner`: `loop`, `context`, `deep-interview`, `curriculum-design`, `product-brief`, `backend`, `rust`, `codebase-onboarding`, `codegraph-refresh`, `codebase-uml`, `plan`, `ralplan`, `adversarial-consensus`, `refactor-plan`, `relational-db`, `agent-instructions`, `iac-change`, `data-pipelines`, `model-finetuning`, `mobile-release`, `release-cut`, `decision-prototype`, `product-discovery-validation`, `model-compression`
+- `researcher`: `jit-learn`, `research`, `web-research`, `product-docs`, `source-finder`, `research-brief`, `research-department`, `paper-learning`, `long-document-reading`, `market-research`, `repro-audit`, `systematic-review`
 - `reviewer`: `legal-compliance-review`, `localization-review`, `native-debugging`, `accessibility-audit`, `build-failure-triage`, `production-audit`, `verification-gate`, `security-safety-review`, `ultraqa`, `code-review`, `tech-debt-audit`, `ask`, `application-threat-model`, `app-debugging`, `commit-pr-authoring`, `git-workflow`, `security-event-response`, `internal-audit`, `data-share-review`, `jev-failure-triage`, `jev-review-gate`, `jev-action-check`, `jev-done-check`, `failure-signal-audit`
 - `tracker`: `context-budget-review`, `model-optimization`, `ultraperf`, `cancel`, `skill`, `doctor`, `capability-toggle`, `running-work-board`, `todo-checklist`, `buzz`, `dag-ulw`, `agent-board`, `toolbelt-readiness`, `harness-session-inventory`, `ops-observability-card`, `achievements`, `agent-ops-review`, `instinct-ledger`, `workflow-learning`, `run-efficiency`
 - Installed workflow skill policies live in generated workflow skills; compatibility/reference-only surface policies live in `docs/WORKFLOWS.md` and are not guaranteed to have `skills/<name>/SKILL.md` files.
@@ -61,7 +61,7 @@ When Hermes exposes installed skill descriptions to the model, use this registry
 - `localization-review`: `localization review`, `translation QA`, `locale glossary`, `현지화 검토`, `번역 QA`, `용어집`
 - `sales-development`: `sales discovery`, `account plan`, `outbound messaging`, `영업 발굴`, `고객사 계획`, `아웃바운드 메시지`
 - `product-brief`: `product requirements document`, `PRD`, `roadmap prioritization`, `제품 요구사항 문서`, `제품 기획서`, `로드맵 우선순위`
-- `ops-review`: `ops-review`, `ops review`, `weekly ops review`, `status review`, `operating review`, `release risks`, `risks and blockers`, `priorities`, `weekly status`
+- `ops-review`: `ops-review`, `ops review`, `weekly ops review`, `status review`, `operating review`, `release risks`, `risks and blockers`, `weekly status`, `운영 리뷰`
 - `operating-rhythm`: `operating-rhythm`, `operating rhythm`, `meeting minutes`, `meeting history`, `scrum record`, `sprint planning`, `sprint review`, `sprint retrospective`, `retro history`
 - `report-package`: `report-package`, `report package`, `weekly report`, `monthly report`, `executive report`, `exec brief`, `leadership deck`, `status package`, `ppt outline`
 - `materials-package`: `materials-package`, `material package`, `materials package`, `document package`, `deck file`, `binary export`, `file export`, `render qa`, `layout qa`
@@ -80,7 +80,7 @@ When Hermes exposes installed skill descriptions to the model, use this registry
 - `build-failure-triage`: `build-failure-triage`, `build failure triage`, `build failure`, `build-failure`, `build fix`, `build failed`, `build failing`, `compile error`, `compilation error`
 - `workspace-audit`: `workspace-audit`, `workspace audit`, `repo surface audit`, `repository surface audit`, `workspace surface audit`, `repo inventory`, `surface inventory`, `skill inventory`, `prompt inventory`
 - `production-audit`: `production-audit`, `production audit`, `production readiness`, `prod audit`, `prod readiness`, `ready for production`, `ready to ship`, `ship readiness`, `release readiness`
-- `verification-gate`: `verification-gate`, `verification gate`, `quality gate`, `release gate`, `test gate`, `build lint test`, `lint typecheck tests`, `verify before merge`, `merge readiness gate`
+- `verification-gate`: `verification-gate`, `verification gate`, `quality gate`, `run the release gate`, `release gate check`, `test gate`, `build lint test`, `lint typecheck tests`, `verify before merge`
 - `agent-evaluation`: `agent-evaluation`, `agent evaluation`, `agent eval`, `agent benchmark`, `executor evaluation`, `executor benchmark`, `compare agents`, `compare codex claude`, `agent tournament`
 - `rules-distill`: `rules-distill`, `rules distill`, `distill rules`, `rule distillation`, `principle distill`, `skill principles`, `extract agent rules`, `turn traces into rules`, `policy distill`
 - `codebase-onboarding`: `codebase-onboarding`, `codebase onboarding`, `repo onboarding`, `repository onboarding`, `codebase tour`, `code tour`, `new repo orientation`, `understand this repo`, `how this repo works`
@@ -98,23 +98,23 @@ When Hermes exposes installed skill descriptions to the model, use this registry
 - `plan`: `plan`, `$plan`, `implementation plan`, `make a plan`, `write a plan`, `write the plan`, `task breakdown`, `safe feature`, `safely add a feature`
 - `ralplan`: `ralplan`, `$ralplan`, `consensus plan`, `reviewed plan`, `issue to PR`, `acceptance criteria`, `verification command`, `reviewable PR`, `risky planning`
 - `adversarial-consensus`: `adversarial-consensus`, `$adversarial-consensus`, `adversarial planning`, `adversarial plan review`, `red team this plan`, `red-team this plan`, `red team the proposal`, `multi-perspective review`, `multiple perspectives`
-- `code-review`: `code-review`, `$code-review`, `review`, `audit`, `find bugs`, `release gate`, `claim audit`, `evidence audit`, `README claim`
-- `ai-slop-cleaner`: `ai-slop-cleaner`, `$ai-slop-cleaner`, `cleanup`, `deslop`, `refactor`, `risky`, `behavior-preserving refactor`, `risk analysis`, `refactor workflow`
+- `code-review`: `code-review`, `$code-review`, `review`, `audit`, `find bugs`, `claim audit`, `evidence audit`, `README claim`, `what actually happened`
+- `ai-slop-cleaner`: `ai-slop-cleaner`, `$ai-slop-cleaner`, `cleanup`, `deslop`, `refactor`, `risky`, `behavior-preserving refactor`, `refactor workflow`, `legacy refactor`
 - `refactor-plan`: `refactor-plan`, `refactor plan`, `plan this refactor`, `plan the refactor`, `refactor planning`, `refactor phases`, `phased refactor`, `refactor in phases`, `refactor rollback plan`
 - `tech-debt-audit`: `tech-debt-audit`, `tech debt`, `tech debt audit`, `technical debt`, `technical debt audit`, `tech debt ledger`, `debt ledger`, `audit our tech debt`, `tech debt report`
 - `inference-serving`: `inference-serving`, `inference serving`, `serve this model`, `serve the model`, `model serving`, `serving endpoint`, `vllm`, `llama.cpp`, `llama cpp`
-- `model-optimization`: `model-optimization`, `model optimization`, `optimize for model`, `onboard new model`, `calibrate new model`, `new model calibration`, `model calibration`
+- `model-optimization`: `model-optimization`, `onboard new model`, `calibrate new model`, `new model calibration`, `model calibration`
 - `ultraperf`: `ultraperf`, `$ultraperf`, `ulw-perf`, `performance audit`, `performance bottleneck`, `find the bottleneck`, `profile the hot path`, `memory leak investigation`, `token cost hotspot`
-- `wiki`: `wiki`, `project wiki`, `build a wiki`, `start a wiki`, `organize my notes`, `external knowledge store`, `knowledge base`, `Obsidian`, `markdown vault`
+- `wiki`: `wiki`, `project wiki`, `write a handover guide`, `build a wiki`, `start a wiki`, `organize my notes`, `external knowledge store`, `knowledge base`, `Obsidian`
 - `ask`: `ask`, `$ask`, `external advisor`, `ask claude`, `ask gemini`, `consult claude`, `consult gemini`, `opinion from claude`, `opinion from gemini`
 - `cancel`: `cancel`, `$cancel`, `stop the workflow`, `abort the run`, `cancel the loop`
 - `skill`: `skill`, `$skill`, `skills`, `manage skills`
 - `doctor`: `doctor`, `$doctor`, `diagnose omh`, `installation health`
 - `capability-toggle`: `capability-toggle`, `capability policy`, `disable memory`, `enable memory`, `disable coding orchestration`, `disable a capability family`, `enable a capability family`, `메모리 기능 꺼줘`, `메모리 기능 끄기`
-- `running-work-board`: `running-work-board`, `running work board`, `which units are running`, `what models are running`, `지금 뭐 돌고 있어`, `뭐가 돌고 있어`, `어떤 모델로 돌고 있어`, `실행 중인 작업 보여줘`
+- `running-work-board`: `running-work-board`, `running work board`, `which units are running`, `what models are running`, `지금 뭐 돌고 있어`, `뭐가 돌고 있어`, `어떤 모델로 돌고 있어`, `실행 중인 작업 보여줘`, `что делают агенты`
 - `todo-checklist`: `todo-checklist`, `$todo`, `plan checklist`, `todo checklist`, `phase checklist`, `declare a plan checklist`, `declare the plan todo`, `show the plan todo`, `clear the plan todo`
 - `model-setup`: `model-setup`, `hermes model setup`, `set up my models`, `set up my model`, `configure my models`, `configure model provider`, `connect my model provider`, `set up model role slots`, `switch my session model`
-- `parallel-tools`: `parallel-tools`, `parallel tools`, `hermes parallel tools setup`, `update hermes for parallel tools`, `check parallel tool support`, `enable parallel tool calls`, `verify parallel tools capability`, `check hermes version for parallel tools`, `헤르메스 업데이트 확인해줘`
+- `parallel-tools`: `parallel-tools`, `parallel tools`, `hermes parallel tools setup`, `update hermes for parallel tools`, `check parallel tool support`, `enable parallel tool calls`, `verify parallel tools capability`, `check hermes version for parallel tools`, `병렬 도구 설정`
 - `websearch-setup`: `websearch-setup`, `web search setup`, `make web search cheaper`, `set up web search`, `configure web search`, `reduce web search cost`, `connect scraper api key`, `web search backend`, `hermes web search`
 - `morning-brief`: `morning-brief`, `morning brief`, `connect my email for a morning brief`, `set up morning brief`, `configure morning brief`, `connect mail for morning brief`, `connect calendar for morning brief`, `set up my morning brief`, `모닝 브리핑 설정해줘`
 - `buzz`: `connect Hermes to Buzz`, `Buzz community agent`, `Buzz gateway setup`, `Buzz media attachment`, `Buzz relay self-hosting`, `Buzz connection diagnostics`, `버즈 커뮤니티 연결`, `Buzz 메시지 첨부`
@@ -126,7 +126,7 @@ When Hermes exposes installed skill descriptions to the model, use this registry
 - `commit-pr-authoring`: `commit-pr-authoring`, `commit message`, `commit messages`, `write the commit message`, `draft the commit message`, `commit body`, `squash message`, `pr body`, `pr description`
 - `git-workflow`: `git-workflow`, `git workflow`, `merge conflict`, `merge conflicts`, `rebase conflict`, `resolve the conflict`, `resolve this conflict`, `conflict markers`, `git bisect`
 - `relational-db`: `relational-db`, `relational database`, `online migration`, `migration for a large table`, `lock-safe ddl`, `alter table`, `took a lock`, `table lock`, `lock during deploy`
-- `security-event-response`: `security-event-response`, `security event response`, `cve`, `triage this cve`, `cve in our dependency`, `cve in a dependency`, `security advisory`, `dependabot alert`, `dependabot security`
+- `security-event-response`: `security-event-response`, `security event response`, `exfiltrating customer data`, `suspected unauthorized access`, `account takeover`, `cve`, `triage this cve`, `cve in our dependency`, `cve in a dependency`
 - `agent-instructions`: `agent-instructions`, `agents.md`, `claude.md`, `gemini.md`, `copilot-instructions.md`, `.cursorrules`, `cursor rules`, `cursor rule`, `agent instruction file`
 - `iac-change`: `iac-change`, `iac change`, `infrastructure as code`, `infrastructure-as-code`, `terraform plan`, `terraform apply`, `terraform state`, `terraform drift`, `terraform module`
 - `data-pipelines`: `data-pipelines`, `data pipeline`, `data pipelines`, `etl`, `elt`, `etl pipeline`, `etl job`, `etl backfill`, `airflow dag`
@@ -136,14 +136,20 @@ When Hermes exposes installed skill descriptions to the model, use this registry
 - `data-share-review`: `data-share-review`, `data share review`, `pii redaction`, `redact pii`, `pseudonymize`, `de-identify`, `anonymize the dataset`, `residual pii`, `redact the pii`
 - `release-cut`: `release-cut`, `release cut`, `cut a release`, `cut the release`, `cut a new release`, `tag a release`, `tag the release`, `release candidate`, `what goes in the release`
 - `spend-gate`: `spend-gate`, `spend gate`, `pre-spend`, `pre-spend card`, `spend cap`, `spending cap`, `spend limit`, `spending limit`, `spend request`
-- `dag-ulw`: `dag-ulw`, `$dag-ulw`, `dag ulw`, `ulw dag`, `dag ultrawork`, `ultrawork dag`
+- `dag-ulw`: `dag-ulw`, `$dag-ulw`, `dag ulw`, `ulw dag`, `dag ultrawork`, `ultrawork dag`, `даг ультраворк`, `граф задач`, `задачи графом`
 - `decision-prototype`: `decision-prototype`, `$decision-prototype`, `decision prototype`, `prototype this uncertain choice before planning`, `prototype before planning`, `prototype the uncertain choice`, `run a small spike`, `small spike`, `spike solution`
 - `lifecycle-growth`: `lifecycle-growth`, `lifecycle growth`, `lifecycle marketing`, `lifecycle messaging`, `in-app journey`, `in-app message campaign`, `onboarding journey`, `onboarding nudge`, `activation campaign`
 - `market-research`: `market-research`, `market sizing`, `tam sam som`, `bottom up market sizing`, `market size sensitivity`, `customer evidence analysis`, `jtbd evidence matrix`, `competitor pricing profiles`, `competitive pricing analysis`
 - `product-discovery-validation`: `product-discovery-validation`, `product discovery validation`, `product discovery`, `customer discovery`, `customer discovery plan`, `zero to one validation`, `validate the problem before building`, `problem solution interview`, `customer interview guide`
 - `sales-pipeline-review`: `sales-pipeline-review`, `sales pipeline review`, `pipeline review`, `pipeline health`, `pipeline coverage`, `deal review`, `deal health`, `sales forecast review`, `forecast call`
 - `show-reel`: `show-reel`, `show reel`, `showreel`, `product showcase video`, `animated product film`, `motion showcase`, `animated portfolio`, `launch film`, `product teaser video`
+- `repro-audit`: `repro-audit`, `hellaswag log`, `hellaswag results`, `hellaswag score`
+- `systematic-review`: `systematic-review`, `systematic review`, `systematic literature review`, `scoping review`, `rapid review`, `prisma screening`, `title and abstract screening`, `inclusion and exclusion criteria screening`, `dual reviewer screening`
+- `model-compression`: `model-compression`, `model compression`, `compress this model`, `compress the model`, `compress a model`, `compress our model`, `compress my model`, `quantize this model`, `quantize the model`
+- `skill-eval`: `skill-eval`, `skill eval`, `evaluate my skill`, `is my skill any good`, `skill harness check`, `will my skill load`, `skill compatibility`, `스킬 평가`, `스킬 점검`
+- `bot-template`: `bot-template`, `bot template`, `bot templates`, `apply the bot template`, `apply a bot template`, `봇 템플릿`
 - `geospatial-analysis`: `geospatial-analysis`, `geospatial overlay`, `spatial intersection`, `intersect geojson layers`, `compute overlap area`
+- `sprite-forge`: `sprite-forge`, `sprite sheet`, `pixel sprite`, `pixel art character`, `game sprite frames`, `2d sprite animation`, `도트 캐릭터`, `스프라이트 시트`, `도트 스프라이트`
 - `biomedical-evidence`: `biomedical-evidence`, `biomedical evidence reconciliation`, `ClinVar cross-check`, `variant evidence matrix`, `BioMCP capture reconciliation`
 - `molecular-docking`: `molecular-docking`, `rigid-receptor docking`, `PDBQT docking`, `ligand docking poses`, `AutoDock Vina`
 - `ai-job-search`: `ai-job-search`, `job search`, `evaluate this job posting`, `tailor my resume`, `tailor my cv`, `prepare for my job interview`, `track my job applications`, `draft my cover letter`, `job application answers`
@@ -154,6 +160,7 @@ When Hermes exposes installed skill descriptions to the model, use this registry
 - `jev-action-check`: `jev-action-check`, `jev action check`, `ask jev if this command is safe`, `jev risk check`
 - `jev-done-check`: `jev-done-check`, `jev done check`, `ask jev if this is done`, `jev evidence check`
 - `github-event-ops`: `github-event-ops`, `github event ops`, `github ops`, `github triage`, `github pr`, `github review`, `github action`, `github actions`, `pr opened`
+- `app-work-intake`: `app-work-intake`, `app work intake`, `spec to pr`, `spec to a pr`, `notion spec`, `confluence spec`, `linear issue to pr`, `linear issue into a pr`, `jira issue to pr`
 - `agent-board`: `agent-board`, `agent board`, `kanban`, `multi-agent`, `multi agent`, `multi agent board`, `multiple hermes agents`, `multiple hermes profiles`, `hermes profiles`
 - `memory-new`: `memory-new`, `new memory`, `project memory`, `product memory`, `remember this project`, `remember this product`, `do not save`, `do not save this token`, `memory capture`
 - `memory-sync`: `memory-sync`, `memory curation`, `memory review`, `memory inspect`, `memory check`, `memory update`, `context cleanup`, `curate memory`, `stale memory`
@@ -170,13 +177,13 @@ When Hermes exposes installed skill descriptions to the model, use this registry
 - `prompt-import-readiness`: `prompt-import-readiness`, `prompt import readiness`, `slash prompt import`, `slash prompts import`, `slash command prompt import`, `prompt library import`, `prompt folder import`, `prompt directory import`, `import CLI prompts`
 - `physical-device-readiness`: `physical-device-readiness`, `physical device readiness`, `device safety readiness`, `physical device safety`, `hardware safety gate`, `3d printer readiness`, `3D printer safety`, `snapmaker printer safety`, `snapmaker readiness`
 - `content-operator`: `content-operator`, `content operator`, `content workflow`, `writing workflow`, `publish-ready writing`, `publish ready writing`, `release notes`, `release note draft`, `newsletter draft`
-- `media-input-operator`: `media-input-operator`, `media input operator`, `media input`, `audio transcription`, `audio transcript`, `transcribe audio`, `transcribe this audio`, `meeting recording`, `recording transcript`
+- `media-input-operator`: `media-input-operator`, `media input operator`, `media input`, `audio transcription`, `audio transcript`, `transcribe audio`, `transcribe this audio`, `meeting recording`, `demo recording`
 - `data-analysis`: `data-analysis`, `data analysis`, `dataset analysis`, `csv analysis`, `json analysis`, `log analysis`, `table analysis`, `analyze csv`, `analyze this csv`
 - `toolbelt-readiness`: `toolbelt-readiness`, `mcp readiness`, `tool readiness`, `plugin readiness`, `connector readiness`, `needed mcp`, `api credential`, `missing cli`, `missing plugin`
 - `harness-session-inventory`: `harness-session-inventory`, `harness session inventory`, `session inventory`, `session adapter`, `session adapters`, `harness sessions`, `mcp inventory`, `mcp config inventory`, `mcp drift`
 - `ops-observability-card`: `ops-observability-card`, `observability card`, `operations command board`, `ops command board`, `service quality board`, `service quality`, `external metric provider`, `metric provider`, `prometheus metrics`
 - `achievements`: `achievements`, `achievement`, `badges`, `badge`, `my badges`, `show achievements`, `achievement summary`, `unlocked badges`, `badge progress`
-- `agent-ops-review`: `agent-ops-review`, `agent ops review`, `agent productivity`, `operator productivity`, `manager view`, `quality dashboard`, `throughput review`, `agent work quality`, `coding progress quality`
+- `agent-ops-review`: `agent-ops-review`, `agent ops review`, `tracing audit`, `telemetry audit`, `instrumentation audit`, `agent productivity`, `operator productivity`, `manager view`, `quality dashboard`
 - `agent-debug`: `agent-debug`, `agent debug`, `agent debugging`, `agent introspection`, `agent self-debug`, `self-debug`, `self debugging`, `looping agent`, `agent loop failure`
 - `failure-signal-audit`: `failure-signal-audit`, `failure signal audit`, `silent failure`, `silent failures`, `silent failure hunter`, `swallowed error`, `swallowed errors`, `empty catch`, `ignored exception`
 - `instinct-ledger`: `instinct-ledger`, `instinct ledger`, `project instincts`, `project-scoped instincts`, `project scoped instincts`, `global instincts`, `instinct review`, `instinct candidate`, `instinct candidates`

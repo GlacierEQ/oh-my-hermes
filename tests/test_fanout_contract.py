@@ -37,7 +37,8 @@ from omh.coding.fanout_contracts import (  # noqa: E402
     FANOUT_SPAWN_PLAN_THRESHOLD,
     FanoutContractError,
     MAX_SPAWN_PLAN_FIELD_CHARS,
-    MAX_UNIT_VERIFICATION_COMMAND_CHARS,
+    MAX_UNIT_REVIEW_FOCUS_BYTES,
+    MAX_UNIT_VERIFICATION_COMMAND_BYTES,
     MAX_UNIT_VERIFICATION_COMMANDS,
     verification_command_argv,
 )
@@ -1613,6 +1614,23 @@ class FanoutVerificationCommandTests(unittest.TestCase):
         units[0]["verification_commands"] = commands
         return units
 
+    def test_a_lone_surrogate_in_a_byte_bounded_field_is_a_contract_error(self) -> None:
+        # #3210 carry: a JSON unit file may spell "\ud800"; json.loads accepts it, but it has no UTF-8 form.
+        # Measuring a byte bound on it raised a bare UnicodeEncodeError (a traceback from `fanout prepare`).
+        lone = json.loads('"echo \\ud800"')
+        repro = {"unit_id": "repro", "title": "Reproduce", "file_scope": ["src/core/"], "kind": "reproduction"}
+        cases = {
+            "verification_commands": self._with_commands([lone]),
+            "verification_checks": [{**_UNITS[0], "verification_checks": [{"command": lone}]}, *_UNITS[1:]],
+            "reproduction_command": [{**repro, "reproduction_command": lone}],
+            "task_linked_test_runner": [{**_UNITS[0], "task_linked_test_runner": lone}, *_UNITS[1:]],
+            "review_focus": [{**_UNITS[0], "review_focus": lone}, *_UNITS[1:]],
+        }
+        for field, units in cases.items():
+            with self.subTest(field=field), self.assertRaises(FanoutContractError) as raised:
+                build_fanout_contract("split work", units)
+            self.assertIn("valid UTF-8", str(raised.exception))
+
     def test_absent_field_leaves_the_contract_byte_identical(self) -> None:
         without = build_fanout_contract("split work", _UNITS)
         declared_empty = build_fanout_contract("split work", self._with_commands([]))
@@ -1661,10 +1679,29 @@ class FanoutVerificationCommandTests(unittest.TestCase):
             build_fanout_contract("split work", self._with_commands(too_many))
         self.assertIn(f"at most {MAX_UNIT_VERIFICATION_COMMANDS} commands", str(raised.exception))
 
-        too_long = ["python -c " + "a" * MAX_UNIT_VERIFICATION_COMMAND_CHARS]
+        too_long = ["python -c " + "a" * MAX_UNIT_VERIFICATION_COMMAND_BYTES]
         with self.assertRaises(FanoutContractError) as raised:
             build_fanout_contract("split work", self._with_commands(too_long))
-        self.assertIn(f"at most {MAX_UNIT_VERIFICATION_COMMAND_CHARS} chars", str(raised.exception))
+        self.assertIn(f"at most {MAX_UNIT_VERIFICATION_COMMAND_BYTES} UTF-8 bytes", str(raised.exception))
+
+        max_emoji = "echo " + "😀" * ((MAX_UNIT_VERIFICATION_COMMAND_BYTES - 5) // 4)
+        over_emoji = max_emoji + "😀"
+        build_fanout_contract("split work", self._with_commands([max_emoji]))
+        with self.assertRaises(FanoutContractError) as raised:
+            build_fanout_contract("split work", self._with_commands([over_emoji]))
+        self.assertIn(f"at most {MAX_UNIT_VERIFICATION_COMMAND_BYTES} UTF-8 bytes", str(raised.exception))
+
+        repro_unit = {
+            "unit_id": "repro",
+            "title": "Reproduce bug",
+            "file_scope": ["src/core/"],
+            "kind": "reproduction",
+            "reproduction_command": max_emoji,
+        }
+        build_fanout_contract("split work", [repro_unit])
+        with self.assertRaises(FanoutContractError) as raised:
+            build_fanout_contract("split work", [{**repro_unit, "reproduction_command": over_emoji}])
+        self.assertIn(f"at most {MAX_UNIT_VERIFICATION_COMMAND_BYTES} UTF-8 bytes", str(raised.exception))
 
         at_cap = [f"python -c 'print({index})'" for index in range(MAX_UNIT_VERIFICATION_COMMANDS)]
         contract = build_fanout_contract("split work", self._with_commands(at_cap))
@@ -1688,8 +1725,13 @@ class FanoutVerificationCommandTests(unittest.TestCase):
         self.assertEqual(argv, ["python", "-c", "print(1)"])
 
         # No shell runs these, so a pipe is an argument rather than an operator.
+        # The parser itself still splits it that way (handoff_contract
+        # postconditions compile through it); the fanout freeze refuses it.
         _env, argv = verification_command_argv("python -c 'print(1)' | tee log")
         self.assertEqual(argv, ["python", "-c", "print(1)", "|", "tee", "log"])
+        with self.assertRaises(FanoutContractError) as raised:
+            build_fanout_contract("split work", self._with_commands(["python -c 'print(1)' | tee log"]))
+        self.assertIn("'|'", str(raised.exception))
 
 
 class FanoutVerificationChecksContractTests(unittest.TestCase):
@@ -1810,7 +1852,8 @@ class FanoutVerificationChecksContractTests(unittest.TestCase):
     def test_check_commands_follow_the_same_bounds_as_bare_commands(self) -> None:
         for bad in (
             [{"command": ""}],
-            [{"command": "python -c " + "a" * MAX_UNIT_VERIFICATION_COMMAND_CHARS}],
+            [{"command": "python -c " + "a" * MAX_UNIT_VERIFICATION_COMMAND_BYTES}],
+            [{"command": "echo " + "😀" * ((MAX_UNIT_VERIFICATION_COMMAND_BYTES - 5) // 4 + 1)}],
             [{"command": "python -c 'unbalanced"}],
             [{"command": f"python -c 'print({index})'"} for index in range(MAX_UNIT_VERIFICATION_COMMANDS + 1)],
             ["python -m unittest"],
@@ -1818,6 +1861,33 @@ class FanoutVerificationChecksContractTests(unittest.TestCase):
             with self.subTest(checks=bad):
                 with self.assertRaises(FanoutContractError):
                     build_fanout_contract("split work", self._with_checks(bad))
+
+
+class FanoutReviewFocusTests(unittest.TestCase):
+    def _with_focus(self, focus: object) -> list[dict[str, object]]:
+        units = [dict(unit) for unit in _UNITS]
+        units[0]["review_focus"] = focus
+        return units
+
+    def test_absent_or_empty_focus_leaves_the_contract_byte_identical(self) -> None:
+        without = build_fanout_contract("split work", _UNITS)
+        self.assertEqual(without, build_fanout_contract("split work", self._with_focus("")))
+        for unit in without["units"]:
+            self.assertNotIn("review_focus", unit)
+
+    def test_declared_focus_is_normalized_onto_the_owning_unit_only(self) -> None:
+        contract = build_fanout_contract("split work", self._with_focus("  login  keeps\n its redirect "))
+        units = {unit["unit_id"]: unit for unit in contract["units"]}
+        self.assertEqual(units["core"]["review_focus"], "login keeps its redirect")
+        self.assertNotIn("review_focus", units["tests"])
+
+    def test_focus_over_the_ceiling_or_not_a_string_is_refused(self) -> None:
+        build_fanout_contract("split work", self._with_focus("x" * MAX_UNIT_REVIEW_FOCUS_BYTES))
+        # Hangul is three bytes a character: 50 fit in 150 bytes, 51 do not.
+        build_fanout_contract("split work", self._with_focus("가" * (MAX_UNIT_REVIEW_FOCUS_BYTES // 3)))
+        for bad in ("x" * (MAX_UNIT_REVIEW_FOCUS_BYTES + 1), "가" * (MAX_UNIT_REVIEW_FOCUS_BYTES // 3 + 1), ["a list"]):
+            with self.subTest(bad=type(bad).__name__), self.assertRaisesRegex(FanoutContractError, "review_focus"):
+                build_fanout_contract("split work", self._with_focus(bad))
 
 
 if __name__ == "__main__":

@@ -20,11 +20,15 @@ from .common import _paths, _print_json
 
 def cmd_docs_agent_skills(args: argparse.Namespace) -> int:
     from ..install.agent_skills_projection import MANIFEST_NAME, agent_skill_files, agent_skills_manifest
-    from ..skills.host_adapter_render import host_adapter_files
+    from ..skills.host_adapter_render import host_adapter_files, host_pack_tree
 
     root = Path(args.output or "agent-skills").expanduser().absolute()
     skill_files = agent_skill_files()
     adapters = host_adapter_files(skill_files)
+    # A host's own pack (the Claude copy under `.claude/agent-skills`), gated
+    # like the canonical tree: missing, stale and extra files all fail.
+    host_packs = host_pack_tree(skill_files)
+    pack_dirs = sorted({"/".join(relative.split("/")[:2]) for relative in host_packs})
     # The pack's one digest inventory: the exact receipt every installer copies.
     files = {**skill_files, MANIFEST_NAME: json.dumps(agent_skills_manifest(skill_files), indent=2, sort_keys=True) + "\n"}
     try:
@@ -44,11 +48,26 @@ def cmd_docs_agent_skills(args: argparse.Namespace) -> int:
                      or not (root.parent / path).is_file()
                      or (root.parent / path).read_bytes() != content.encode("utf-8"))
             )
-            payload = {"ok": not (missing or extra or stale or adapter_missing or adapter_stale),
+            pack_actual = {
+                path.relative_to(root.parent).as_posix()
+                for directory in pack_dirs for path in (root.parent / directory).rglob("*")
+                if path.is_file() or path.is_symlink()
+            }
+            pack_missing = sorted(host_packs.keys() - pack_actual)
+            pack_extra = sorted(pack_actual - host_packs.keys())
+            pack_stale = sorted(
+                relative for relative in host_packs.keys() & pack_actual
+                if (root.parent / relative).is_symlink()
+                or (root.parent / relative).read_bytes() != host_packs[relative].encode("utf-8")
+            )
+            payload = {"ok": not (missing or extra or stale or adapter_missing or adapter_stale
+                                  or pack_missing or pack_extra or pack_stale),
                        "checked": str(root), "missing": missing, "stale": stale,
                        "extra": extra, "file_count": len(files),
                        "adapter_file_count": len(adapters),
-                       "adapter_missing": adapter_missing, "adapter_stale": adapter_stale}
+                       "adapter_missing": adapter_missing, "adapter_stale": adapter_stale,
+                       "host_pack_file_count": len(host_packs), "host_pack_missing": pack_missing,
+                       "host_pack_stale": pack_stale, "host_pack_extra": pack_extra}
             _print_json(payload)
             return 0 if payload["ok"] else 1
         for relative, content in files.items():
@@ -58,9 +77,12 @@ def cmd_docs_agent_skills(args: argparse.Namespace) -> int:
             atomic_write_text(path, content)
             if path.suffix == ".sh":
                 path.chmod(0o755)
+        for relative, content in host_packs.items():
+            atomic_write_text(root.parent / relative, content)
     except OSError as exc:
         raise OmhError(f"Agent Skills docs projection failed: {exc}") from exc
-    _print_json({"written": str(root), "file_count": len(files), "adapter_file_count": len(adapters)})
+    _print_json({"written": str(root), "file_count": len(files), "adapter_file_count": len(adapters),
+                 "host_pack_file_count": len(host_packs)})
     return 0
 
 
@@ -478,6 +500,17 @@ def cmd_docs_skill_sources(args: argparse.Namespace) -> int:
     return 1 if args.check and not payload["ok"] else 0
 
 
+def cmd_docs_hermes_skill_parity(args: argparse.Namespace) -> int:
+    from ..skills.hermes_parity import hermes_skill_parity_markdown, hermes_skill_parity_payload
+
+    payload = hermes_skill_parity_payload()
+    if args.json:
+        _print_json(payload)
+    else:
+        print(hermes_skill_parity_markdown(), end="")
+    return 1 if args.check and not payload["ok"] else 0
+
+
 def _add_docs_commands(sub) -> None:
     docs = sub.add_parser("docs", help="Render or check generated OMH workflow reference docs.")
     docs_sub = docs.add_subparsers(dest="docs_command", required=True)
@@ -517,6 +550,17 @@ def _add_docs_commands(sub) -> None:
     skill_sources.add_argument("--json", action="store_true", help="Print the machine-readable skill_source_closure_audit/v1 payload.")
     skill_sources.add_argument("--root", default=".", help="Repository tree holding the registry and the receipt ledger.")
     skill_sources.set_defaults(func=cmd_docs_skill_sources)
+
+    hermes_parity = docs_sub.add_parser(
+        "hermes-skill-parity",
+        help=(
+            "Audit OMH skill value mechanisms and upstream Hermes bundled/optional skill boundaries "
+            "offline against the pinned upstream snapshot (maintainers)."
+        ),
+    )
+    hermes_parity.add_argument("--check", action="store_true", help="Exit 1 when any parity or value-mechanism finding is reported.")
+    hermes_parity.add_argument("--json", action="store_true", help="Print the machine-readable omh_hermes_skill_parity/v1 payload.")
+    hermes_parity.set_defaults(func=cmd_docs_hermes_skill_parity)
 
     docs_agents = docs_sub.add_parser("agent-skills", help="Generate or byte-check the portable Agent Skills tree (maintainers).")
     docs_agents.add_argument("--output", default=None, help="Projection root (default: agent-skills).")

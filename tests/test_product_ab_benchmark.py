@@ -386,14 +386,14 @@ class SolutionLeakTests(unittest.TestCase):
         """
 
         for raw in (
-            "config at /Users/nashmbp/.hermes/config.yaml; see above",
+            "config at /Users/demo/.hermes/config.yaml; see above",
             "it lives in /home/someone/.config/omh",
             "or C:\\Users\\someone\\AppData",
         ):
             with self.subTest(raw=raw):
                 redacted = corpus.redact_home_directories(raw)
                 self.assertIn("<home>", redacted)
-                for name in ("nashmbp", "someone"):
+                for name in ("demo", "someone"):
                     self.assertNotIn(name, redacted)
 
     def test_redaction_leaves_an_ordinary_repository_path_alone(self) -> None:
@@ -1160,13 +1160,26 @@ class ArmTests(unittest.TestCase):
         called the product's assembler, so earlier records and later ones
         measured the same `PROMPT_PROFILE`. An intentional prompt-text change
         moves them; re-derive and say so in the commit.
+
+        Re-derived when the goal echo-back's conflict sentence changed (the
+        brief now outranks repository workflow rules). Swapping only that
+        sentence back reproduces the earlier digests exactly: 9cd6b796...,
+        5ddf4d61..., 742a3d95..., ce81f8ca.... Re-derived again when the unit
+        scope became the whole checkout; the earlier scope (`src/`, `tests/`,
+        the completion file) reproduces ad293b0f..., 94513d23...,
+        8c509a9f..., c8035549.... Re-derived again for `deepseek-v4.1-flash`
+        only, when its override gained the answer-shape sentence; the shipped
+        override without it reproduces 71bd7ad0.... Re-derived again when the
+        unit section gained `SHARED_MACHINE_PROTOCOL` after tool batching;
+        removing that one line reproduces dc2410dc..., d46fdef2...,
+        945cfd3c..., b4ca61c1....
         """
 
         recorded = {
-            ("gpt-6-astra", "high", "gpt"): "9cd6b7960f4320ac61c44e5ec3784f5c67a0ee39f301ef7d7c778ac0ffb2b8f1",
-            ("gpt-6.1-sol", "medium", "gpt"): "5ddf4d61966d43b35f446969d34e5ce7342cbb0e5a2d0c526a89de5e5a5339f1",
-            ("deepseek-v4.1-flash", "high", "deepseek"): "742a3d95bb9a95ec8d92858ede09b46df853073e1aa51178a0f61e6e5dcb5d21",
-            ("claude-fable-5-1", "xhigh", "claude"): "ce81f8cabfb0fda36457cc9eec9877ab282fa6538082f6ff654a00cdbd856603",
+            ("gpt-6-astra", "high", "gpt"): "0b03a16a8bbfab42f32867010f99df7fe2780e254294200e3d30791e24fcf4a3",
+            ("gpt-6.1-sol", "medium", "gpt"): "718b286878f09c2a773964df1a4b32d647dd8bdf746a465e1abba00c2e1b0878",
+            ("deepseek-v4.1-flash", "high", "deepseek"): "350738ad052a0bc0648efc5a63eb6552184f5cf24fa52c143ca6366cd1cb91b3",
+            ("claude-fable-5-1", "xhigh", "claude"): "05e17c5107a384f979cba6dba0e009481ac6f60ec89b5759c0c6706804670915",
         }
         for (model, effort, family), digest in recorded.items():
             route = {
@@ -1308,9 +1321,23 @@ class ArmTests(unittest.TestCase):
         )
         delegated = arms.delegation_prompt("Do the thing.", unit)
         first = next(line for line in delegated.splitlines() if line.startswith("1. "))
-        self.assertIn(lane.COMPLETION_FILE, first)
+        self.assertIn(arms.WHOLE_CHECKOUT_SCOPE, first)
         self.assertTrue(runner.completion_file_in_scope(arms.unit_file_scope()))
+        self.assertTrue(runner.completion_file_in_scope([".omh-product-ab-completion.json"]))
         self.assertFalse(runner.completion_file_in_scope(["src/", "tests/"]))
+
+    def test_the_omh_arm_may_edit_what_the_hermes_arm_may(self) -> None:
+        """A scope narrower than the Hermes arm's measured a different task.
+
+        The Hermes arm's prompt never fences it in. Scoped to `src/` and
+        `tests/`, the OMH arm alone could not regenerate `docs/WORKFLOWS.md`
+        or a skill body, which a catalog change in this repository requires
+        and a regression module compares byte for byte.
+        """
+
+        self.assertEqual(arms.unit_file_scope(), ["./"])
+        self.assertNotIn("Stay strictly inside", arms.base_prompt("Do the thing."))
+        self.assertNotIn("Every edit stays inside", arms.base_prompt("Do the thing."))
 
     def test_the_criterion_names_the_command_the_gate_runs(self) -> None:
         """One function renders the criterion and builds the gate's argv.
@@ -1755,6 +1782,29 @@ class MatrixTests(unittest.TestCase):
             runner.approximate_cost_usd(
                 "gpt-5.6-sol", {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0}
             )
+        )
+
+    def test_cache_reads_inside_input_are_priced_once(self) -> None:
+        """Hermes' usage file counts cache reads inside `input_tokens` on Codex.
+
+        `total_tokens` is exactly input plus output there, so the cache reads
+        are already in `input_tokens`. Pricing both buckets charged every
+        cached token twice, and a $4.98 task read as $35.77.
+        """
+
+        inclusive = {
+            "input_tokens": 6_662_035,
+            "cache_read_tokens": 6_431_616,
+            "output_tokens": 22_033,
+            "total_tokens": 6_684_068,
+        }
+        uncached = {**inclusive, "input_tokens": 230_419, "total_tokens": None}
+        cost = runner.approximate_cost_usd("gpt-5.6-sol", inclusive)
+        self.assertAlmostEqual(cost, runner.approximate_cost_usd("gpt-5.6-sol", uncached), places=9)
+        self.assertLess(cost, 5.0)
+        # Without a total the reading cannot be told apart, so it is priced as given.
+        self.assertGreater(
+            runner.approximate_cost_usd("gpt-5.6-sol", {**inclusive, "total_tokens": None}), 29.0
         )
 
 

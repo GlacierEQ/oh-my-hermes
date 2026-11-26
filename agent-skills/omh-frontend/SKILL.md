@@ -1,6 +1,6 @@
 ---
 name: "omh-frontend"
-description: "[omh] Building or polishing a web or terminal UI: prepare design-system-driven web and terminal (TUI) UI creation, redesign, polish, accessibility, performance, and visual QA handoffs. Use when the user says: frontend, front-end, front end, frontend skill, in the frontend, on the frontend, to the frontend, web ui."
+description: "[omh] Building or polishing a web or terminal UI."
 license: MIT
 compatibility: "Requires the omh CLI on PATH (pip install oh-my-hermes)."
 metadata:
@@ -30,27 +30,11 @@ This is an OMH `frontend` workflow skill, projected for Agent Skills hosts (Clau
 
 ## Examples
 
-Good example:
-
-- Prompt: frontend 이 대시보드가 AI 티 안 나게 레이아웃과 디자인 시스템을 잡아줘.
-- Expected behavior: Prepare frontend_design_brief/v1, design_system_contract/v1, route/state matrix, implementation handoff, and visual_qa_required/v1.
-- Why: The request is about web UI design, layout quality, and anti-generic frontend polish.
-
-Bad example:
-
-- Prompt: frontend 코드도 안 봤지만 Lighthouse랑 시각 QA 통과했다고 해줘.
-- Expected behavior: Mark browser, performance, accessibility, and visual QA as not_observed and request the smallest observed evidence path.
-- Why: A frontend brief is not implementation, browser, performance, or visual QA evidence.
+Read `references/details.md` first.
 
 ## Completion Checklist
 
-- The target page/component, audience, primary task, references, and quality bar are named.
-- Greenfield work includes frontend_initial_generation_contract/v1 before implementation handoff.
-- The design_system_contract/v1 covers typography, spacing, palette, components, layout, motion, and responsive rules.
-- The frontend_route_state_matrix/v1 covers pages, 375/768/1280-style breakpoints, empty/loading/error, interaction, and CJK/locale risks.
-- The frontend_component_state_inventory/v1 covers reusable primitives and their default/hover/focus/active/disabled/loading/empty/error states.
-- The handoff names the executor/runtime owner and keeps code, browser, Lighthouse, accessibility, deployment, and visual QA evidence observed-only.
-- The next action is prepare_frontend_handoff, route to visual-qa, or report the missing evidence blocker.
+Read `references/details.md` first.
 
 ## Recovery Notes
 
@@ -63,7 +47,7 @@ Bad example:
 
 Use when Hermes should shape or improve a web/frontend or terminal (TUI) surface before implementation: layout, design system, responsive states, accessibility, performance, motion, and anti-generic visual quality.
 
-    Strong routing signals: `frontend`, `front-end`, `front end`, `frontend skill`, `in the frontend`, `on the frontend`, `to the frontend`, `web ui`, `ui ux`, `ui/ux`, `landing page`, `web app layout`, `responsive layout`, `responsive design`, `design system`, `component polish`, `layout polish`, `visual polish`, `styling`, `animation`, `motion design`, `smooth scroll`, `smooth scrolling`, `scroll animation`, `scroll animations`, `parallax scroll`, `parallax hero`, `parallax effect`, `chart styling`, `chart theming`, `chart colors`, `dashboard charts`, `style the charts`, `theme the charts`, `tooltip`, `footer design`, `better footer`, `site footer`, `website footer`, `neobrutalism`, `neobrutalism style`, `neobrutalist`, `neo brutalism`, `neo-brutalism`, `logo marquee`, `marquee animation`, `scrolling marquee`, `split text animation`, `split-text animation`, `shadcn`, `component registry`, `accessibility`, `wcag`, `lighthouse`, `core web vitals`, `make it beautiful`, `make it premium`, `make it less ai`, `ai-looking ui`, `ai slop ui`, `slop ui`, `looks like ai slop`, `look like ai slop`, `feels like ai slop`, `screams ai slop`, `generic ui`, `broken layout`, `layout broken`, `frontend qa`, `frontend layout`, `tui design`, `terminal ui design`, `tui layout`, `フロントエンド`, `ランディングページ`, `レスポンシブ対応`, `デザインシステム`, `画面のUI実装`, `スムーススクロール`, `スクロールアニメーション`, `パララックス`, `チャートのスタイル`, `チャートスタイル`, `フッターデザイン`, `ネオブルータリズム`, `ロゴマーキー`, `프론트엔드`, `웹 ui`, `웹 화면`, `랜딩페이지`, `레이아웃`, `레이아웃 깨짐`, `깨짐`, `디자인 자연스럽게`, `자연스러운 디자인`, `화려하게`, `고급스럽게`, `부드러운 스크롤`, `스크롤 부드럽게`, `스크롤 애니메이션`, `패럴랙스`, `ai 티`, `ai틱`, `ai 틱`, `반응형`, `접근성`, `차트 스타일`, `차트 스타일링`, `차트 테마`, `푸터 디자인`, `네오브루탈리즘`, `로고 마키`, `마키 애니메이션`, `스플릿 텍스트`, `前端`, `落地页`, `响应式布局`, `设计系统`, `平滑滚动`, `滚动动画`, `视差滚动`, `图表样式`, `页脚设计`, `新粗野主义`, `跑马灯`, `bangun antarmuka UI frontend`, `bantu bikin landing page`, `rapikan tampilan frontend`, `buat halaman yang responsif`, `implementasikan desain UI`, `rancang antarmuka terminal`, `tambahkan animasi scroll`, `desain ulang tampilan dashboard`, `xây dựng giao diện frontend`, `giúp tạo landing page`, `cải thiện giao diện frontend`, `tạo trang có bố cục responsive`, `thực hiện thiết kế UI`, `thiết kế giao diện terminal`, `thêm hiệu ứng scroll`, `thiết kế lại giao diện dashboard`
+    Strong routing signals: `frontend`, `front-end`, `front end`, `frontend skill`; all of them in `references/details.md`.
 
 ## Catalog Metadata
 
@@ -79,31 +63,32 @@ Quality bar:
 - Name the model's own default aesthetic before inheriting it — the editorial prior of cream grounds, serif display faces, and muted terracotta accents suits editorial, portfolio, and hospitality briefs and is a failure mode on dashboards, developer tools, fintech, and data-dense UIs. Treat a generic negation ("don't make it look AI", "make it minimal") as unactionable: an override counts only when it carries concrete tokens, a hex palette and a typeface stack recorded in DESIGN.md. Run the review prompts in `references/taste-foundations.md` over framework blue, glass and gradient surfaces, default UI typefaces, bounce easing, blanket shadows, eyebrow/title/description stuffing, uniform column grids, and CJK body under the 14px Korean floor.
 - When the target surface is a terminal UI (TUI), load `references/tui-craft.md` and hold the same bar there: default widgets are scaffolding, not finished UI; borders spent sparingly with spacing and a muted-color ladder doing the hierarchy; one named terminal aesthetic; verification rendered at 80x24 and 120x40 minimum with the pasted output as the screenshot-equivalent.
 - Use references and domain fit to avoid generic AI-looking frontend output; when the user supplies a visual reference, load `references/reference-token-extraction.md` and extract tokens into the contract instead of eyeballing.
+- Design to code: when the reference is a Figma frame (a figma.com link with a node id), read it through the host's Figma MCP server (when its tools are not available, say so and stop), and follow the Figma frame section of `references/reference-token-extraction.md`; the frame becomes DESIGN.md tokens and a frontend handoff to the coding owner the person chose, never a pixel copy.
 - Prepare a concrete design-system contract before implementation handoff: load `references/design-system-contract.md` and write DESIGN.md before the first component — no component code before the contract exists. A new DESIGN.md is Google's DESIGN.md format (YAML token front matter, its sections in its order) plus OMH's own sections; a file in OMH's earlier numbered layout stays valid and is converted only when the user asks. When Hermes' bundled `design-md` skill is available, author, lint, diff, or export a file in the format through it, never a file in the earlier layout; lint is evidence only from a run that executed, otherwise `not_observed`.
 - Query the local design reference data before fixing tokens: `omh design data --kind palette|font|ux --context <product context>` returns curated palettes, font stacks with CJK notes, and UX guidelines offline. Those rows inform DESIGN.md; the contract, not the query, still gates the code.
 - Scroll-driven motion is a decision with a bill: load `references/scroll-motion-libraries.md`, take the native path (CSS `scroll-behavior`, scroll-driven animations, `IntersectionObserver`, scroll-snap) unless one interpolated scroll position feeds several consumers, and when a library is chosen (Lenis is the reviewed record) name its reduced-motion branch, anchors, nested scroll, teardown, and INP budget in the contract.
 - Copied component source is the project's to fix: before adopting from a shadcn-style registry, load `references/component-registry-adoption.md` (license, dependencies, reduced motion, ARIA, keyboard/touch, token mapping, one hero effect per view). Theme charts through tokens, not config literals: load `references/chart-styling.md`.
+- A 3D or canvas scene (WebGL, a three.js-style engine, a voxel world) is judged on its first frame: load `references/rendered-scene-craft.md`, boot on the view the scene's own title and copy promise, light it with a warm-or-cool key, a sky fill, explicit tone mapping, shadows, and fog, and make every small animated object read as what it is. A clean console is not a finished scene.
 - For first-time UI creation, name the initial generation branch, reference direction, reusable primitives, state coverage, and required visual QA path.
 - Cover responsive layout, empty/loading/error states, hover/focus/active states, CJK text, accessibility, and performance expectations.
+- For a new page or a redesign, load `references/editorial-layout.md` before choosing the layout.
+- For a surface people use on a phone, load `references/mobile-density-gate.md`; measure with `toolkit/scripts/phone_check.py` (setup in `toolkit/README.md`: `skill_view(name='omh-frontend', file_path='toolkit/README.md')`) when a browser is available, otherwise the measurement is `not_observed`.
+- When the surface reads or writes remote data, load the `omh-frontend-refactor` skill's `omh-frontend-refactor/references/state-discipline.md` (sections 1 and 4-6) before writing the component: server state lives in a query cache, each mutation names the query keys it invalidates, and an optimistic write ships with its rollback.
+- When the surface has a form, a text composer, or a dialog, load `references/forms-and-input.md` before writing it: labelled controls, errors shown after the user commits a value, server field errors mapped onto their fields, one submit in flight, an Enter-to-send that waits for IME composition, and focus returned when a dialog closes.
+- Check the browser-support target before using a newer platform feature: a feature newer than the target (by default, anything only Baseline Newly available) needs feature detection plus a fallback, or a deliberate target change; suggest recording the target in the repository's agent instruction file (`omh-agent-instructions` owns that file).
 - State performance as a budget, not an adjective: load `references/web-vitals-budgets.md`, name one metric with its published bar (LCP, INP, CLS), the device and network class it is judged on, the route and load shape, and the baseline captured under that same profile - before the change. A budget chosen after seeing the result describes what happened instead of gating it.
 - Attribute before optimizing: name the LCP element and its dominant phase, the interaction that produced the worst INP and where the time went, or the node that shifted and what moved above it. A list of optimizations with no attribution is folklore, and a change that improved a different element than the one attributed did not fix the metric.
 - Keep field and lab apart: a p75 claim needs field data, a lab audit is a diagnostic sample on one device profile, and a lab pass is never a statement about real users.
+- While building, look at each change that affects what renders: after it, capture the affected surface and read the capture before the next change, for a 3D or canvas scene the default camera and each declared preset; a change not looked at is not done (`references/screenshot-loop.md`, section `During implementation`).
 - After implementation lands on a web surface, load `references/screenshot-loop.md` and require the screenshot iteration loop live-environment-first: capture the running UI at 1440/768/375px, compare against the supplied target or DESIGN.md, list every difference triaged Blocker/High/Medium/Nit with its capture attached, fix, and recapture until the difference list is empty.
+- Judge each capture against the reference at the size and density people will see it (the real viewport, the real icon size such as a 24 px toolbar slot), not only a large render; exercise an interactive result with the actions it supports before calling it done.
 - Prefer native UI controls, stable dimensions, and realistic content over decorative cards, blobs, and placeholder-heavy screens.
+- When the handoff asks for component or interaction tests, read `../omh-verification-gate/references/test-authoring.md` and name the seam each test drives: assert through what a user perceives (role, accessible name, visible text) across the frontend_component_state_inventory/v1 states, never class names or component-internal state, and fake only at the boundaries the shared page lists (network, clock, randomness).
 - Keep implementation, browser verification, accessibility/performance checks, visual QA, and deployment as observed-only evidence.
 
 Required inputs:
 
-- target app, page, route, or component
-- audience and primary user task
-- existing design system or missing-system gap
-- style references or quality bar
-- initial generation mode or redesign mode
-- DESIGN.md or design-system source of truth when available
-- framework/stack when known
-- routes, states, breakpoints, and locale/CJK risks
-- accessibility and performance constraints
-- observed browser evidence for completion claims
+Read `references/details.md` first.
 
 Expected outputs:
 
@@ -121,14 +106,7 @@ Expected outputs:
 
 Artifact expectations:
 
-- frontend_design_brief/v1 when prepared
-- frontend_initial_generation_contract/v1 declares DESIGN.md/design-system work, reference lane, token extraction, reusable primitives, and visual QA path before new UI code
-- design_system_contract/v1 with layout, spacing, typography, color, component, motion, and responsive rules
-- design_reference_selection/v1 names supplied references or the domain-fit style direction and explicitly avoids copying third-party logos, assets, or brand copy
-- frontend_route_state_matrix/v1 with pages, states, viewports, CJK/locale, empty/loading/error, and interaction states
-- frontend_component_state_inventory/v1 with default, hover, focus, active, disabled, loading, empty, and error states for reusable primitives
-- frontend_implementation_handoff/v1 for the selected executor/runtime
-- browser screenshots, accessibility reports, Lighthouse/Core Web Vitals, and visual QA only when observed
+Read `references/details.md` first.
 
 Safety rules:
 

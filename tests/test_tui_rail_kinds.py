@@ -7,7 +7,7 @@ details) is one row, and any other call ends the run; a shell call that feeds a
 script through a heredoc names the script and counts its lines. An agent row
 reads a short title, and the model leads its figures. A `/name` that resolves
 to a command or a skill is bold in the skill hue in the composer, in the echoed
-prompt and on the sticky `↳ you:` row; a path, an unknown `/foo` and a slash
+prompt; a path, an unknown `/foo` and a slash
 inside a word stay plain.
 """
 
@@ -23,10 +23,10 @@ from test_tui_panels import agent_row, hud_payload, with_agents
 from test_tui_prompts import CLARIFY, slot
 from test_tui_subagents import feed
 from omh.skin_pack import SKIN_THEMES
-from omh.tui.app import ATTACH_ICON, STATE_WAITING, WAITING_GLYPH, App, Attachment, attachment_line
+from omh.tui.app import STATE_WAITING, WAITING_GLYPH, App
 from omh.tui.composer import Composer
 from omh.tui.diff_view import diff_rows, parse_inline_diff
-from omh.tui.frame import build_frame, sticky_line
+from omh.tui.frame import build_frame
 from omh.tui.gateway import Event, Response
 from omh.tui.history import SEARCH_LABEL, HistorySearch
 from omh.tui.keys import CHAR, Key
@@ -41,7 +41,6 @@ from omh.tui.theme import DEFAULT_THEME as THEME
 from omh.tui.theme import KIND_FAMILIES, TEXT_CONTRAST, build_theme, contrast_ratio, kind_style, surface_for, tool_family
 from omh.tui.transcript import (
     NOTICE_INFO,
-    STEER_MARK,
     STEER_QUEUED,
     TOOL_ERROR,
     TOOL_GENERATING,
@@ -170,7 +169,7 @@ class GroupingTests(unittest.TestCase):
     def test_any_other_call_breaks_the_run(self) -> None:
         rows = calls(loaded("a", "dag-ulw"), ToolRow("b", "terminal", "pwd", TOOL_OK, duration_s=0.1),
                      loaded("c", "hermes-agent"), loaded("d", "omh-terminal"))
-        self.assertEqual(rows, ["┃ ● Loaded 1 skill · dag-ulw  0.7s", "", "┃ ● terminal(pwd)  0.1s", "",
+        self.assertEqual(rows, ["┃ ● Loaded 1 skill · dag-ulw  0.7s", "", "", "┃ ● terminal(pwd)  0.1s", "", "",
                                 "┃ ● Loaded 2 skills · hermes-agent, omh-terminal  1.4s"])
 
     def test_tool_details_alone_and_a_folded_name_in_the_skill_hue(self) -> None:
@@ -184,23 +183,23 @@ class GroupingTests(unittest.TestCase):
         self.assertEqual(running, ["┃ ○ Loaded 2 skills · dag-ulw, hermes-agent"])  # no time until each has one
         failed = ToolRow("b", "skill_view", "nope", TOOL_ERROR, duration_s=0.1, output=("Skill not found: nope",))
         rows = calls(loaded("a", "dag-ulw"), failed, loaded("c", "hermes-agent"))
-        self.assertEqual(rows, ["┃ ● Loaded 1 skill · dag-ulw  0.7s", "", "┃ ✗ skill_view(nope)  0.1s",
-                                "┃   ⎿  Skill not found: nope", "", "┃ ● Loaded 1 skill · hermes-agent  0.7s"])
+        self.assertEqual(rows, ["┃ ● Loaded 1 skill · dag-ulw  0.7s", "", "", "┃ ✗ skill_view(nope)  0.1s",
+                                "┃   ⎿  Skill not found: nope", "", "", "┃ ● Loaded 1 skill · hermes-agent  0.7s"])
 
     def test_a_draft_or_a_cut_off_call_is_not_counted_as_loaded(self) -> None:
         # #2223 review 6: a draft names nothing yet (an empty label left `· x, ,`), a cut-off call loaded nothing.
         draft = ToolRow("b", "skill_view", "", TOOL_GENERATING)
         self.assertEqual(calls(loaded("a", "dag-ulw"), loaded("c", "hermes-agent"), draft),
-                         ["┃ ● Loaded 2 skills · dag-ulw, hermes-agent  1.4s", "", "┃ ◌ skill_view"])
+                         ["┃ ● Loaded 2 skills · dag-ulw, hermes-agent  1.4s", "", "", "┃ ◌ skill_view"])
         cut = ToolRow("b", "skill_view", "omh-docs", TOOL_INTERRUPTED)
         self.assertEqual(calls(loaded("a", "dag-ulw"), cut),
-                         ["┃ ● Loaded 1 skill · dag-ulw  0.7s", "", "┃ ▪ skill_view(omh-docs)"])
+                         ["┃ ● Loaded 1 skill · dag-ulw  0.7s", "", "", "┃ ▪ skill_view(omh-docs)"])
         nameless = ToolRow("d", "skill_view", "", TOOL_OK, duration_s=0.1)
         self.assertEqual(calls(loaded("a", "dag-ulw"), nameless), ["┃ ● Loaded 2 skills · dag-ulw  0.8s"])
 
     def test_the_details_view_unfolds_the_run(self) -> None:
         rows = calls(loaded("a", "dag-ulw"), loaded("b", "hermes-agent"), expanded=True)
-        self.assertEqual(rows, ["┃ ● skill_view(dag-ulw)  0.7s", "┃   ⎿  loaded skill dag-ulw", "",
+        self.assertEqual(rows, ["┃ ● skill_view(dag-ulw)  0.7s", "┃   ⎿  loaded skill dag-ulw", "", "",
                                 "┃ ● skill_view(hermes-agent)  0.7s", "┃   ⎿  loaded skill hermes-agent"])
 
     def test_a_turn_counts_every_folded_call(self) -> None:
@@ -387,18 +386,6 @@ class SlashTokenTests(unittest.TestCase):
         self.assertTrue({"dag-ulw", "model", "help"} <= names)
         self.assertNotIn("update", names)  # Hermes' own TUI runs it, not this one
 
-    def test_a_cut_through_a_token_leaves_no_half_of_it_coloured(self) -> None:
-        # #2223 review 14: the sticky row cuts its words before it colours them; `/dag-ulw` cut to `/dag` is not
-        # the `/dag` command either.
-        known = frozenset({"dag-ulw", "dag"})
-        for width in range(9, 16):
-            sticky = sticky_line("/dag-ulw go on", width, THEME, known)
-            with self.subTest(width=width, row=line_text(sticky)):
-                self.assertTrue(line_text(sticky).endswith("…"))
-                self.assertFalse([span for span in sticky if span.style == THEME.slash])
-        whole = sticky_line("/dag-ulw go on and on", 18, THEME, known)
-        self.assertEqual([span.text for span in whole if span.style == THEME.slash], ["/dag-ulw"])
-
     def test_a_resumed_prompt_keeps_the_highlight(self) -> None:
         # #2223 review 9: a resumed session's prompt rows read `known` as a live prompt's do.
         app, _client = make_app(rows=40, cols=100)
@@ -414,15 +401,19 @@ class SlashTokenTests(unittest.TestCase):
         self.assertEqual(prompt_tokens(app), [[], ["/model"]])  # what the first frame prints
         app.transcript.add_user("/dag-ulw now", known=app.known_slash)  # a live prompt keeps what it was sent with
         answer_catalog(app, client, [["/dag-ulw", "Graph work"]])
+        tokens = prompt_tokens(app)  # read before the frame below prints them
+        app._render()  # the redraw's erase goes out with its first frame
         self.assertIn(CLEAR_SCREEN_AND_SCROLLBACK, "".join(app.terminal.writes))
-        self.assertEqual(prompt_tokens(app), [["/dag-ulw"], ["/model"], []])
+        self.assertEqual(tokens, [["/dag-ulw"], ["/model"], []])
 
     def test_a_catalog_that_resolves_no_resumed_prompt_otherwise_redraws_nothing(self) -> None:
         app, client = resumed([{"role": "user", "text": "/model x"}, {"role": "user", "text": "read src/dag-ulw"}])
         self.assertEqual(prompt_tokens(app), [["/model"], []])
         answer_catalog(app, client, [["/dag-ulw", "Graph work"]])
+        tokens = prompt_tokens(app)  # read before the frame below prints them
+        app._render()  # a redraw's erase would go out with this frame
         self.assertNotIn(CLEAR_SCREEN_AND_SCROLLBACK, "".join(app.terminal.writes))
-        self.assertEqual(prompt_tokens(app), [])  # nothing is printed again
+        self.assertEqual(tokens, [])  # nothing is printed again
 
     def test_a_moved_prompt_above_the_redrawn_tail_redraws_nothing(self) -> None:
         # #2225 review F1: a full redraw reprints only the last `REDRAW_TAIL_ROWS` rows; one for a prompt above them
@@ -433,6 +424,7 @@ class SlashTokenTests(unittest.TestCase):
             app, client = resumed(history)
             self.assertEqual(prompt_tokens(app), [])  # the tail the first frame prints holds no prompt
             answer_catalog(app, client, [["/dag-ulw", "Graph work"]])
+        app._render()  # a redraw's erase would go out with this frame
         self.assertNotIn(CLEAR_SCREEN_AND_SCROLLBACK, "".join(app.terminal.writes))
         (prompt,) = [block for block in app.transcript.blocks if isinstance(block, UserBlock)]
         self.assertIn("dag-ulw", prompt.known)  # /history draws it with the catalog's names
@@ -445,8 +437,10 @@ class SlashTokenTests(unittest.TestCase):
             app, client = resumed(history)
             self.assertEqual(prompt_tokens(app), [[]])  # only the second prompt is in the tail
             answer_catalog(app, client, [["/dag-ulw", "Graph work"]])
+            tokens = prompt_tokens(app)  # read before the frame below prints them
+            app._render()  # the redraw's erase goes out with its first frame
             self.assertIn(CLEAR_SCREEN_AND_SCROLLBACK, "".join(app.terminal.writes))
-            self.assertEqual(prompt_tokens(app), [["/dag-ulw"]])
+            self.assertEqual(tokens, [["/dag-ulw"]])
 
     def test_the_composer_draws_a_known_name_bold_in_the_skill_hue(self) -> None:
         # `/dag-ulw` itself is drawn in the aura (`test_tui_aura`), over its `/name` colour: `/model` stands for the rest.
@@ -457,16 +451,6 @@ class SlashTokenTests(unittest.TestCase):
         self.assertEqual(THEME.slash, THEME.kinds[KIND_FAMILIES.index("skill")])  # a skill reads as its loads do
         plain = build_frame(cols=60, rows=24, composer=Composer(text="/model go"), info=(Span("info"),))
         self.assertFalse([span for line in plain.lines for span in line if span.style == THEME.slash])
-
-    def test_the_echoed_prompt_and_the_sticky_row_draw_it_too(self) -> None:
-        (echo,) = block_rows(UserBlock("/dag-ulw go a/dag-ulw", known=KNOWN), 60, THEME)
-        self.assertEqual(line_text(echo), "┃ ❯ /dag-ulw go a/dag-ulw")
-        self.assertEqual([span.text for span in echo if span.style == THEME.slash], ["/dag-ulw"])
-        sticky = sticky_line("/dag-ulw go /foo", 60, THEME, KNOWN)
-        self.assertEqual(line_text(sticky), "↳ you: /dag-ulw go /foo")
-        self.assertEqual([span.text for span in sticky if span.style == THEME.slash], ["/dag-ulw"])
-        self.assertFalse([span for span in sticky_line("/dag-ulw go", 60, THEME) if span.style == THEME.slash])
-
 
 class TinyWidthTests(unittest.TestCase):
     def test_no_railed_row_is_wider_than_a_tiny_terminal(self) -> None:
@@ -503,6 +487,8 @@ class RunningBlueTests(unittest.TestCase):
         search.handle_key(Key(CHAR, "g"))
         chip = "[Pasted text #1 +60 lines]"
         composer = Composer(text=chip, pastes={chip: "x\n" * 60})
+        token = Composer()
+        token.insert_image("[Image #1]", "/x/shot.png")
         steers = [SteerBlock("look at b"), SteerBlock("look at c", STEER_QUEUED)]
         sites = {  # each site, and what it draws that the running blue once coloured
             "markdown": (rows, "• a bullet"),
@@ -510,11 +496,10 @@ class RunningBlueTests(unittest.TestCase):
             "keys": (shortcut_lines(100, THEME), "Ctrl+R"),
             "question": (question, "?"),
             "waiting": (app._tail(80), WAITING_GLYPH + STATE_WAITING),
-            "attachment": ([attachment_line([Attachment("/x/shot.png", "shot.png", "1280×720")], 60, THEME)],
-                           f"{ATTACH_ICON} shot.png"),
+            "image token": (build_frame(cols=60, rows=24, composer=token, info=(Span("info"),)).lines, "[Image #1]"),
             "history search": (search.lines(60, THEME, 4), SEARCH_LABEL),
             "paste chip": (build_frame(cols=60, rows=24, composer=composer, info=(Span("info"),)).lines, chip),
-            "steer": ([row for steer in steers for row in block_rows(steer, 60, THEME)], STEER_MARK),
+            "steer": ([row for steer in steers for row in block_rows(steer, 60, THEME)], "❯ look at c"),
         }
         for name, (lines, drawn) in sites.items():
             with self.subTest(site=name):
